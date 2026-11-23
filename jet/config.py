@@ -51,6 +51,7 @@ class Config:
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
     flaky_retry: bool = True          # 計時類項目（timing_items）新紅：先在同一個提交上只重跑那幾項，第二次綠就當抖動放過（門檻不放寬）
+    main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
     recheck_red: bool = True          # 自測紅時，先把新紅項放在乾淨 main 上單獨重跑；main 也紅就不算這張卡的錯
     order: str = "parallel"           # review_first＝先審後測；parallel＝不分先後
@@ -121,6 +122,7 @@ def parse(d: dict) -> Config:
         order=pol.get("order", "parallel"),
         recheck_red=pol.get("recheck_red", True),
         flaky_retry=pol.get("flaky_retry", True),
+        main_red_ignore=tuple(pol.get("main_red_ignore", ())),
         timing_items=tuple(pol.get("timing_items", ("loadtime", "perf", "timeout", "card_touch", "godot_time_"))),
         source=_parse_source(d.get("source")),
     )
@@ -176,6 +178,11 @@ def _validate(c: Config) -> None:
     if not isinstance(c.flaky_retry, bool):
         raise ConfigError("policy.flaky_retry 必須是 true 或 false")
     import re as _re
+    for pat in c.main_red_ignore:
+        try:
+            _re.compile(pat)
+        except (_re.error, TypeError):
+            raise ConfigError("policy.main_red_ignore 每個都要是正規式字串：%r" % (pat,))
     for pat in c.timing_items:
         try:
             _re.compile(pat)

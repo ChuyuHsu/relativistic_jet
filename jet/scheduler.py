@@ -1045,8 +1045,16 @@ class Scheduler:
                         store.add_event(c, "rejected", j.branch, why)
                 return
             main_red = (set(res.failed_items) & rec["new_red"]) if res.status in ("fail", "pass") else set()
-            if main_red:
-                self._declare_main_red(main_red, j.branch)
+            import re
+            gate_red = {i for i in main_red if not any(re.search(p, i) for p in self.cfg.main_red_ignore)}
+            if gate_red:                       # 只有範圍內（沒被 policy.main_red_ignore 排除）的項目才算「main 自己紅」並擋批次
+                self._declare_main_red(gate_red, j.branch)
+            ignored = main_red - gate_red
+            if ignored:                        # 範圍外的：寫進這個 main 的基準（批測才不會當成新紅），但不宣告 main 紅、不擋批次
+                for layer in ("gate", "selftest"):
+                    b = store.get_baseline(c, self.main, layer) or set()
+                    store.set_baseline(c, self.main, layer, b | ignored, copied=True)
+                store.add_info_event(c, "main_red_ignored", j.branch, "乾淨 main 上也紅但在 main_red_ignore 範圍外，只記錄、不擋：" + ",".join(sorted(ignored)))
             remaining = rec["new_red"] - main_red
             if remaining:
                 why = "自測紅：" + ",".join(sorted(remaining))

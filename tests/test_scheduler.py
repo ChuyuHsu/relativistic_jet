@@ -645,6 +645,17 @@ class RecheckAndGuards(Base):
         self.assertTrue(any("main 自己紅了" in d and "X" in d for d in errs))
         self.assertTrue(any(r["kind"] == "recheck" for r in self.con.execute("SELECT kind FROM runs")))
 
+    def test_main_red_ignore_scope_records_but_does_not_block(self):
+        """乾淨 main 上也紅、但在 policy.main_red_ignore 範圍外的項目：不算 main 自己紅、不擋批次，也不退卡。"""
+        self.mk(policy={"require_approval": False, "main_red_ignore": ["^X"]})
+        self.baseline_ready()
+        self.repo.main_red = {"X1"}
+        self.repo.add("a")
+        self.go(60, until=lambda: self.state("a") == "merged")
+        self.assertEqual(self.state("a"), "merged")              # 沒被擋
+        self.assertIsNone(store.get_meta(self.con, "main_red"))  # 沒宣告 main 紅
+        self.assertTrue(self.events_of("main_red_ignored"))      # 但有記錄
+
     def test_card_own_red_still_rejected_after_recheck(self):
         self.mk(policy={"require_approval": False})
         self.baseline_ready()
