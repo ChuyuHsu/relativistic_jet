@@ -72,7 +72,7 @@ test('退回後換新分支重做：看板給新分支名、phase 清掉、不�
   const e = env();
   await mk(e, 'C'); const c1 = await (await call(e, 'POST', '/api/claim', { id: 'C', owner: 'A' })).json();
   assert.equal(c1.branch, 'dev/c');   // 前綴＋卡號小寫，由看板給
-  await e.DB.prepare("UPDATE cards SET phase='rejected' WHERE id='C'").run();
+  await e.DB.prepare("UPDATE cards SET phase='rejected',last_result='{}' WHERE id='C'").run();
   assert.equal((await call(e, 'PATCH', '/api/cards/C', { branch: 'x' })).status, 400);
   const c2 = await (await call(e, 'POST', '/api/cards/C/rebranch', {})).json();
   assert.deepEqual([c2.branch, c2.phase, c2.status, c2.attempt], ['dev/c-r2', null, 'claimed', 2]);

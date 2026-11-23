@@ -1,6 +1,6 @@
-// 排隊器／CI 對接：收事件（/hooks/queue）、代呼叫排隊器的放行（經門牌）、攢批叫醒負責串（routine fire）。
-// 機密：HOOK_TOKEN（排隊器送事件用）、QUEUE_TOKEN（看板呼叫排隊器寫入用）、ROUTINE_KEY（叫醒用）。
-// 設定：QUEUE_RELAY（門牌名，預設 queue）、ROUTINE_ID、WAKE_BATCH_S（預設 300）、WAKE_MAX_PER_HOUR（預設 10）。
+// 看板不連排隊器：排隊器自己來拉清單與放行（/api/queue/desired），結果事件存在卡片上；攢批叫醒負責串（routine fire）。
+// 機密：HOOK_TOKEN（排隊器送事件、拉清單用）、ROUTINE_KEY（叫醒用）。
+// 設定：ROUTINE_ID、WAKE_BATCH_S（預設 300）、WAKE_MAX_PER_HOUR（預設 10）。
 import { bearerIs } from './auth.js';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const now = () => Math.floor(Date.now() / 1000);
@@ -31,6 +31,10 @@ export async function handleHook(req, env, ctx) {
       // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
       const to = e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
       if (to) await db.prepare('UPDATE cards SET phase=?,phase_at=?,updated_at=? WHERE id=?').bind(to, now(), now(), card.id).run();
+      if (!['approved', 'revoked'].includes(kind)) {   // 放行是看板自己的欄位，排隊器回報的放行事件不覆蓋「最新結果」
+        const res = { kind, at: e.at ?? now(), commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: Array.isArray(e.failed_items) ? e.failed_items.slice(0, 50) : null };
+        await db.prepare('UPDATE cards SET last_result=? WHERE id=?').bind(JSON.stringify(res), card.id).run();
+      }
       await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)')
         .bind(card.id, now(), source, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`).run();
     } else unmatched++;
@@ -43,20 +47,10 @@ export async function handleHook(req, env, ctx) {
   return json({ ok: true, applied, unmatched, duplicate: dup });
 }
 
-// 呼叫排隊器（經自己的門牌登記的上游），用看板自己存的寫入權杖
-export async function queueCall(env, method, path, payload) {
-  const name = env.QUEUE_RELAY || 'queue';
-  const row = await env.DB.prepare('SELECT upstream FROM relays WHERE name=?').bind(name).first();
-  if (!row) return json({ error: `排隊器門牌 ${name} 還沒登記` }, 503);
-  if (!env.QUEUE_TOKEN) return json({ error: '看板還沒設定 QUEUE_TOKEN' }, 503);
-  try {
-    const res = await fetch(row.upstream + path, {
-      method, signal: AbortSignal.timeout(10000),
-      headers: { authorization: `Bearer ${env.QUEUE_TOKEN}`, 'content-type': 'application/json' },
-      body: method === 'GET' ? undefined : JSON.stringify(payload || {}),
-    });
-    return new Response(res.body, { status: res.status, headers: { 'content-type': res.headers.get('content-type') || 'application/json' } });
-  } catch { return json({ error: '排隊器連不上（可能換網址，等它重新登記）' }, 503); }
+// 卡片上存的排隊器最新結果（事件原樣整理後存成 JSON 字串）
+export function resultOf(c) {
+  if (!c.last_result) return null;
+  try { return JSON.parse(c.last_result); } catch { return null; }
 }
 
 export function buildWakeText(owner, items) {
@@ -95,72 +89,4 @@ export async function flush(env) {
     sent++;
   }
   return { sent };
-}
-
-// 向上游排隊器查這張卡分支的真實狀態並更新快取；查不到（沒門牌、連不上、沒這條分支）就回原樣。
-export async function refreshPhase(env, card) {
-  try {
-    const res = await queueCall(env, 'GET', '/branches/' + encodeURIComponent(card.branch));
-    if (!res.ok) return { ...card, phase_live: false };
-    const b = await res.json();
-    if (!b || typeof b.state !== 'string') return { ...card, phase_live: false };
-    const t = now();
-    await env.DB.prepare('UPDATE cards SET phase=?,phase_at=? WHERE id=?').bind(b.state, t, card.id).run();
-    return { ...card, phase: b.state, phase_at: t, approved: !!b.approved, phase_live: true };
-  } catch { return { ...card, phase_live: false }; }
-}
-
-// ---- 對排隊器的寫入（登記、取消登記、放行、撤回）：先記下來再送，連不上就留著，cron 補送到成功為止 ----
-const PATH_OF = { track: '/track', untrack: '/untrack', approve: '/approve', revoke: '/revoke' };
-
-export async function enqueueSync(db, cardId, op, payload) {
-  const r = await db.prepare('INSERT INTO sync_jobs(card_id,op,payload,created_at) VALUES(?,?,?,?)')
-    .bind(cardId, op, JSON.stringify(payload), now()).run();
-  return r;
-}
-
-// 依序送出待送的呼叫。
-// 競態：請求裡的 runSync 與 cron 的 runSync 可能同時跑，所以每筆送之前先原子認領（pending→sending，
-// 影響 0 列就是別人在送，跳過）；同一張卡前面還有沒結束的（pending／剛認領的 sending），後面的一律不送，順序不亂。
-// 上游 2xx → done；4xx（401／403／408／429 除外）→ failed 不再重送、留下原因；其餘（連不上、5xx、權杖設錯）放回 pending 重送，錯誤顯示在卡片上。
-const SENDING_TIMEOUT_S = 90;
-export async function runSync(env, cardId) {
-  const db = env.DB;
-  await db.prepare("UPDATE sync_jobs SET state='pending' WHERE state='sending' AND claimed_at<?").bind(now() - SENDING_TIMEOUT_S).run();
-  const jobs = (cardId
-    ? await db.prepare("SELECT * FROM sync_jobs WHERE state IN ('pending','sending') AND card_id=? ORDER BY n LIMIT 50").bind(cardId).all()
-    : await db.prepare("SELECT * FROM sync_jobs WHERE state IN ('pending','sending') ORDER BY n LIMIT 50").all()).results;
-  const blocked = new Set();
-  let done = 0;
-  for (const j of jobs) {
-    if (blocked.has(j.card_id)) continue;
-    if (j.state === 'sending') { blocked.add(j.card_id); continue; }   // 別人正在送這筆：它之後的不搶先
-    const got = await db.prepare("UPDATE sync_jobs SET state='sending',claimed_at=? WHERE n=? AND state='pending'").bind(now(), j.n).run();
-    if (got.meta.changes !== 1) { blocked.add(j.card_id); continue; }
-    let res, msg = '';
-    try {
-      res = await queueCall(env, 'POST', PATH_OF[j.op], JSON.parse(j.payload));
-      if (!res.ok) msg = (await res.text()).slice(0, 300);
-    } catch (e) { res = { ok: false, status: 0 }; msg = '送出時出錯'; }
-    if (res.ok) {
-      await db.prepare("UPDATE sync_jobs SET state='done',tries=tries+1,done_at=?,last_error=NULL WHERE n=?").bind(now(), j.n).run();
-      done++;
-    } else if (res.status >= 400 && res.status < 500 && ![401, 403, 408, 429].includes(res.status)) {
-      await db.prepare("UPDATE sync_jobs SET state='failed',tries=tries+1,last_error=? WHERE n=?").bind(`${res.status} ${msg}`, j.n).run();
-    } else {
-      await db.prepare("UPDATE sync_jobs SET state='pending',tries=tries+1,last_error=? WHERE n=?").bind(`${res.status} ${msg}`, j.n).run();
-      blocked.add(j.card_id);
-    }
-  }
-  return { done };
-}
-
-// 卡片回傳要附的同步狀態：還沒送達幾筆、被上游拒絕幾筆（與最近一筆原因）
-export async function withSync(db, card) {
-  const r = await db.prepare("SELECT state, count(*) AS n FROM sync_jobs WHERE card_id=? AND state IN ('pending','sending','failed') GROUP BY state").bind(card.id).all();
-  const by = Object.fromEntries(r.results.map(x => [x.state, x.n]));
-  const out = { ...card, sync_pending: (by.pending || 0) + (by.sending || 0), sync_failed: by.failed || 0 };
-  if (out.sync_pending || out.sync_failed)   // 最近一筆帶錯誤的（卡在重試的，或被拒絕的）
-    out.sync_error = (await db.prepare("SELECT op,state,last_error FROM sync_jobs WHERE card_id=? AND last_error IS NOT NULL AND state IN ('pending','failed') ORDER BY n DESC LIMIT 1").bind(card.id).first()) || null;
-  return out;
 }

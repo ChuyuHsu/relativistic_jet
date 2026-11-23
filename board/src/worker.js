@@ -1,9 +1,9 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleRelay } from './relay.js';
-import { handleHook, queueCall, flush, refreshPhase, enqueueSync, runSync, withSync } from './queue.js';
-// 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄。
-// 中段（待自測、自測綠、排隊、合入、退回…）以上游排隊器的分支狀態為準，存在 phase 欄位只是快取。
+import { handleHook, flush, resultOf } from './queue.js';
+// 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
+// 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
+// 排隊器自己定時來拉 /api/queue/desired 取得該管哪些分支與放行；看板不主動連排隊器。
 const STATUSES = ['open', 'claimed', 'dropped'];
 function canMove(from, to) { return from !== to && (from !== 'dropped' || to === 'open'); }
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -16,23 +16,38 @@ async function parentBranch(db, c) {
   const p = await db.prepare('SELECT branch FROM cards WHERE id=?').bind(c.parent).first();
   return p && p.branch ? p.branch : undefined;
 }
-async function trackPayload(db, c, branch) {
-  const parent = await parentBranch(db, c);
-  return parent ? { branch, parent } : { branch };
-}
+const view = c => ({ ...c, last_result: undefined, result: resultOf(c) });
 
 async function log(db, id, actor, note) {
   await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(id, now(), actor, note).run();
+}
+
+// 給排隊器定時拉：所有「已認領、有分支、還沒合入」的卡 = 排隊器該管的分支（已放棄、釋放的不在內）。出錯一律回非 200。
+async function desired(req, env) {
+  if (req.method !== 'GET') return json({ error: 'GET only' }, 405);
+  if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
+  try {
+    const rows = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' AND branch IS NOT NULL AND (phase IS NULL OR phase!='merged') ORDER BY priority,created_at").all()).results;
+    const out = [];
+    for (const c of rows) {
+      const e = { branch: c.branch };
+      const p = await parentBranch(env.DB, c);
+      if (p) e.parent = p;
+      if (c.approved_commit) e.approved_sha = c.approved_commit;
+      out.push(e);
+    }
+    return json(out);
+  } catch { return json({ error: '看板內部錯誤' }, 500); }
 }
 
 export async function handle(req, env, ctx) {
   const url = new URL(req.url);
   const path = url.pathname;
   const db = env.DB;
-  if (path.startsWith('/relay/')) return handleRelay(req, env);
   if (path === '/hooks/queue') return handleHook(req, env, ctx);
   const write = req.method !== 'GET';
-  // 寫入要 TOKEN；讀取要 TOKEN 或 READ_TOKEN（讀取也會用看板自己的 QUEUE_TOKEN 代查排隊器，不能公開）
+  // 排隊器拉清單：HOOK_TOKEN 或 READ_TOKEN；其餘寫入要 TOKEN，讀取要 TOKEN 或 READ_TOKEN
+  if (path === '/api/queue/desired') return desired(req, env);
   if (!(write ? bearerIs(req, env.TOKEN) : bearerIs(req, env.TOKEN, env.READ_TOKEN))) return json({ error: 'unauthorized' }, 401);
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
@@ -40,38 +55,34 @@ export async function handle(req, env, ctx) {
     const rows = status
       ? await db.prepare('SELECT * FROM cards WHERE status=? ORDER BY priority,created_at').bind(status).all()
       : await db.prepare('SELECT * FROM cards ORDER BY priority,created_at').all();
-    let out = rows.results;
-    if (url.searchParams.get('live') === '1') {   // 向上游排隊器查最新狀態（最多 40 張未合入的），查不到用快取
-      const todo = out.filter(c => c.status === 'claimed' && c.branch && c.phase !== 'merged').slice(0, 40);
-      const fresh = new Map(await Promise.all(todo.map(async c => [c.id, await refreshPhase(env, c)])));
-      out = out.map(c => (fresh.has(c.id) ? fresh.get(c.id) : c));
-    }
-    return json(await Promise.all(out.map(c => withSync(db, c))));
+    return json(rows.results.map(view));
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/cards\/([^/]+)\/tests$/))) {
-    const c = await db.prepare('SELECT branch FROM cards WHERE id=?').bind(m[1]).first();
+    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c || !c.branch) return json({ error: '卡不存在或還沒有分支' }, 404);
-    return queueCall(env, 'GET', '/branches/' + encodeURIComponent(c.branch));
+    return json({ branch: c.branch, phase: c.phase, phase_at: c.phase_at, approved_commit: c.approved_commit, result: resultOf(c) });
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/cards\/([^/]+)$/))) {
-    let c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
+    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c) return json({ error: 'not found' }, 404);
-    if (c.status === 'claimed' && c.branch) c = await refreshPhase(env, c);
     const ev = await db.prepare('SELECT at,actor,note FROM events WHERE card_id=? ORDER BY n').bind(m[1]).all();
-    return json({ ...(await withSync(db, c)), events: ev.results });
+    return json({ ...view(c), events: ev.results });
   }
   const body = write ? await req.json().catch(() => ({})) : {};
   const actor = String(body.actor || 'unknown');
+  // 放行就是卡片上的欄位：approved_commit／approved_by／approved_at；撤回清空。排隊器自己來拉（/api/queue/desired）。
   if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/(approve|revoke)$/))) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c || !c.branch) return json({ error: '卡不存在或還沒有分支' }, 404);
-    if (m[2] === 'approve' && !body.commit) return json({ error: '放行要帶審過的提交 hash（commit）' }, 400);
-    const payload = m[2] === 'approve' ? { branch: c.branch, sha: String(body.commit), by: actor } : { branch: c.branch };
-    await enqueueSync(db, c.id, m[2], payload);
-    await runSync(env, c.id);   // 先試一次；連不上就留著由 cron 補送
-    const card = await withSync(db, c);
-    await log(db, c.id, actor, m[2] === 'approve' ? `放行 ${String(body.commit).slice(0, 12)}` : '撤回放行');
-    return json({ ok: true, delivered: card.sync_pending === 0 && card.sync_failed === 0, sync_pending: card.sync_pending, sync_failed: card.sync_failed, sync_error: card.sync_error }, card.sync_pending ? 202 : 200);
+    if (m[2] === 'approve') {
+      if (!body.commit) return json({ error: '放行要帶審過的提交 hash（commit）' }, 400);
+      await db.prepare('UPDATE cards SET approved_commit=?,approved_by=?,approved_at=?,updated_at=? WHERE id=?').bind(String(body.commit), actor, now(), now(), c.id).run();
+      await log(db, c.id, actor, `放行 ${String(body.commit).slice(0, 12)}`);
+    } else {
+      await db.prepare('UPDATE cards SET approved_commit=NULL,approved_by=NULL,approved_at=NULL,updated_at=? WHERE id=?').bind(now(), c.id).run();
+      await log(db, c.id, actor, '撤回放行');
+    }
+    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
   }
   // 退回後換新分支重做：取消登記舊分支、登記新分支（<卡號>-r2、-r3…），phase 清空
   if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/rebranch$/))) {
@@ -79,13 +90,10 @@ export async function handle(req, env, ctx) {
     if (!c) return json({ error: 'not found' }, 404);
     if (c.status !== 'claimed' || !c.branch) return json({ error: '只有已認領的卡能換分支' }, 409);
     const attempt = c.attempt + 1, branch = branchFor(env, c.id, attempt);
-    const r = await db.prepare("UPDATE cards SET branch=?,attempt=?,phase=NULL,phase_at=NULL,updated_at=? WHERE id=? AND branch=?").bind(branch, attempt, now(), c.id, c.branch).run();
+    const r = await db.prepare("UPDATE cards SET branch=?,attempt=?,phase=NULL,phase_at=NULL,last_result=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,updated_at=? WHERE id=? AND branch=?").bind(branch, attempt, now(), c.id, c.branch).run();
     if (r.meta.changes !== 1) return json({ error: '同時有人在改，請重試' }, 409);
-    await enqueueSync(db, c.id, 'untrack', { branch: c.branch });
-    await enqueueSync(db, c.id, 'track', await trackPayload(db, c, branch));
     await log(db, c.id, actor, `換分支 ${c.branch} → ${branch}`);
-    await runSync(env, c.id);
-    return json(await withSync(db, await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
+    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
   }
   if (req.method === 'POST' && path === '/api/cards') {
     if (!body.id || !body.title) return json({ error: 'id 與 title 必填' }, 400);
@@ -126,10 +134,7 @@ export async function handle(req, env, ctx) {
         .bind(String(body.owner), branch, body.owner_thread ? String(body.owner_thread) : null, now(), id).run();
       if (res.meta.changes === 1) {
         await log(db, id, actor === 'unknown' ? body.owner : actor, `認領 ${body.owner}，分支 ${branch}`);
-        const card = await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first();
-        await enqueueSync(db, id, 'track', await trackPayload(db, card, branch));
-        await runSync(env, id);
-        return json(await withSync(db, card));
+        return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
       }
       if (body.id) return json({ error: '這張卡已被別人拿走或不存在' }, 409);
     }
@@ -148,8 +153,7 @@ export async function handle(req, env, ctx) {
       if (!STATUSES.includes(body.status)) return json({ error: '狀態不合法' }, 400);
       if (!canMove(c.status, body.status)) return json({ error: `不能從 ${c.status} 到 ${body.status}` }, 409);
       sets.push('status=?'); vals.push(body.status);
-      if (c.branch && (body.status === 'open' || body.status === 'dropped')) await enqueueSync(db, id, 'untrack', { branch: c.branch });
-      if (body.status === 'open') sets.push('owner=NULL', 'owner_thread=NULL', 'branch=NULL', 'phase=NULL', 'phase_at=NULL');
+      if (body.status === 'open') sets.push('owner=NULL', 'owner_thread=NULL', 'branch=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', 'approved_commit=NULL', 'approved_by=NULL', 'approved_at=NULL');
       note = `${c.status} → ${body.status}` + (body.note ? `：${body.note}` : '');
     }
     if (!sets.length) return json({ error: '沒有要改的欄位' }, 400);
@@ -157,13 +161,12 @@ export async function handle(req, env, ctx) {
     // 狀態轉移也帶舊狀態條件，避免兩個人同時改
     await db.prepare(`UPDATE cards SET ${sets.join(',')} WHERE id=? AND status=?`).bind(...vals, id, c.status).run();
     await log(db, id, actor, note);
-    await runSync(env, id);
-    return json(await withSync(db, await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
+    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
   }
   return json({ error: 'not found' }, 404);
 }
 
 export default {
   fetch: (req, env, ctx) => handle(req, env, ctx),
-  scheduled: (_ev, env, ctx) => ctx.waitUntil(Promise.all([flush(env), runSync(env)])),
+  scheduled: (_ev, env, ctx) => ctx.waitUntil(flush(env)),
 };
