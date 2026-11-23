@@ -401,3 +401,26 @@ test('審計 L4／L6：已合併、已放棄的卡不能再改欄位；匯入重
   const r = await (await call(e, 'POST', '/api/import', { cards: [{ id: 'z', title: 'z', branch: br('c2') }] })).json();
   assert.equal(r.added, 0);
 });
+
+test('信箱：claim 每收件串一則、領了不重給、5 分鐘沒 ack 再給、ack 後不再給；不再主動 fire', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm', ROUTINE_ID: 'r', ROUTINE_KEY: 'k' });
+  await approved(e, 'c1', 'th1'); await approved(e, 'c2', 'th1'); await approved(e, 'c3', 'th3');
+  await ev(e, 'c1', { kind: 'tested_red', detail: 'x', approved_sha: SHA }); await ev(e, 'c2', { kind: 'conflict', approved_sha: SHA }); await ev(e, 'c3', { kind: 'halted' });
+  let fired = 0;
+  await withFetch(async () => { const { autoFlush } = await import('../src/queue.js'); await autoFlush(e); }, async () => { fired++; return new Response('{}'); });
+  assert.equal(fired, 0);                                                         // 預設不打 routine fire
+  assert.equal((await raw(e, 'POST', '/api/outbox/claim', {})).status, 400);        // actor 必填
+  const a = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
+  const th1 = a.messages.find(m => m.to_thread === 'th1');
+  assert.equal(th1.card_ids.length, 2); assert.match(th1.text, /c1[\s\S]*下一步[\s\S]*c2/);
+  assert.ok(a.messages.some(m => m.to_thread === 'adm'));                           // halted 給管理者
+  assert.equal((await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json()).messages.length, 0);   // 領了不重給
+  await e.DB.prepare('UPDATE outbox SET claimed_at=claimed_at-400').run();           // 5 分鐘沒 ack：再給
+  const b = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
+  assert.equal(b.messages.length, a.messages.length);
+  const ack = await (await call(e, 'POST', '/api/outbox/ack', { actor: '傳令', ids: b.messages.flatMap(m => m.ids) })).json();
+  assert.ok(ack.acked >= 3);
+  await e.DB.prepare('UPDATE outbox SET claimed_at=claimed_at-400').run();
+  assert.equal((await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json()).messages.length, 0);   // ack 後不再給
+  assert.equal((await call(e, 'POST', '/api/outbox/claim', { actor: 'x' }, 'bad')).status, 401);
+});

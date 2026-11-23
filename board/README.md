@@ -42,3 +42,10 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 5. `wrangler deploy`，網址就是看板。
 
 升級已部署的資料庫：依序各跑一次 `migrate_001.sql`～`migrate_005.sql`，再跑 `schema.sql`。測試：`cd board && npm test`（Node 22，不需安裝套件）。
+
+## 信箱（收信端自己來領）
+
+看板不主動叫醒任何人（打外部排程任務的 routine fire 預設關閉，要開才設 `FIRE_ENABLED=1`；失敗原因看 `fire_log`）。通知產生後立刻進信箱，由收信端（例如傳令串）定時來領：
+
+- `POST /api/outbox/claim {actor}`（TOKEN）：回 `{messages:[{to_thread, ids, kinds, card_ids, created_at, text}]}`，每個收件串一則、已合併；`text` 含哪張卡、發生什麼、原因與紅項、下一步。領過的標記時間，5 分鐘內不重給；沒有收件串的（沒填負責串）改給 `ADMIN_THREADS` 第一個。
+- `POST /api/outbox/ack {actor, ids}`（TOKEN）：ids 用 claim 回傳的 `ids`（全部攤平）；ack 過的不再給，沒 ack 的 5 分鐘後會再給一次。

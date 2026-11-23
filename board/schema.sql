@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   n INTEGER PRIMARY KEY AUTOINCREMENT,
   owner_thread TEXT NOT NULL DEFAULT '',
   card_id TEXT, branch TEXT, kind TEXT NOT NULL, detail TEXT,
-  at INTEGER NOT NULL, sent_at INTEGER
+  at INTEGER NOT NULL, sent_at INTEGER, claimed_at INTEGER, claim_id TEXT
 );
 CREATE TABLE IF NOT EXISTS fires (at INTEGER NOT NULL);
 

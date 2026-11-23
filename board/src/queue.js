@@ -61,7 +61,7 @@ export async function handleHook(req, env, ctx) {
     if (ADMIN_KINDS.has(kind)) await post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
     else if (ATTENTION.has(kind)) await post([card.owner_thread || ''], card, kind, branch, detail);
   }
-  if (ctx && ctx.waitUntil) ctx.waitUntil(flush(env));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(autoFlush(env));
   return json({ ok: true, applied, unmatched, duplicate: dup, stale });
 }
 
@@ -135,4 +135,55 @@ export async function stuckCheck(env) {
     n++;
   }
   return { notified: n };
+}
+
+// 主動叫醒（routine fire）預設關閉：外部 token 打排程任務可能被擋。要開才設 FIRE_ENABLED=1。預設改由收信端自己來領（/api/outbox/claim）。
+export async function autoFlush(env) { return env.FIRE_ENABLED === '1' ? flush(env) : { skipped: 'fire disabled' }; }
+
+// ---- 收信：傳令串自己來領。每個收件串一則（已合併好），領了標記時間；5 分鐘內沒 ack 會再給一次；ack 過的不再給。 ----
+const NEXT = {
+  review_requested: '請看 git diff 審查；通過就在看板對這張卡 approve（帶審過的 commit），要改就 reject 並寫原因。',
+  review_rejected: '審查退回：請依原因修改，改好 push 後對這張卡 submit 新版本。',
+  tested_red: '自測紅：請看紅項修好，push 後 submit 新版本（若只是環境問題，請審查者 retest）。',
+  rejected: '被排隊器退回：看原因修好 push 後 submit 新版本；沒改程式只想重跑，請審查者 retest。',
+  conflict: '跟 main 撞檔：請 rebase 最新 main、解衝突後 push，再 submit 新版本。',
+  superseded: '送審後內容又改了，放行作廢：請確認要審的版本，重新 submit。',
+  parent_blocked: '父卡被放棄或不存在，子卡被擋：請管理者決定改接別張卡（PATCH parent）或直接接 main。',
+  halted: '排隊器暫停待人處理：請管理者查排隊器，處理後對該卡 retest。',
+  queue_error: '排隊器自己出狀況：請管理者查排隊器。',
+  stuck: '這張卡很久沒動靜：請確認負責串是否還在做，必要時還卡或放棄。',
+};
+const CLAIM_TTL = 300;
+
+export async function outboxClaim(req, env) {
+  if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
+  const body = await req.json().catch(() => ({}));
+  const actor = String(body.actor ?? '').trim();
+  if (!actor || actor.toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
+  const db = env.DB, t = now(), token = `${t}-${crypto.randomUUID()}`;
+  await db.prepare('UPDATE outbox SET claimed_at=?,claim_id=? WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(t, token, t - CLAIM_TTL).run();
+  const rows = (await db.prepare('SELECT * FROM outbox WHERE sent_at IS NULL AND claim_id=? ORDER BY n').bind(token).all()).results;
+  const fallback = list(env.ADMIN_THREADS)[0] || '';
+  const groups = new Map();
+  for (const r of rows) { const to = r.owner_thread || fallback; (groups.get(to) || groups.set(to, []).get(to)).push(r); }
+  const out = [...groups].map(([to, items]) => ({
+    to_thread: to || null,
+    ids: items.map(i => i.n),
+    kinds: [...new Set(items.map(i => i.kind))],
+    card_ids: [...new Set(items.map(i => i.card_id).filter(Boolean))],
+    created_at: Math.min(...items.map(i => i.at)),
+    text: items.map(i => `【${i.card_id || '無卡'}】分支 ${i.branch || '（無）'}：${KIND_TEXT[i.kind] || i.kind}${i.detail ? `（${i.detail}）` : ''}\n  下一步：${NEXT[i.kind] || '請到看板查詳情。'}`).join('\n'),
+  }));
+  return json({ messages: out });
+}
+
+export async function outboxAck(req, env) {
+  if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
+  const body = await req.json().catch(() => ({}));
+  const actor = String(body.actor ?? '').trim();
+  if (!actor || actor.toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter(Number.isInteger).slice(0, 500);
+  if (!ids.length) return json({ error: 'ids 要是非空的數字陣列（claim 回傳的 ids）' }, 400);
+  const r = await env.DB.prepare(`UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND n IN (${ids.map(() => '?').join(',')})`).bind(now(), ...ids).run();
+  return json({ acked: r.meta.changes });
 }
