@@ -219,3 +219,25 @@
 ## 10. 純文件的卡
 
 走同一條線。審查通過後，排隊器判定是純文件就不測，直接合併：看板上會從審查通過自測中直接變成已合併。有父卡的純文件卡，要等父卡合併了才合。
+
+## 11. 放棄防呆（drop_checks）
+
+人要放棄一張卡之前，先確認「它的改動是不是都已經在別處了」。排隊器只回答事實，要不要放棄由看板與人決定。
+
+**來源清單的形狀**：除了舊的 JSON 陣列，也接受物件
+`{"entries": [...同 §6...], "drop_checks": [{"card", "branch", "superseded_by_branch": 分支名或 null}]}`。
+`entries` 也可以叫 `items`。同一個 `card` 重複只留第一筆。
+
+**判斷方式（結果比對，不比行數、沒有門檻）**：
+- 目標 T＝`superseded_by_branch` 的頭；沒填、或那條分支已不存在，就是 main 的頭。
+- 把被放棄的分支試合進 T（`git merge-tree --write-tree`，不寫任何 ref）。**沒有衝突，而且合出來的 tree 跟 T 的 tree 完全相同** → `covered=true`（合了什麼都不變＝已全部包含）。
+- 有衝突、或 tree 不同 → `covered=false`；`missing_files`＝兩個 tree 的檔案差異加上衝突檔（最多 20 個），`missing_count` 是總數。
+- `unmerged`：對 main 做同樣的比對（`true`＝還有東西不在 main 裡）。
+- 被放棄的分支不存在：`covered=true`、`unmerged=false`。
+- 沒有填 `superseded_by_branch` 時，`covered` 只看 main（等於 `not unmerged`）。
+- 寧可誤擋不可誤放：被擋的由人決定（把內容接過去，或寫原因走「真的不要」）。
+
+**事件 `drop_checked`**（機器事件，跟 §7 其他事件一樣經 notify 送出；`branch` 是被放棄的分支）：
+`{card, branch, target, unmerged, covered, missing_count, missing_files}`。
+同一張卡「結論沒變」不重發；分支、目標或 main 變了、結論跟上次不同才再發一筆。git 查不出來時不發事件、下一輪再試。
+排隊器不因 drop_checks 改變任何登記、測試或合併。

@@ -3,7 +3,7 @@ import json
 import unittest
 
 from jet import store
-from jet.source import SourcePoller, SourceError, parse_list
+from jet.source import SourcePoller, SourceError, parse_list, parse_payload
 from tests.test_scheduler import Base
 
 
@@ -16,14 +16,14 @@ class CF(Base):
         over["source"] = {"url": "http://127.0.0.1:9/x", "max_age_s": 600, "poll_seconds": 15}
         s = super().mk(delay, **over)
         self.t = [1000.0]
-        self.list, self.src_err, self.fetches = [], None, 0
+        self.list, self.src_err, self.fetches, self.drops = [], None, 0, []
         s.clock = lambda: self.t[0]
 
         def fetch():
             self.fetches += 1
             if self.src_err:
                 raise SourceError(self.src_err)
-            return parse_list(json.loads(json.dumps(self.list)))
+            return parse_payload(json.loads(json.dumps({"entries": self.list, "drop_checks": self.drops})))
         s.source = SourcePoller("http://127.0.0.1:9/x", None, 15, 1, fetcher=fetch, clock=lambda: self.t[0],
                                 threaded=False)
         self.store_emit()
@@ -722,6 +722,67 @@ class UnknownGrace(CF):
         self.assertEqual(len(self.events("superseded", "a")), 1)
         self.tick(5)
         self.assertEqual(len(self.events("superseded", "a")), 1)
+
+
+class DropCheckFlowTest(CF):
+    """清單帶 drop_checks → 排隊器查（只讀）→ drop_checked 事件。"""
+
+    def setUp(self):
+        super().setUp()
+        self.s = self.mk()
+
+    def res(self, **kw):
+        base = dict(branch="x", target="main", branch_sha="s1", target_sha="m", main_sha="m",
+                    unmerged=True, covered=False, missing_count=1, missing_files=["a.py"])
+        base.update(kw)
+        return base
+
+    def test_payload_object_form(self):
+        ents, drops = parse_payload({"entries": [{"branch": "a"}],
+                                     "drop_checks": [{"card": "C1", "branch": "x", "superseded_by_branch": None},
+                                                     {"card": "C1", "branch": "dup"}]})
+        self.assertEqual(len(ents), 1)
+        self.assertEqual(drops, [{"card": "C1", "branch": "x", "superseded_by_branch": None}])
+        with self.assertRaises(SourceError):
+            parse_payload({"entries": [], "drop_checks": [{"card": "C"}]})
+
+    def test_emits_once_and_again_when_result_changes(self):
+        self.repo.drop_res["x"] = self.res()
+        self.drops = [{"card": "C1", "branch": "x", "superseded_by_branch": "y"}]
+        self.tick(3)
+        ev = self.events("drop_checked", "x")
+        self.assertEqual(len(ev), 1)
+        d = json.loads(ev[0]["detail"])
+        self.assertEqual((d["card"], d["covered"], d["unmerged"], d["missing_files"]), ("C1", False, True, ["a.py"]))
+        self.assertEqual(self.repo.drop_calls[0], ("x", "y"))
+        self.tick(3)
+        self.assertEqual(len(self.events("drop_checked", "x")), 1)     # 結論沒變，不重發
+        self.repo.drop_res["x"] = self.res(covered=True, unmerged=False, missing_count=0, missing_files=[],
+                                           main_sha="m2")
+        self.repo.main = "m2"
+        self.tick(2)
+        self.assertEqual(len(self.events("drop_checked", "x")), 2)
+
+    def test_git_error_emits_nothing_and_retries(self):
+        self.repo.drop_res["x"] = RuntimeError("boom")
+        self.drops = [{"card": "C1", "branch": "x"}]
+        self.tick(2)
+        self.assertEqual(len(self.events("drop_checked")), 0)
+        self.repo.drop_res["x"] = self.res()
+        self.tick(2)
+        self.assertEqual(len(self.events("drop_checked", "x")), 1)
+
+    def test_notify_payload_has_fields(self):
+        from jet import notify
+        self.repo.drop_res["x"] = self.res()
+        self.drops = [{"card": "C1", "branch": "x"}]
+        self.tick(2)
+        row = self.events("drop_checked", "x")[0]
+        e = notify._enrich(self.con, row)
+        p = notify.build_payload([e], 1.0)["events"][0]
+        self.assertEqual((p["card"], p["target"], p["covered"], p["unmerged"], p["missing_count"]),
+                         ("C1", "main", False, True, 1))
+        self.assertEqual(p["missing_files"], ["a.py"])
 
 
 class SourcePollerTest(unittest.TestCase):

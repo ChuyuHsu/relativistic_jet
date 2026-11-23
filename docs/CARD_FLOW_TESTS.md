@@ -64,3 +64,5 @@
 | 來源輪詢：權杖、非 200、保留上一份、同樣的錯只報一次 | `SourcePollerTest.*` |
 
 兩條小規則：連續退回兩次暫停——`tests/test_scheduler.py` 的 `test_double_fail_halts`；重測只對排隊器退回的卡有效——看板那邊負責，排隊器看到 `retest` 變大就清掉退回與暫停。
+
+放棄防呆（§11）：squash 進 main、兩個提交 squash 後 `git cherry` 會誤判、rebase 後內容相同、取代卡改了同一段（判未包含）、一邊刪檔一邊改檔、改名檔、二進位檔、分支不存在、取代分支不存在改看 main、超過 20 個檔——`tests/test_gitops.py` 的 `DropCheckTest.*`；清單格式、事件只發一次與結論變了才重發、git 失敗重試、notify 欄位——`tests/test_cardflow.py` 的 `DropCheckFlowTest.*`。

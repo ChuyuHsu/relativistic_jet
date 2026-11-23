@@ -53,7 +53,35 @@ def parse_list(data) -> List[dict]:
     return out
 
 
-def http_fetch(url: str, token_file: Optional[str], timeout: float) -> List[dict]:
+def parse_payload(data):
+    """清單本體可以是陣列（舊格式），或物件 {"entries"|"items": [...], "drop_checks": [...]}。
+    回傳 (清單, 放棄查核請求)。drop_checks 每筆 {card, branch, superseded_by_branch|null}。"""
+    drops: List[dict] = []
+    if isinstance(data, dict):
+        raw = data.get("entries", data.get("items"))
+        if raw is None:
+            raw = []
+        dc = data.get("drop_checks") or []
+        if not isinstance(dc, list):
+            raise SourceError("drop_checks 必須是陣列")
+        seen = set()
+        for d in dc:
+            if not isinstance(d, dict) or not isinstance(d.get("branch"), str) or not d["branch"]:
+                raise SourceError("drop_checks 每筆要有 branch（字串）")
+            sup = d.get("superseded_by_branch")
+            if sup is not None and (not isinstance(sup, str) or not sup):
+                raise SourceError(f"{d['branch']} 的 superseded_by_branch 不對")
+            card = d.get("card")
+            card = str(card) if card is not None else d["branch"]
+            if card in seen:
+                continue
+            seen.add(card)
+            drops.append({"card": card, "branch": d["branch"], "superseded_by_branch": sup})
+        data = raw
+    return parse_list(data), drops
+
+
+def http_fetch_full(url: str, token_file: Optional[str], timeout: float):
     # 有些代管平台會擋 urllib 預設的 User-Agent（回 403），所以自己報名字
     headers = {"Accept": "application/json", "User-Agent": "relativistic-jet"}
     if token_file:
@@ -72,24 +100,30 @@ def http_fetch(url: str, token_file: Optional[str], timeout: float) -> List[dict
     except (urllib.error.URLError, OSError) as e:
         raise SourceError(f"連不上：{getattr(e, 'reason', e)}")
     try:
-        return parse_list(json.loads(body.decode("utf-8")))
+        return parse_payload(json.loads(body.decode("utf-8")))
     except ValueError as e:
         raise SourceError(f"不是合法的 JSON：{e}")
+
+
+def http_fetch(url: str, token_file: Optional[str], timeout: float) -> List[dict]:
+    return http_fetch_full(url, token_file, timeout)[0]
 
 
 class SourcePoller:
     """主行程每輪 tick 呼叫 poll()。entries＝最後一次成功的清單（None＝還沒成功過）。"""
 
     def __init__(self, url: str, token_file: Optional[str] = None, poll_seconds: float = 15,
-                 timeout: float = 10.0, fetcher: Optional[Callable[[], List[dict]]] = None,
+                 timeout: float = 10.0, fetcher: Optional[Callable[[], object]] = None,
                  clock: Callable[[], float] = time.time, threaded: bool = True):
         check_bearer_url(url) if token_file else None
         self.url, self.token_file, self.poll_s, self.timeout = url, token_file, poll_seconds, timeout
-        self._fetcher = fetcher or (lambda: http_fetch(self.url, self.token_file, self.timeout))
+        self._fetcher = fetcher or (lambda: http_fetch_full(self.url, self.token_file, self.timeout))
         self.clock, self.threaded = clock, threaded
         self.entries: Optional[List[dict]] = None
         self.ok_at: Optional[float] = None       # 最後一次成功的時間
         self.error: Optional[str] = None         # 目前的錯誤（成功就清掉）
+        self.drops: List[dict] = []              # 最後一次成功的放棄查核請求
+        self.drops_ver = 0                       # 每次成功 +1
         self.new_data = False                    # 有新的成功結果還沒被主行程處理
         self._next = 0.0
         self._thread: Optional[threading.Thread] = None
@@ -106,7 +140,12 @@ class SourcePoller:
         ok, val = self._res
         self._res = None
         if ok:
+            if isinstance(val, tuple):               # (清單, 放棄查核)
+                val, self.drops = val
+            else:                                    # 測試或舊 fetcher 直接回清單
+                self.drops = []
             self.entries, self.ok_at, self.error, self.new_data = val, self.clock(), None, True
+            self.drops_ver += 1
             return None
         first = self.error != val
         self.error = val

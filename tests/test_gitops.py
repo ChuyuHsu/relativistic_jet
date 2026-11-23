@@ -361,3 +361,136 @@ class Writes(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DropCheckTest(Base):
+    """放棄防呆：改動合進目標後什麼都不變，才算已包含。"""
+
+    def branch(self, name, edits, base="main", delete=()):
+        sh(self.dev, "checkout", "-q", "-B", name, f"origin/{base}" if base else "main")
+        for f, t in edits.items():
+            self.write(f, t)
+        for f in delete:
+            sh(self.dev, "rm", "-q", f)
+        self.commit(name)
+        sh(self.dev, "push", "-q", "-f", "origin", name)
+
+    def to_main(self, edits, delete=()):
+        sh(self.dev, "checkout", "-q", "main")
+        sh(self.dev, "pull", "-q", "origin", "main")
+        for f, t in edits.items():
+            self.write(f, t)
+        for f in delete:
+            sh(self.dev, "rm", "-q", f)
+        self.commit("main")
+        sh(self.dev, "push", "-q", "origin", "main")
+
+    def chk(self, b, sup=None):
+        self.repo.fetch()
+        return self.repo.drop_check(b, sup)
+
+    def test_missing_branch(self):
+        r = self.chk("nope")
+        self.assertTrue(r["covered"])
+        self.assertFalse(r["unmerged"])
+
+    def test_untouched_branch_unmerged(self):
+        self.branch("x", {"b.txt": "new\n"})
+        r = self.chk("x")
+        self.assertTrue(r["unmerged"])
+        self.assertFalse(r["covered"])
+        self.assertEqual(r["missing_files"], ["b.txt"])
+        self.assertEqual(r["target"], "main")
+
+    def test_squash_into_main(self):
+        self.branch("x", {"b.txt": "new\n", "d.txt": "d\n"})
+        self.to_main({"b.txt": "new\n", "d.txt": "d\n"})      # 內容一樣、但不同提交（等於 squash）
+        r = self.chk("x")
+        self.assertFalse(r["unmerged"])
+        self.assertTrue(r["covered"])
+        self.assertEqual(r["missing_count"], 0)
+
+    def test_squash_after_cherry_misjudge(self):
+        """兩個提交 squash 進 main：git cherry 會說都還沒合，這邊必須判已包含。"""
+        self.branch("x", {"b.txt": "one\n"})
+        self.write("c.txt", "two\n")
+        self.commit("second")
+        sh(self.dev, "push", "-q", "-f", "origin", "x")
+        self.to_main({"b.txt": "one\n", "c.txt": "two\n"})
+        self.assertFalse(self.chk("x")["unmerged"])
+
+    def test_rebased_same_content(self):
+        self.branch("x", {"b.txt": "new\n"})
+        self.to_main({"c.txt": "other\n"})
+        self.branch("x2", {"b.txt": "new\n"})                  # 重接到新 main 的同內容複本
+        r = self.chk("x", "x2")
+        self.assertTrue(r["covered"])
+        self.assertEqual(r["target"], "x2")
+        self.assertTrue(r["unmerged"])                          # 對 main 還沒進
+
+    def test_superseder_changed_same_hunk(self):
+        self.branch("x", {"a.txt": "".join(f"line {i}\n" for i in range(1, 31)).replace("line 5\n", "X5\n")})
+        self.branch("y", {"a.txt": "".join(f"line {i}\n" for i in range(1, 31)).replace("line 5\n", "Y5\n")})
+        r = self.chk("x", "y")
+        self.assertFalse(r["covered"])
+        self.assertIn("a.txt", r["missing_files"])
+
+    def test_superseder_lacks_file(self):
+        self.branch("x", {"b.txt": "new\n", "e.txt": "e\n"})
+        self.branch("y", {"b.txt": "new\n"})
+        r = self.chk("x", "y")
+        self.assertFalse(r["covered"])
+        self.assertEqual(r["missing_files"], ["e.txt"])
+
+    def test_delete_vs_modify(self):
+        self.branch("x", {"b.txt": "changed\n"})
+        self.branch("y", {}, delete=["b.txt"])
+        r = self.chk("x", "y")
+        self.assertFalse(r["covered"])
+        self.assertIn("b.txt", r["missing_files"])
+
+    def test_both_delete_is_covered(self):
+        self.branch("x", {}, delete=["b.txt"])
+        self.branch("y", {}, delete=["b.txt"])
+        self.assertTrue(self.chk("x", "y")["covered"])
+
+    def test_rename(self):
+        self.branch("x", {}, delete=["b.txt"])
+        self.write("b2.txt", "bbb\n")
+        self.commit("rename")
+        sh(self.dev, "push", "-q", "-f", "origin", "x")
+        self.branch("y", {}, delete=["b.txt"])
+        self.write("b2.txt", "bbb\n")
+        self.commit("rename")
+        sh(self.dev, "push", "-q", "-f", "origin", "y")
+        self.assertTrue(self.chk("x", "y")["covered"])
+        self.branch("z", {"b2.txt": "bbb\n"})                    # 沒刪舊檔的取代卡：不算包含
+        self.assertFalse(self.chk("x", "z")["covered"])
+
+    def test_binary(self):
+        def put(b, data):
+            sh(self.dev, "checkout", "-q", "-B", b, "origin/main")
+            with open(os.path.join(self.dev, "img.bin"), "wb") as f:
+                f.write(data)
+            self.commit(b)
+            sh(self.dev, "push", "-q", "-f", "origin", b)
+        put("x", b"\x00\x01\x02" * 50)
+        put("y", b"\x00\x01\x02" * 50)
+        put("z", b"\x00\x01\x03" * 50)
+        self.assertTrue(self.chk("x", "y")["covered"])
+        r = self.chk("x", "z")
+        self.assertFalse(r["covered"])
+        self.assertEqual(r["missing_files"], ["img.bin"])
+
+    def test_superseder_gone_falls_back_to_main(self):
+        self.branch("x", {"b.txt": "new\n"})
+        self.to_main({"b.txt": "new\n"})
+        r = self.chk("x", "deleted-branch")
+        self.assertTrue(r["covered"])
+        self.assertEqual(r["target"], "main")
+
+    def test_missing_files_capped(self):
+        self.branch("x", {f"f{i}.txt": "1\n" for i in range(30)})
+        r = self.chk("x")
+        self.assertEqual(r["missing_count"], 30)
+        self.assertEqual(len(r["missing_files"]), 20)

@@ -17,13 +17,13 @@ from urllib.parse import urlparse
 
 NOTIFY_KINDS = ("rejected", "conflict", "halted", "queue_error")   # 要人處理的（預設只送這些）
 MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
-                 "superseded", "parent_blocked")  # 給機器看的狀態變化
+                 "superseded", "parent_blocked", "drop_checked")  # 給機器看的狀態變化
 ALL_KINDS = NOTIFY_KINDS + MACHINE_KINDS
 KIND_TEXT = {
     "rejected": "被退回", "conflict": "跟 main 撞檔", "halted": "暫停待人處理", "queue_error": "排隊器出狀況",
     "pushed": "有新提交", "tested_green": "自測綠", "tested_red": "自測紅", "queued": "進佇列",
     "merged": "已合入", "approved": "已放行", "revoked": "已撤回放行",
-    "superseded": "內容變了、放行失效", "parent_blocked": "父分支擋住",
+    "superseded": "內容變了、放行失效", "parent_blocked": "父分支擋住", "drop_checked": "放棄查核結果",
 }
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -136,6 +136,9 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
             "detail": e.get("detail"), "at": e["at"],
             "from": e.get("from"), "to": e.get("to"), "failed_items": e.get("failed_items"),
             "approved_sha": e.get("approved_sha"), "retest": e.get("retest"),
+            "card": e.get("card"), "target": e.get("target"), "unmerged": e.get("unmerged"),
+            "covered": e.get("covered"), "missing_count": e.get("missing_count"),
+            "missing_files": e.get("missing_files"),
         }.items() if v is not None or k in ("branch", "detail")} for e in events],
     }
     if destination:
@@ -159,6 +162,10 @@ def _enrich(con, r) -> Dict[str, Any]:
             d = {}
         if isinstance(d, dict):
             e["from"], e["to"] = d.get("from"), d.get("to")
+            if e["kind"] == "drop_checked":
+                for k in ("card", "target", "unmerged", "covered", "missing_count", "missing_files"):
+                    e[k] = d.get(k)
+                d = {"reason": ("已全部包含於 " if d.get("covered") else "有 %s 個檔不在 " % d.get("missing_count")) + str(d.get("target"))}
             e["detail"] = str(d.get("reason") or d.get("merged_sha") or d.get("by") or "")[:MAX_DETAIL] or None
     if e["kind"] in ("rejected", "tested_red", "halted") and e.get("branch"):
         run = con.execute("SELECT id FROM runs WHERE branch=? AND status IN ('fail','timeout') ORDER BY id DESC LIMIT 1",

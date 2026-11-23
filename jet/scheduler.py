@@ -104,6 +104,7 @@ class Scheduler:
             sc = cfg.source
             source = SourcePoller(sc["url"], sc["token_file"], sc["poll_seconds"], sc["timeout_s"])
         self.source = source                # SourcePoller 或 None（外部來源）
+        self._drop_sig = None
         self._entries: Optional[Dict[str, dict]] = None    # 清單最後一次成功的內容（依分支名）
         self._src_err_last: Optional[str] = None
         self._unres_since: Dict[Tuple[str, str], float] = {}
@@ -880,6 +881,37 @@ class Scheduler:
         info = {"url_ok": self.source.error is None, "age_s": self.source.age(), "error": self.source.error,
                 "entries": None if self._entries is None else len(self._entries)}
         self._put("source", info)
+        self._drop_step()
+
+    def _drop_step(self):
+        """放棄防呆：清單帶來的 drop_checks 逐筆查（同一組 提交／目標／main 只算一次），
+        結果變了才發一筆 drop_checked 事件。只讀 git，不動任何登記與測試。"""
+        src = self.source
+        if src.drops_ver == 0:
+            return
+        sig = (src.drops_ver, self.main)
+        if sig == self._drop_sig:
+            return
+        self._drop_sig = sig
+        for d in src.drops[:100]:
+            card, br, sup = d["card"], d["branch"], d.get("superseded_by_branch")
+            try:
+                r = self.repo.drop_check(br, sup)
+            except Exception as e:           # 查不出來就當沒查過，下一輪再試（不發「已包含」）
+                log.warning("放棄查核 %s 失敗：%r", card, e)
+                self._drop_sig = None
+                continue
+            key = json.dumps([r.get("branch_sha"), r.get("target_sha"), r.get("main_sha"), sup], sort_keys=True)
+            if store.get_meta(self.con, f"dck:{card}", None) == key:
+                continue
+            store.set_meta(self.con, f"dck:{card}", key)
+            res = {"unmerged": bool(r["unmerged"]), "covered": bool(r["covered"]), "target": r["target"],
+                   "missing_count": int(r["missing_count"]), "missing_files": list(r["missing_files"])[:20]}
+            sigr = json.dumps([card, res], sort_keys=True)
+            if store.get_meta(self.con, f"dcr:{card}", None) == sigr:
+                continue                       # 結論沒變：不重發
+            store.set_meta(self.con, f"dcr:{card}", sigr)
+            store.emit(self.con, "drop_checked", br, dict(res, card=card))
 
     def _source_error(self, msg: str):
         """拉不到、格式不對：記錄＋一筆 source_error 事件（同樣的錯只發一次），絕不動登記與放行。"""

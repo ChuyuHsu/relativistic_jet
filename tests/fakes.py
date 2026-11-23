@@ -16,6 +16,8 @@ class FakeRepo:
         self.main_files = {}    # main sha → 該次更動的檔案（給純文件判斷）
         self.merged = {}
         self.ff_log = []
+        self.drop_res = {}      # 分支 → drop_check 回傳（或要丟的例外）
+        self.drop_calls = []
         self.broken = set()     # (父 head, 子 head)：父不是子的祖先（子沒重新接上）
 
     def add(self, name, reds=(), gate_reds=(), sha=None, files=("src/a.py",), conflict_main=False,
@@ -31,6 +33,16 @@ class FakeRepo:
         self.add(name, reds, gate_reds, sha=f"{name}-{n}", **kw)
 
     # --- Repo 介面 ---
+    def drop_check(self, branch, superseded_by=None):
+        self.drop_calls.append((branch, superseded_by))
+        r = self.drop_res.get(branch)
+        if isinstance(r, Exception):
+            raise r
+        if r is None:
+            return dict(branch=branch, target=superseded_by or "main", branch_sha=None, target_sha=self.main,
+                        main_sha=self.main, unmerged=False, covered=True, missing_count=0, missing_files=[])
+        return dict(r, main_sha=self.main)
+
     def fetch(self): pass
     def list_branches(self): return {n: b["sha"] for n, b in self.branches.items()}
     def main_sha(self): return self.main

@@ -56,6 +56,8 @@ class Repo(Protocol):
     def changed_files(self, branch_sha: str, base_sha: str) -> List[str]: ...
     def conflicts_with(self, branch_sha: str, base_sha: str) -> bool:
         """這條分支疊到 base 上會不會撞檔。"""
+    def drop_check(self, branch: str, superseded_by: Optional[str] = None) -> Dict[str, object]:
+        """放棄防呆：branch 的改動是否已全部在目標（superseded_by 的頭，沒有就 main）裡。"""
     def stack(self, base_sha: str, items: List[Tuple[str, str]]) -> StackResult:
         """items＝[(分支名, head sha)]。每條壓成一個提交、依序疊在 base 上。
         跟前面已疊進去的撞檔的那條略過（不在 kept 裡），其餘照疊。
@@ -216,6 +218,47 @@ class GitRepo:
     def conflicts_with(self, branch_sha: str, base_sha: str) -> bool:
         mb = self._merge_base(branch_sha, base_sha)
         return self._merge_tree(base_sha, branch_sha, mb) is None
+
+    def _ref_sha(self, branch: str) -> Optional[str]:
+        r = self._git("rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}^{{commit}}", check=False)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+    def _probe(self, target: str, branch_sha: str):
+        """把 branch 合進 target 試試看（不寫任何 ref）。回傳 (全部已包含, 差異檔清單)。
+        已包含＝無衝突、而且合出來的 tree 跟 target 的 tree 完全相同（也就是合了什麼都不變）。"""
+        ttree = self._out("rev-parse", f"{target}^{{tree}}")
+        r = self._git("merge-tree", "--write-tree", "--name-only", "--no-messages", target, branch_sha, check=False)
+        if r.returncode not in (0, 1):                     # 例如沒有共同祖先：直接比兩邊的檔案
+            out = self._git("diff", "--name-only", "-z", target, branch_sha).stdout
+            return False, sorted(f for f in out.split("\0") if f)
+        lines = r.stdout.split("\n")
+        tree, conflicts = lines[0].strip(), [x for x in lines[1:] if x.strip()]
+        if r.returncode == 0 and tree == ttree:
+            return True, []
+        out = self._git("diff", "--name-only", "-z", ttree, tree).stdout
+        files = {f for f in out.split("\0") if f} | set(conflicts)
+        return False, sorted(files)
+
+    def drop_check(self, branch: str, superseded_by: Optional[str] = None, max_files: int = 20) -> Dict[str, object]:
+        """放棄防呆：這條分支的改動，是不是已經全部在目標（取代它的分支頭；沒有或已不存在就是 main）裡。
+        不比行數、不用門檻：只看「合進去之後有沒有變」。寧可誤擋不可誤放。"""
+        main_sha = self.main_sha()
+        bsha = self._ref_sha(branch)
+        tsha = self._ref_sha(superseded_by) if superseded_by else None
+        target = superseded_by if tsha else self.main
+        res: Dict[str, object] = {"branch": branch, "target": target, "branch_sha": bsha,
+                                  "target_sha": tsha or main_sha, "main_sha": main_sha}
+        if bsha is None:                                   # 分支已不存在：沒有東西會遺失
+            res.update(unmerged=False, covered=True, missing_count=0, missing_files=[])
+            return res
+        in_main, main_files = self._probe(main_sha, bsha)
+        res["unmerged"] = not in_main
+        if tsha is None:
+            covered, files = in_main, main_files
+        else:
+            covered, files = self._probe(tsha, bsha)
+        res.update(covered=covered, missing_count=len(files), missing_files=files[:max_files])
+        return res
 
     def stack(self, base_sha: str, items: List[Tuple[str, str]]) -> StackResult:
         """前提（呼叫端負責）：堆疊分支的父分支要排在子之前、也在 items 裡，或已合入 base。
