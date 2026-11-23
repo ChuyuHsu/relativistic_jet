@@ -62,13 +62,14 @@ class Server:
         self._stop = threading.Event()
 
     # ------------------------------------------------------------
-    def _on_applied(self, action: str, args: dict, result: Any, now: float) -> None:
+    def _pre_commit(self, action: str, args: dict, now: float) -> None:
+        # 撤回要先落到只增不改的紀錄檔（fsync）才提交；寫失敗就整個撤回失敗，避免還原後撤回過的放行復活
         if action == "revoke":
             maintenance.log_revocation(self.state_dir, str(args.get("branch")), now)
 
     def step(self) -> None:
         now = self.now()
-        self.wq.drain(self.con, now, on_applied=self._on_applied)
+        self.wq.drain(self.con, now, pre_commit=self._pre_commit)
         cfg, err = self.watcher.poll()
         if err:
             log.warning("%s", err)

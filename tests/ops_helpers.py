@@ -31,9 +31,9 @@ def make_env(tmp: str, listen: str = "127.0.0.1:0", notify_url=None) -> dict:
 def seed(con, now: float = 1000.0) -> None:
     """三條合成分支：a 自測綠（已放行）、b 排隊（疊在 a 上）、c 退回。"""
     rows = [
-        ("feat-a", "sha-a", "cid-a", None, "selftest_green", None),
-        ("feat-b", "sha-b", "cid-b", "feat-a", "queued", now - 50),
-        ("feat-c", "sha-c", "cid-c", None, "rejected", None),
+        ("feat-a", "aaaaaaaa11111111", "cid-a", None, "selftest_green", None),
+        ("feat-b", "bbbbbbbb22222222", "cid-b", "feat-a", "queued", now - 50),
+        ("feat-c", "cccccccc33333333", "cid-c", None, "rejected", None),
     ]
     for name, sha, cid, parent, state, q in rows:
         con.execute("INSERT INTO branches(name, head_sha, content_id, parent, state, queued_at, updated_at, seen_at)"

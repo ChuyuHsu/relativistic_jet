@@ -139,7 +139,7 @@ def _post(args, path: str, body: dict, text):
     _out(args, r, text(r) if callable(text) else text)
 
 
-def cmd_approve(args): _post(args, "/approve", {"branch": args.branch, "by": args.by}, "已放行 " + args.branch)
+def cmd_approve(args): _post(args, "/approve", {"branch": args.branch, "sha": args.sha, "by": args.by}, "已放行 " + args.branch)
 def cmd_revoke(args): _post(args, "/revoke", {"branch": args.branch}, "已撤回放行 " + args.branch)
 def cmd_priority(args): _post(args, "/priority", {"branch": args.branch, "value": args.value}, f"{args.branch} 優先序 {args.value}")
 def cmd_set_parent(args): _post(args, "/set-parent", {"branch": args.branch, "parent": args.parent}, f"{args.branch} 父分支 {args.parent or '無'}")
@@ -258,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("merged", cmd_merged, "已合入"); sp.add_argument("--limit", type=int, default=20)
     add("todo", cmd_todo, "待辦")
     add("metrics", cmd_metrics, "量測")
-    sp = add("approve", cmd_approve, "放行"); sp.add_argument("branch"); sp.add_argument("--by", default="cli")
+    sp = add("approve", cmd_approve, "放行"); sp.add_argument("branch"); sp.add_argument("sha", help="審過的提交（head_sha 前 7 碼以上，或 content_id）"); sp.add_argument("--by", default="cli")
     sp = add("revoke", cmd_revoke, "撤回放行"); sp.add_argument("branch")
     sp = add("priority", cmd_priority, "調優先序（大的先）"); sp.add_argument("branch"); sp.add_argument("value", type=int)
     sp = add("set-parent", cmd_set_parent, "登記父分支（不給就清掉）"); sp.add_argument("branch"); sp.add_argument("parent", nargs="?")

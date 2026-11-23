@@ -200,7 +200,13 @@ def op_approve(con, now, actor, args):
     row = _need_branch(con, args.get("branch"))
     if row["state"] == State.MERGED.value:
         raise OpError("已經合入了")
+    # 放行記在「審的那個提交」上：請求必須帶審過的版本，跟目前的對不上就拒絕（作者可能剛推了新版）
+    sha = args.get("sha")
+    if not isinstance(sha, str) or len(sha) < 7:
+        raise OpError("放行要帶審過的版本（sha 或 content_id）", 400)
     content_id = row["content_id"]
+    if not content_id or not (sha == content_id or row["head_sha"].startswith(sha) or sha.startswith(row["head_sha"])):
+        raise OpError("分支的版本已經變了，請重新審過再放行", 409)
     if _has_approval(con, row["name"], content_id):
         return {"branch": row["name"], "state": row["state"], "already": True}
     by = str(args.get("by") or actor)[:100]
@@ -210,8 +216,10 @@ def op_approve(con, now, actor, args):
     return {"branch": row["name"], "state": row["state"], "approved": True}
 
 
-def op_revoke(con, now, actor, args):
+def op_revoke(con, now, actor, args, pre_commit=None):
     row = _need_branch(con, args.get("branch"))
+    if pre_commit is not None:
+        pre_commit("revoke", args, now)   # 先寫只增不改的撤回紀錄；寫失敗整個撤回失敗
     cur = con.execute("UPDATE approvals SET revoked_at=? WHERE branch=? AND revoked_at IS NULL",
                       (now, row["name"]))
     state = _set_state(con, row, Event.REVOKE, now)
@@ -311,7 +319,7 @@ ACTIONS: Dict[str, Callable] = {
 }
 
 
-def apply(con, action: str, args: Dict[str, Any], actor: str, now: Optional[float] = None):
+def apply(con, action: str, args: Dict[str, Any], actor: str, now: Optional[float] = None, pre_commit=None):
     """在主行程執行一個寫入命令；成功才寫 audit（失敗的也留一筆，方便追查）。"""
     now = time.time() if now is None else now
     fn = ACTIONS.get(action)
@@ -321,7 +329,7 @@ def apply(con, action: str, args: Dict[str, Any], actor: str, now: Optional[floa
         raise OpError("參數必須是物件")
     con.execute("BEGIN IMMEDIATE")
     try:
-        result = fn(con, now, actor, args)
+        result = fn(con, now, actor, args, pre_commit) if action == "revoke" else fn(con, now, actor, args)
         _audit(con, now, actor, action, args)
         con.execute("COMMIT")
         return result
@@ -358,7 +366,7 @@ class WriteQueue:
         return p
 
     def drain(self, con, now: Optional[float] = None, limit: int = 100,
-              on_applied: Optional[Callable[[str, Dict[str, Any], Any, float], None]] = None) -> int:
+              pre_commit: Optional[Callable[[str, Dict[str, Any], float], None]] = None) -> int:
         n = 0
         while n < limit:
             try:
@@ -366,12 +374,7 @@ class WriteQueue:
             except queue.Empty:
                 break
             try:
-                p.result = apply(con, p.action, p.args, p.actor, now)
-                if on_applied is not None:
-                    try:
-                        on_applied(p.action, p.args, p.result, time.time() if now is None else now)
-                    except Exception:   # 附帶動作失敗不能讓已成功的寫入變成「失敗」
-                        pass
+                p.result = apply(con, p.action, p.args, p.actor, now, pre_commit)
             except OpError as e:
                 p.error = e
             except Exception as e:   # 不讓一個壞命令拖垮主迴圈

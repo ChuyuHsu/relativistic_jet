@@ -47,12 +47,18 @@ class WriteTest(unittest.TestCase):
     def test_approve_revoke_cycle_and_audit(self):
         with tempfile.TemporaryDirectory() as t:
             con = fresh(t)
-            r = ops.apply(con, "approve", {"branch": "feat-b", "by": "rev"}, "t", now=3000.0)
+            sha = con.execute("SELECT head_sha FROM branches WHERE name='feat-b'").fetchone()[0]
+            for bad in (None, "abc", "0" * 40):   # 沒帶／太短／不是目前的版本
+                with self.assertRaises(ops.OpError) as cm:
+                    ops.apply(con, "approve", {"branch": "feat-b", "sha": bad}, "t")
+                self.assertIn(cm.exception.code, (400, 409))
+            self.assertEqual(con.execute("SELECT count(*) FROM approvals WHERE branch='feat-b'").fetchone()[0], 0)
+            r = ops.apply(con, "approve", {"branch": "feat-b", "sha": sha, "by": "rev"}, "t", now=3000.0)
             self.assertTrue(r["approved"])
-            self.assertTrue(ops.apply(con, "approve", {"branch": "feat-b"}, "t")["already"])
+            self.assertTrue(ops.apply(con, "approve", {"branch": "feat-b", "sha": sha[:8]}, "t")["already"])
             r = ops.apply(con, "revoke", {"branch": "feat-b"}, "t", now=3001.0)
             self.assertEqual(r["state"], "selftest_green")   # 排隊中撤回→回自測綠
-            self.assertEqual(con.execute("SELECT count(*) FROM audit").fetchone()[0], 3)
+            self.assertGreaterEqual(con.execute("SELECT count(*) FROM audit").fetchone()[0], 3)
 
     def test_priority_validation(self):
         with tempfile.TemporaryDirectory() as t:
@@ -120,11 +126,12 @@ class WriteTest(unittest.TestCase):
             with self.assertRaises(ops.OpError):
                 ops.apply(con, "drop-table", {}, "t")
             wq = ops.WriteQueue()
-            p = wq.submit("approve", {"branch": "feat-b"}, "q")
+            sha = con.execute("SELECT head_sha FROM branches WHERE name='feat-b'").fetchone()[0]
+            p = wq.submit("approve", {"branch": "feat-b", "sha": sha}, "q")
             self.assertFalse(p.done.is_set())   # 沒 drain 前不會執行
             wq.drain(con)
             self.assertTrue(p.done.is_set() and p.error is None)
-            bad = wq.submit("approve", {"branch": "nope"}, "q")
+            bad = wq.submit("approve", {"branch": "nope", "sha": sha}, "q")
             wq.drain(con)
             self.assertEqual(bad.error.code, 404)
 
@@ -139,3 +146,19 @@ class WriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RevokeLogTest(unittest.TestCase):
+    def test_revoke_aborts_when_log_fails(self):
+        with tempfile.TemporaryDirectory() as t:
+            con = fresh(t)
+
+            def boom(action, args, now):
+                raise OSError("disk full")
+            with self.assertRaises(OSError):
+                ops.apply(con, "revoke", {"branch": "feat-a"}, "t", pre_commit=boom)
+            self.assertEqual(con.execute("SELECT count(*) FROM approvals WHERE branch='feat-a' AND revoked_at IS NULL").fetchone()[0], 1)
+            seen = []
+            ops.apply(con, "revoke", {"branch": "feat-a"}, "t", pre_commit=lambda a, b, n: seen.append(a))
+            self.assertEqual(seen, ["revoke"])
+            self.assertEqual(con.execute("SELECT count(*) FROM approvals WHERE branch='feat-a' AND revoked_at IS NULL").fetchone()[0], 0)

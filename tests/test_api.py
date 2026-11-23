@@ -64,7 +64,8 @@ class ApiTest(unittest.TestCase):
     def test_write_goes_through_main_loop_and_audits(self):
         e = self.env
         with Running(e) as r:
-            code, body = call(r.url, "/approve", "X-Jet-Write-Key", e["write_key"], {"branch": "feat-b"})
+            sha = json.loads(call(r.url, "/branches/feat-b", "X-Jet-Read-Key", e["read_key"], None)[1])["head_sha"]
+            code, body = call(r.url, "/approve", "X-Jet-Write-Key", e["write_key"], {"branch": "feat-b", "sha": sha})
             self.assertEqual(code, 200, body)
             self.assertTrue(json.loads(body)["approved"])
             code, body = call(r.url, "/revoke", "X-Jet-Write-Key", e["write_key"], {"branch": "feat-b"})
