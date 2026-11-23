@@ -199,6 +199,9 @@ def _enrich(con, r) -> Dict[str, Any]:
             e["failed_items"] = [dict(x) for x in con.execute(
                 "SELECT item_id, status, summary FROM run_items WHERE run_id=? AND status IN ('fail','timeout') "
                 "ORDER BY item_id LIMIT 50", (run[0],))]
+            for i, x in enumerate(e["failed_items"]):      # 失敗摘要：前 10 項給足，其餘縮短（事件整包不要太大）
+                if x.get("summary"):
+                    x["summary"] = x["summary"][:1200 if i < 10 else 200]
     # 人看的 detail 一律帶提交與紅項（只吃 id／kind／branch／detail 的對方也看得到）；結構化欄位另外有
     parts = []
     if e.get("commit"):

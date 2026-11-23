@@ -531,3 +531,26 @@ class EnvTest(Base):
         _, r = self.run_job(j)
         self.assertEqual(r.status, "pass")
         self.assertIn(",".join(map(str, sorted(c))) + " " + str(len(c)), rd(j.log_path))
+
+
+class FailureExcerptTest(unittest.TestCase):
+    def test_excerpt_from_log_and_report_summary(self):
+        import json, os, tempfile
+        from jet import executor as ex
+        d = tempfile.mkdtemp()
+        log = os.path.join(d, "all.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("開始\n" + "\n".join("noise %d" % i for i in range(50)) +
+                    "\nFAIL unit_a: 期望 3 得到 4\n  at foo.py:12\n  at bar.py:7\nPASS unit_b\n")
+        out = ex.failure_excerpt(log, "unit_a")
+        self.assertTrue(out.startswith("FAIL unit_a"))
+        self.assertIn("foo.py:12", out)
+        tail = ex.failure_excerpt(log, "沒這項", lines=3)           # 記錄沒提到：附最後幾行
+        self.assertIn("最後 3 行", tail)
+        self.assertIn("PASS unit_b", tail)
+        self.assertEqual(ex.failure_excerpt(os.path.join(d, "nope.log"), "x"), "")
+        rep = os.path.join(d, "r.json")
+        with open(rep, "w", encoding="utf-8") as f:
+            json.dump({"items": [{"id": "u", "status": "fail", "summary": " 原因 "}, {"id": "v", "status": "fail"},
+                                 {"id": "w", "status": "pass", "summary": "x"}]}, f)
+        self.assertEqual(ex.read_report_summaries(rep), {"u": "原因"})

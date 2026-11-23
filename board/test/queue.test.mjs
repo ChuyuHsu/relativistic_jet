@@ -95,6 +95,14 @@ test('撤回放行回審查中（保留送審版本）；放行後又送審新�
   assert.deepEqual([c.stage, c.submitted_commit, c.approved_commit], ['reviewing', SHA2, null]);
 });
 
+test('紅項的失敗原因 summary 保留在卡上、過長截斷', async () => {
+  const e = mkenv(); await approved(e, 'c1');
+  await ev(e, 'c1', { kind: 'tested_red', approved_sha: SHA, retest: 0, detail: '紅', failed_items: [{ item_id: 'unit', status: 'fail', summary: 'FAIL unit: 斷言\n  at a.py:1' }, { item_id: 'big', status: 'fail', summary: 'x'.repeat(5000) }] });
+  const c = await getCard(e, 'c1');
+  assert.equal(c.rejected.failed_items[0].summary, 'FAIL unit: 斷言\n  at a.py:1');
+  assert.equal(c.rejected.failed_items[1].summary.length, 1200);
+});
+
 test('排隊器退回→重測：放行保留、retest 加一、清結果，回自測中；只有排隊器退回的能重測', async () => {
   const e = mkenv(); await approved(e, 'c1');
   await ev(e, 'c1', { kind: 'tested_red', approved_sha: SHA, retest: 0, detail: '紅', failed_items: [{ item_id: 'unit', status: 'fail' }] });

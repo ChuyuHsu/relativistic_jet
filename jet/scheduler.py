@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from . import store
+from . import executor, store
 from .batch import GREEN, RED, PENDING, ladder, judge
 from .cores import CorePool, PhysicalPool, foreign_busy as _foreign_busy, own_leftovers, kill_leftovers
 from .executor import Job
@@ -782,12 +782,19 @@ class Scheduler:
     def _store_items(self, rid, res, base: Set[str]):
         """紅項寫進 run_items（通知與看板要看）；本來就紅的（已知紅）標成 known，不算這條分支的。"""
         c = self.con
+        rr0 = c.execute("SELECT log_path FROM runs WHERE id=?", (rid,)).fetchone()
         if res.status == "timeout":
             c.execute("INSERT OR REPLACE INTO run_items(run_id,item_id,status,summary) VALUES(?,?,?,?)",
-                      (rid, "逾時", "timeout", "測試逾時"))
+                      (rid, "逾時", "timeout", ("測試逾時\n" + (executor.failure_excerpt(rr0["log_path"], "") if rr0 and rr0["log_path"] else "")).strip()))
+        rr = c.execute("SELECT log_path, report_path FROM runs WHERE id=?", (rid,)).fetchone()
+        sums = executor.read_report_summaries(rr["report_path"]) if rr and rr["report_path"] else {}
         for it in res.failed_items:
+            st = "known" if it in base else "fail"
+            summ = sums.get(it)
+            if not summ and st == "fail" and rr and rr["log_path"]:
+                summ = executor.failure_excerpt(rr["log_path"], it) or None   # 報告沒寫原因：從記錄抽失敗那幾行
             c.execute("INSERT OR REPLACE INTO run_items(run_id,item_id,status,summary) VALUES(?,?,?,?)",
-                      (rid, it, "known" if it in base else "fail", None))
+                      (rid, it, st, summ[:1200] if summ else None))
 
     @staticmethod
     def _red(res, baseline: Set[str]) -> bool:

@@ -22,7 +22,7 @@ try{view=localStorage.getItem('rv')||'g'}catch(e){}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function cardHtml(c){
     const r=c.rejected;
-    const why=r?`<span class="m">${r.source==='review'?'審查退回':(r.halted?'排隊器暫停':'排隊器退回')}：${esc(r.reason||'')}${(r.failed_items||[]).length?'（紅項 '+(r.failed_items||[]).map(f=>esc(f.item_id)).join('、')+'）':''}</span>`:'';
+    const why=r?`<span class="m">${r.source==='review'?'審查退回':(r.halted?'排隊器暫停':'排隊器退回')}：${esc(r.reason||'')}${(r.failed_items||[]).length?'（紅項 '+(r.failed_items||[]).map(f=>esc(f.item_id)).join('、')+'）':''}</span>${(r.failed_items||[]).filter(f=>f.summary).map(f=>`<details class="m"><summary>${esc(f.item_id)} 失敗原因</summary><pre style="white-space:pre-wrap;margin:4px 0;font-size:12px">${esc(f.summary)}</pre></details>`).join('')}`:'';
     return `<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">${esc(S[c.stage])}・優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.branch?'・'+esc(c.branch):''}</span>${c.parent?`<span class="m">父卡 ${esc(c.parent)}（${esc(S[c.parent_stage]||c.parent_stage)}）${c.parent_blocked?'・父卡被放棄或不存在，需改接':(c.waiting_parent?'・等父卡合併':'')}</span>`:''}${why}</div>`}
 // 關係圖：有父子關係的卡依父鏈分層由上往下畫（一串卡一條鏈）；沒有關係的卡收在下面的小方塊。已合併、放棄預設收起。
 function graph(){

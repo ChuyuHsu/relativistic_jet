@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import IO, List, Optional, Set
+from typing import IO, Dict, List, Optional, Set
 
 from . import cores as _cores
 
@@ -163,6 +163,48 @@ def read_report(path: str) -> Optional[List[str]]:
         return [str(it["id"]) for it in items if it.get("status") in RED]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
+
+
+def read_report_summaries(path: str) -> Dict[str, str]:
+    """報告裡紅項的 summary（有寫才有）。壞報告回空 dict。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return {str(it["id"]): str(it["summary"]).strip() for it in d["items"]
+                if it.get("status") in RED and str(it.get("summary") or "").strip()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+_FAIL_WORDS = ("FAIL", "ERROR", "Error", "Traceback", "失敗", "錯誤", "紅")
+
+
+def failure_excerpt(log_path: str, item_id: str, lines: int = 15, max_chars: int = 1200,
+                    tail_bytes: int = 2_000_000) -> str:
+    """從測試記錄（all.log）抽出這個紅項的失敗那幾行：
+    找最後一次出現項目名、而且同一行有失敗字眼的位置，從那行起取 lines 行；沒有就取最後一次出現項目名的位置；
+    整份記錄都沒提到這個項目名（或項目是「逾時」）就取記錄最後 lines 行（前面加註）。讀不到記錄回空字串。"""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            data = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    ls = [ln.rstrip() for ln in data.splitlines()]
+    while ls and not ls[-1]:
+        ls.pop()
+    if not ls:
+        return ""
+    hits = [i for i, ln in enumerate(ls) if item_id and item_id in ln]
+    pick = [i for i in hits if any(w in ls[i] for w in _FAIL_WORDS)] or hits
+    if pick:
+        i = pick[-1]
+        out = "\n".join(ls[i:i + lines])
+    else:
+        out = "（記錄沒提到這項，附最後 %d 行）\n" % lines + "\n".join(ls[-lines:])
+    return out[:max_chars]
 
 
 class Executor:

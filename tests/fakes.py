@@ -2,6 +2,7 @@
 
 世界模型：每條分支有「會讓哪些測試項目紅」；疊起來的提交 sha＝"main:名稱+名稱…"，
 紅項＝main 本來紅的＋所有成員的紅項。"""
+import os
 import contextlib
 from jet.executor import JobResult
 from jet.gitops import MainMoved, StackResult
@@ -143,6 +144,13 @@ class FakeExecutor:
         reds = self.repo.reds_of(sha, "gate" if h.job.layer != "selftest" else "selftest")
         if self.flaky and self.rng and self.rng.random() < self.flaky_p:
             reds = set(reds) | {self.flaky}                                # 抖動項：跟程式碼無關，隨機紅
+        if reds and getattr(h.job, "log_path", None):                       # 紅的時候留一份像樣的記錄，讓排隊器抽失敗原因
+            try:
+                os.makedirs(os.path.dirname(h.job.log_path), exist_ok=True)
+                with open(h.job.log_path, "w", encoding="utf-8") as f:
+                    f.write("開始\n" + "".join("FAIL %s: 斷言失敗 %s\n  at x.py:1\n" % (r, r) for r in sorted(reds)))
+            except OSError:
+                pass
         return JobResult("fail" if reds else "pass", 1 if reds else 0, sorted(reds))
 
     def cancel(self, h):

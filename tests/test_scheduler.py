@@ -84,6 +84,16 @@ class HappyPath(Base):
         self.assertIn("t1", store.get_branch(self.con, "a")["reject_reason"])
         self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='rejected'").fetchone()[0], 1)
 
+    def test_red_items_carry_failure_summary_from_log(self):
+        self.mk()
+        self.repo.add("a", reds={"t1"})
+        self.go(5)
+        rows = self.con.execute("SELECT item_id, summary FROM run_items WHERE status='fail'").fetchall()
+        self.assertEqual([r["item_id"] for r in rows], ["t1"])
+        self.assertTrue(rows[0]["summary"].startswith("FAIL t1: 斷言失敗"))
+        ev = self.con.execute("SELECT count(*) FROM events WHERE kind='rejected'").fetchone()[0]
+        self.assertEqual(ev, 1)
+
     def test_selftest_timeout_is_red(self):
         self.mk()
         self.repo.add("a")
