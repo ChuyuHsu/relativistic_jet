@@ -70,6 +70,12 @@ async function badParent(db, id, parent) {
   return null;
 }
 
+// 放棄理由要寫清楚：只寫卡號或太短的不算（要寫被哪張取代、哪個提交已在 main、或哪項定案撤掉）
+function reasonProblem(why) {
+  const t = String(why || '').trim();
+  if (t.length < 10 || /^[A-Za-z0-9_.\/-]+$/.test(t)) return 'discard_reason 要寫清楚為什麼這張卡本身不再需要（被哪張取代、哪個提交已在 main、或哪項定案撤掉）；只寫卡號或太短的不算，父卡放棄也不是理由';
+  return null;
+}
 async function log(db, id, actor, note) {
   await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(id, now(), actor, note).run();
 }
@@ -254,6 +260,14 @@ export async function handle(req, env, ctx) {
     const id = m[1];
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first();
     if (!c) return json({ error: 'not found' }, 404);
+    if (c.status === 'dropped' && body.status === undefined && 'discard_reason' in body && Object.keys(body).every(k => ['actor', 'discard_reason', 'note'].includes(k))) {   // 已放棄的卡只允許補寫放棄理由這一欄
+      const why = String(body.discard_reason ?? '').trim();
+      const bad = reasonProblem(why);
+      if (bad) return json({ error: bad }, 400);
+      await db.prepare("UPDATE cards SET discard_reason=?,updated_at=? WHERE id=? AND status='dropped'").bind(why, now(), id).run();
+      await log(db, id, actor, '補寫放棄理由' + (body.note ? `：${body.note}` : ''));
+      return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
+    }
     if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
     const resend = body.status === 'dropped' && Object.keys(body).every(k => ['status', 'actor', 'superseded_by', 'discard_reason', 'note'].includes(k));
     if (stageOf(c) === 'dropping' && !resend) return json({ error: '放棄待查中，等排隊器查完才能動這張卡', stage: 'dropping' }, 409);   // 待查中一律不能改（重送放棄請求除外，見下）
@@ -291,6 +305,7 @@ export async function handle(req, env, ctx) {
         } else {
           const sup = body.superseded_by ? String(body.superseded_by) : '', why = String(body.discard_reason ?? '').trim();
           if (!sup && !why) return json({ error: '放棄要帶 superseded_by（由哪張未放棄的卡接手）或 discard_reason（真的不要了的原因）', stage }, 400);
+          if (!sup) { const bad = reasonProblem(why); if (bad) return json({ error: bad, stage }, 400); }
           if (sup) {
             const sc = sup === id ? null : await db.prepare('SELECT status FROM cards WHERE id=?').bind(sup).first();
             if (!sc || sc.status === 'dropped') return json({ error: 'superseded_by 必須是另一張存在且未放棄的卡' }, 409);

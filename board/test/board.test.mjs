@@ -74,8 +74,8 @@ test('PATCH status 只能是還卡 open 或放棄 dropped；放棄是結局；�
   assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'open' })).status, 200);   // 重送：結果一樣
   const c2 = await (await call(e, 'POST', '/api/claim', { id: 'c', owner: 'B' })).json();
   assert.equal(c2.branch, 'dev/c');                                          // 重領拿到同一條
-  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'dropped', discard_reason: '測試' })).status, 200);
-  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'dropped', discard_reason: '測試' })).status, 200);
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' })).status, 200);
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' })).status, 200);
   assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'open' })).status, 409);   // 放棄後任何動作都拒絕
 });
 

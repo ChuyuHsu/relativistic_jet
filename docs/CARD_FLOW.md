@@ -138,6 +138,7 @@
 - 其餘一律：放棄請求必須帶 `superseded_by`（由哪張未放棄的另一張卡接手）或 `discard_reason`（真的不要了的原因，非空白），都沒帶回 400。帶了之後卡進 `dropping`（不算已放棄；清單上不再給排隊器測或合，改列在 `drop_checks`；沒人領的卡也不能再被領走；`branch` 欄空時用 `dev/<卡號小寫>` 當分支名送查，分支不存在排隊器回 `unmerged:false` 自然放行）。待查中的卡只能等結果，改任何欄位與其他動作一律 409（重送同一個放棄請求回 200）。`drop_checks` 每筆帶 `dropping_at`，事件若原樣帶回就比對；沒帶時比 `target`（等於現在接手卡的分支，或接手分支還不存在時排隊器回的 `main`）。對不上，就是上一輪晚到的，丟掉。
 - 排隊器查完回 `drop_checked` 事件（第 7 節）。帶 `superseded_by` 的：沒有不在 main 的改動、或接手的卡全都涵蓋（`covered`）才轉 `dropped`；否則放棄不成立，卡回到原階段，通知負責串與管理者（附缺的檔）。只帶 `discard_reason` 的：一律轉 `dropped`；有不在 main 的改動時另發通知給管理者（卡號、原因、缺的檔數），事後看一眼。
 - 卡片回傳 `dropped:{superseded_by, discard_reason, unmerged, checked_at}`（`dropping`、`dropped` 時才有）。
+- 只帶 `discard_reason`（沒帶 `superseded_by`）時，理由至少 10 個字、不能只是卡號，要寫被哪張取代、哪個提交已在 main、或哪項定案撤掉；父卡放棄不是理由，看板也不會因父卡放棄而連帶放棄子卡（只通知管理者、子卡被擋）。已放棄的卡只允許 `PATCH {actor, discard_reason}` 補寫理由這一欄（同樣檢查），其他欄位與狀態仍是 409。
 
 ## 5. 四條一定要守的規則
 

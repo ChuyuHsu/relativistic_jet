@@ -26,7 +26,7 @@ const br = id => `dev/${id.toLowerCase()}`;
 const ev = (e, id, o) => hook(e, [{ id: ++ev.n, branch: br(id), card: id, ...o }]);
 ev.n = 0;
 // 放棄（放棄防呆）：帶原因進待查，再由排隊器回報查驗通過
-const drop = async (e, id) => { const r = await call(e, 'PATCH', `/api/cards/${id}`, { status: 'dropped', discard_reason: '測試' }); if ((await getCard(e, id)).stage === 'dropping') await ev(e, id, { kind: 'drop_checked', unmerged: false, covered: true }); return r; };
+const drop = async (e, id) => { const r = await call(e, 'PATCH', `/api/cards/${id}`, { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' }); if ((await getCard(e, id)).stage === 'dropping') await ev(e, id, { kind: 'drop_checked', unmerged: false, covered: true }); return r; };
 const stageOf = async (e, id) => (await getCard(e, id)).stage;
 
 test('hook 與拉清單要權杖', async () => {
@@ -506,7 +506,7 @@ test('放棄防呆：沒送審直接放棄；送審過要帶 superseded_by 或 d
   const e = mkenv({ ADMIN_THREADS: 'adm' });
   await claim(e, 'n1');                                                                    // 領了沒送審：也要先查（舊分支補的卡、領了的卡都一樣）
   assert.equal((await call(e, 'PATCH', '/api/cards/n1', { status: 'dropped' })).status, 400);
-  assert.equal((await (await call(e, 'PATCH', '/api/cards/n1', { status: 'dropped', discard_reason: '開錯' })).json()).stage, 'dropping');
+  assert.equal((await (await call(e, 'PATCH', '/api/cards/n1', { status: 'dropped', discard_reason: '開錯：卡號寫錯，本身不再需要' })).json()).stage, 'dropping');
   // 例外：建卡人（actor 相同）在卡還是 new、10 分鐘內放棄 → 直接放棄；別人、或超過 10 分鐘都要查
   await call(e, 'POST', '/api/cards', { id: 'x1', title: 'x1', actor: 'maker' });
   assert.equal((await call(e, 'PATCH', '/api/cards/x1', { status: 'dropped', actor: 'other' })).status, 400);
@@ -515,7 +515,7 @@ test('放棄防呆：沒送審直接放棄；送審過要帶 superseded_by 或 d
   assert.equal((await (await call(e, 'PATCH', '/api/cards/x1', { status: 'dropped', actor: 'maker' })).json()).stage, 'dropped');
   // 沒人領、branch 欄空的卡：進待查，用 dev/<卡號小寫> 當分支名送查；待查中不能被領走
   await call(e, 'POST', '/api/cards', { id: 'Old-1', title: 'old', actor: 'maker' }); await e.DB.prepare("UPDATE cards SET created_at=created_at-700 WHERE id='Old-1'").run();
-  await call(e, 'PATCH', '/api/cards/Old-1', { status: 'dropped', discard_reason: '舊的' });
+  await call(e, 'PATCH', '/api/cards/Old-1', { status: 'dropped', discard_reason: '舊的：已被新版本整個取代' });
   const dc = (await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json()).drop_checks.find(x => x.card === 'Old-1');
   assert.equal(dc.branch, 'dev/old-1');
   assert.equal((await call(e, 'POST', '/api/claim', { id: 'Old-1', owner: 'z' })).status, 409);
@@ -557,13 +557,13 @@ test('放棄防呆：drop_checked——covered 才放棄，否則回原階段並
   assert.equal((await getCard(e, 'c1')).stage, 'dropped');
   // 只帶 discard_reason：一律放棄；有漏的通知總指揮
   await claim(e, 'd1', 'thd'); await act(e, 'd1', 'submit', { commit: SHA });
-  await call(e, 'PATCH', '/api/cards/d1', { status: 'dropped', discard_reason: '方向作廢' });
+  await call(e, 'PATCH', '/api/cards/d1', { status: 'dropped', discard_reason: '方向作廢：定案已撤掉這項功能' });
   await ev(e, 'd1', { kind: 'drop_checked', unmerged: true, covered: false, missing_count: 3, missing_files: ['x'] });
   assert.equal(await stageOf(e, 'd1'), 'dropped');
   assert.equal((await e.DB.prepare("SELECT * FROM outbox WHERE kind='drop_discarded'").all()).results.length, 1);
   // 沒漏：不通知
   await claim(e, 'd2', 'thd2'); await act(e, 'd2', 'submit', { commit: SHA });
-  await call(e, 'PATCH', '/api/cards/d2', { status: 'dropped', discard_reason: 'x' });
+  await call(e, 'PATCH', '/api/cards/d2', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' });
   await ev(e, 'd2', { kind: 'drop_checked', unmerged: false, covered: true });
   assert.equal((await e.DB.prepare("SELECT * FROM outbox WHERE kind='drop_discarded'").all()).results.length, 1);
 });
@@ -603,7 +603,7 @@ test('desired 唯讀：TOKEN 也能讀，壞權杖 401', async () => {
 test('放棄查驗事件的處理結果記進 hook_log（過期與收下都留原文）', async () => {
   const e = mkenv(); await claim(e, 'c1', 'th1'); await act(e, 'c1', 'submit', { commit: SHA });
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true });   // 不在待查：過期
-  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: 'x' });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' });
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true });
   const rows = (await e.DB.prepare('SELECT outcome FROM hook_log ORDER BY n').all()).results.map(r => r.outcome);
   assert.match(rows[0], /過期/); assert.equal(rows[1], '收下');
@@ -642,7 +642,7 @@ test('hook 併發：同一批事件同時送兩次，通知與紀錄只寫一份
 test('放棄查驗：送出前卡被人取消放棄，結果不覆蓋、不發通知', async () => {
   const e = mkenv({ ADMIN_THREADS: 'adm' }); await claim(e, 'c1', 'th1'); await claim(e, 'k', 'thk', { parent: 'c1' });
   await act(e, 'c1', 'submit', { commit: SHA });
-  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: 'x' });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' });
   const real = e.DB.batch.bind(e.DB);
   e.DB.batch = async l => { await e.DB.prepare("UPDATE cards SET dropping_at=NULL,discard_reason=NULL WHERE id='c1'").run(); return real(l); };   // 預載之後、送出之前，有人把放棄取消了
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true });
@@ -655,8 +655,8 @@ test('放棄待查中再放棄一次：換原因或接手卡會覆蓋並開新�
   const d1 = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' })).json();
   const same = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' })).json();
   assert.equal(same.dropping_at, d1.dropping_at);                                              // 一樣：重送
-  const d2 = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '真的不要' })).json();
-  assert.equal(d2.stage, 'dropping'); assert.equal(d2.dropped.superseded_by, null); assert.equal(d2.dropped.discard_reason, '真的不要');
+  const d2 = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '真的不要：內容已在 main 的某提交' })).json();
+  assert.equal(d2.stage, 'dropping'); assert.equal(d2.dropped.superseded_by, null); assert.equal(d2.dropped.discard_reason, '真的不要：內容已在 main 的某提交');
   assert.ok(d2.dropping_at > d1.dropping_at);                                                  // 新一輪
   assert.equal((await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c1' })).status, 409);   // 覆蓋也照樣驗證
   const bad = await (await ev(e, 'c1', { kind: 'drop_checked', detail: '有 None 個檔不在 None', dropping_at: d2.dropping_at })).json();   // 缺 unmerged／covered
@@ -668,14 +668,14 @@ test('放棄待查中再放棄一次：換原因或接手卡會覆蓋並開新�
 
 test('放棄查驗事件沒帶 card、card 的 branch 欄是空的：用推導的分支名認得', async () => {
   const e = mkenv(); await call(e, 'POST', '/api/cards', { id: 'Old-2', title: 'o', actor: 'maker' }); await e.DB.prepare("UPDATE cards SET created_at=created_at-700 WHERE id='Old-2'").run();
-  await call(e, 'PATCH', '/api/cards/Old-2', { status: 'dropped', discard_reason: 'x' });
+  await call(e, 'PATCH', '/api/cards/Old-2', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' });
   const r = await (await hook(e, [{ id: 'dn:1', kind: 'drop_checked', branch: 'dev/old-2', unmerged: false, covered: true }])).json();
   assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'Old-2'), 'dropped');
 });
 
 test('放棄待查太久沒結果通知管理者一次；舊一輪的查驗結果不會套到新一輪', async () => {
   const e = mkenv({ ADMIN_THREADS: 'adm' }); await claim(e, 'c1', 'th1'); await act(e, 'c1', 'submit', { commit: SHA });
-  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: 'x' });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '測試用：這張卡本身不再需要' });
   assert.equal((await stuckCheck(e)).notified, 0);
   await e.DB.prepare('UPDATE cards SET dropping_at=dropping_at-3600').run();
   assert.equal((await stuckCheck(e)).notified, 1);
@@ -720,4 +720,24 @@ test('信箱：一次領／ack／release 上百筆（D1 一句最多 100 個參�
   assert.equal((await (await call(e, 'POST', '/api/outbox/release', { actor: '傳令', ids })).json()).released, 150);
   const c = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
   assert.equal((await (await call(e, 'POST', '/api/outbox/ack', { actor: '傳令', ids: c.messages.flatMap(m => m.ids) })).json()).acked, 150);
+});
+
+test('放棄理由要寫清楚：只寫卡號或太短的 400；已放棄的卡只能補寫 discard_reason 這一欄', async () => {
+  const e = mkenv();
+  await claim(e, 'r1', 'th'); await act(e, 'r1', 'submit', { commit: SHA });
+  for (const bad of ['r1', '短短的', 'HS10-SMOKE']) {
+    const r = await call(e, 'PATCH', '/api/cards/r1', { status: 'dropped', discard_reason: bad });
+    assert.equal(r.status, 400);
+  }
+  await drop(e, 'r1');
+  assert.equal((await getCard(e, 'r1')).stage, 'dropped');
+  // 補寫：只改 discard_reason；其他欄位或狀態仍不能改
+  assert.equal((await call(e, 'PATCH', '/api/cards/r1', { discard_reason: 'r1' })).status, 400);
+  assert.equal((await call(e, 'PATCH', '/api/cards/r1', { title: 'x' })).status, 409);
+  assert.equal((await call(e, 'PATCH', '/api/cards/r1', { discard_reason: '已被 r2 取代，內容全在 main', title: 'x' })).status, 409);
+  const ok = await call(e, 'PATCH', '/api/cards/r1', { discard_reason: '內容已在 main：逐檔比對 0 檔不同' });
+  assert.equal(ok.status, 200);
+  assert.equal((await getCard(e, 'r1')).dropped.discard_reason, '內容已在 main：逐檔比對 0 檔不同');
+  // 已合併的卡不能補寫
+  assert.equal((await call(e, 'PATCH', '/api/cards/nope', { discard_reason: '內容已在 main：逐檔比對 0 檔不同' })).status, 404);
 });
