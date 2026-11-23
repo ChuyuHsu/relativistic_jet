@@ -25,6 +25,18 @@ test('建立、重複 id 回 409', async () => {
   assert.equal((await mk(e, 'c1')).status, 409);
 });
 
+test('建立時資料庫出其他錯誤：回 500 與原因，不能誤報「id 已存在」', async () => {
+  const e = env();
+  const real = e.DB.prepare.bind(e.DB);
+  e.DB.prepare = (sql) => {
+    if (/^INSERT INTO cards\(/.test(sql)) return { bind: () => ({ run: async () => { throw new Error('D1_ERROR: transient'); } }) };
+    return real(sql);
+  };
+  const r = await mk(e, 'fresh');
+  assert.equal(r.status, 500);
+  assert.match((await r.json()).error, /建立失敗/);
+});
+
 test('依優先序認領，同一張只有一人拿到', async () => {
   const e = env();
   await mk(e, 'low', 200); await mk(e, 'high', 1);

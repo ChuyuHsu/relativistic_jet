@@ -204,7 +204,12 @@ export async function handle(req, env, ctx) {
     try {
       await db.prepare('INSERT INTO cards(id,title,body,area,priority,parent,owner_thread,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
         .bind(String(body.id), String(body.title), String(body.body || ''), String(body.area || ''), Number(body.priority ?? 100), body.parent || null, body.owner_thread ?? null, t, t).run();
-    } catch (e) { return json({ error: 'id 已存在' }, 409); }
+    } catch (e) {
+      // 只有真的撞到同 id 才說已存在；其他錯誤（資料庫暫時失敗、欄位問題）原樣回報，不要誤導
+      const dup = await db.prepare('SELECT 1 FROM cards WHERE id=?').bind(String(body.id)).first().catch(() => null);
+      if (dup) return json({ error: 'id 已存在' }, 409);
+      return json({ error: '建立失敗：' + String(e && e.message || e).slice(0, 200) }, 500);
+    }
     await log(db, body.id, actor, '建立');
     return json({ ok: true }, 201);
   }
