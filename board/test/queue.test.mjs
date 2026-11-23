@@ -585,3 +585,26 @@ test('放棄查驗：送出前卡被人取消放棄，結果不覆蓋、不發�
   assert.notEqual(await stageOf(e, 'c1'), 'dropped');
   assert.equal((await e.DB.prepare("SELECT count(*) n FROM outbox WHERE kind='parent_blocked'").first()).n, 0);
 });
+
+test('放棄待查中再放棄一次：換原因或接手卡會覆蓋並開新一輪；內容一樣當重送；缺欄位的查驗結果不放行', async () => {
+  const e = mkenv(); await claim(e, 'c1', 'th1'); await claim(e, 'c2', 'th2'); await act(e, 'c1', 'submit', { commit: SHA });
+  const d1 = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' })).json();
+  const same = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' })).json();
+  assert.equal(same.dropping_at, d1.dropping_at);                                              // 一樣：重送
+  const d2 = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '真的不要' })).json();
+  assert.equal(d2.stage, 'dropping'); assert.equal(d2.dropped.superseded_by, null); assert.equal(d2.dropped.discard_reason, '真的不要');
+  assert.ok(d2.dropping_at > d1.dropping_at);                                                  // 新一輪
+  assert.equal((await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c1' })).status, 409);   // 覆蓋也照樣驗證
+  const bad = await (await ev(e, 'c1', { kind: 'drop_checked', detail: '有 None 個檔不在 None', dropping_at: d2.dropping_at })).json();   // 缺 unmerged／covered
+  assert.equal(bad.stale, 1); assert.equal(await stageOf(e, 'c1'), 'dropping');
+  assert.equal((await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, dropping_at: d1.dropping_at })).json()).stale, 1);   // 上一輪的
+  await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, dropping_at: d2.dropping_at });
+  assert.equal(await stageOf(e, 'c1'), 'dropped');
+});
+
+test('放棄查驗事件沒帶 card、card 的 branch 欄是空的：用推導的分支名認得', async () => {
+  const e = mkenv(); await call(e, 'POST', '/api/cards', { id: 'Old-2', title: 'o', actor: 'maker' }); await e.DB.prepare("UPDATE cards SET created_at=created_at-700 WHERE id='Old-2'").run();
+  await call(e, 'PATCH', '/api/cards/Old-2', { status: 'dropped', discard_reason: 'x' });
+  const r = await (await hook(e, [{ id: 'dn:1', kind: 'drop_checked', branch: 'dev/old-2', unmerged: false, covered: true }])).json();
+  assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'Old-2'), 'dropped');
+});

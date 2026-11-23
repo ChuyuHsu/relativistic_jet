@@ -41,6 +41,11 @@ export async function handleHook(req, env, ctx) {
     load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
   for (const ids of chunk([...new Set(events.filter(e => e.kind === 'drop_checked').flatMap(e => [e.card].filter(Boolean)).map(String))], 90))
     load((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results);
+  // 放棄待查、branch 欄是空的卡：排隊器用 <前綴><卡號小寫> 當分支名查，事件的 branch 對得上這個推導名
+  const droppingNoBranch = events.some(e => e.kind === 'drop_checked' && e.branch)
+    ? (await db.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped' AND branch IS NULL").all()).results : [];
+  const derived = new Map(droppingNoBranch.map(c => [`${env.BRANCH_PREFIX ?? 'dev/'}${String(c.id).toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}`, c]));
+  for (const c of droppingNoBranch) if (!byId.has(c.id)) byId.set(c.id, c); else Object.assign(byId.get(c.id), c);
   // ---- 逐筆處理，寫入累積成語句 ----
   let cur = [];
   const q = (sql, ...args) => cur.push(db.prepare(sql).bind(...args));
@@ -64,6 +69,7 @@ export async function handleHook(req, env, ctx) {
       }
       let card = branch ? byBranch.get(branch) : null;
       if (!card && kind === 'drop_checked' && e.card) card = byId.get(String(e.card));
+      if (!card && kind === 'drop_checked' && branch) { const d = derived.get(branch); if (d) card = byId.get(d.id); }
       const detail = e.detail ? String(e.detail).slice(0, 500) : '';
       if (!card) {
         unmatched++;
@@ -73,6 +79,8 @@ export async function handleHook(req, env, ctx) {
       }
       if (kind === 'drop_checked') {   // 放棄待查的結果：只對「放棄待查」的卡有效，其他一律當過期丟掉
         if (!card.dropping_at || card.status === 'dropped') { stale++; hl(e, `過期：卡不在待查（${card.status}）`); return; }
+        // 查驗結果缺必要欄位（unmerged／covered 不是布林）：當作排隊器沒查成，不能當成「沒有漏」放行
+        if (typeof e.unmerged !== 'boolean' || typeof e.covered !== 'boolean') { stale++; hl(e, '格式不全：unmerged／covered 要是布林'); return; }
         // 比對是哪一次放棄的結果：事件帶回 dropping_at 就必須相同；沒帶但有 target 就必須是現在接手卡的分支
         if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; hl(e, `過期：dropping_at 對不上（卡上 ${card.dropping_at}）`); return; }
         if (e.dropping_at == null && card.superseded_by && e.target != null) {

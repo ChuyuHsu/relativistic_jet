@@ -269,8 +269,12 @@ export async function handle(req, env, ctx) {
         sets.push('status=?', 'owner=NULL', 'owner_thread=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', 'stuck_notified_at=NULL', ...CLEAR_REVIEW.split(','));
         vals.push('open');
       } else if (body.status === 'dropped') { // 放棄：除已合併外任何階段都可；所有卡都要先查有沒有改動漏掉（放棄防呆），只有建卡人 10 分鐘內放棄還是 new 的卡例外
-        if (stage === 'dropped' || stage === 'dropping') return json(view(c));
+        if (stage === 'dropped') return json(view(c));
         if (stage === 'merged') return no();
+        if (stage === 'dropping') {   // 待查中再放棄一次：換了接手卡或原因就覆蓋（重新開一輪，上一輪晚到的結果作廢）；內容一樣就當重送
+          const sup0 = body.superseded_by ? String(body.superseded_by) : '', why0 = String(body.discard_reason ?? '').trim();
+          if ((!sup0 && !why0) || (sup0 === (c.superseded_by || '') && why0 === (c.discard_reason || ''))) return json(view(c));
+        }
         // 唯一例外（開錯卡用）：建卡的人在卡還是 new、建卡 10 分鐘內放棄，直接放棄；其餘所有卡都先進放棄待查
         const creator = (await db.prepare("SELECT actor FROM events WHERE card_id=? AND note='建立' ORDER BY n LIMIT 1").bind(id).first())?.actor;
         if (stage === 'new' && creator && creator === actor && now() - c.created_at <= 600) {
@@ -283,7 +287,7 @@ export async function handle(req, env, ctx) {
             const sc = sup === id ? null : await db.prepare('SELECT status FROM cards WHERE id=?').bind(sup).first();
             if (!sc || sc.status === 'dropped') return json({ error: 'superseded_by 必須是另一張存在且未放棄的卡' }, 409);
           }
-          sets.push('dropping_at=?', 'superseded_by=?', 'discard_reason=?'); vals.push(now(), sup || null, why || null);
+          sets.push('dropping_at=?', 'superseded_by=?', 'discard_reason=?', 'drop_unmerged=NULL', 'drop_checked_at=NULL'); vals.push(Math.max(now(), (c.dropping_at || 0) + 1), sup || null, why || null);   // 新的一輪：dropping_at 一定比上一輪大，上一輪晚到的結果對不上
           dropping = true;
         }
       } else return json({ error: 'status 只能改成 open（還卡）或 dropped（放棄）；認領請用 /api/claim' }, 400);
