@@ -6,7 +6,7 @@
 卡片自己只管前段與結局：`open` 空、`claimed` 已認領、`dropped` 放棄。中段（待自測、自測綠、排隊、批測、合入、退回、暫停）一律是上游排隊器的分支狀態，存在卡片的 `phase` 欄位當快取，不當真相。`GET /api/cards/<id>` 與 `GET /api/cards?live=1` 會經門牌向上游查 `/branches/<分支>` 並刷新快取（回傳多 `phase_live`、`approved`），查不到就用快取。事件（見「排隊器對接」）只更新快取與叫醒。分支被退回後，`PATCH /api/cards/<id> {"branch":"新分支"}` 換分支重做（phase 清空）。卡片欄位另有 `branch`、`owner_thread`（負責串 id）、`parent`。
 
 ## API
-讀取要 `TOKEN` 或 `READ_TOKEN`，寫入要 `TOKEN`（`Authorization: Bearer …`，常數時間比對）；因為讀取會用看板自己的 `QUEUE_TOKEN` 代查排隊器，所以不開放匿名讀取。看板網頁本身是靜態的：打開後輸入一次讀取權杖，或直接開 `https://<你的網址>/?t=<讀取權杖>`，權杖會記在你的瀏覽器並從網址列移除，之後免再輸入。`READ_TOKEN` 只能讀（GET），不能寫，適合手機只看不改。
+讀取要 `TOKEN` 或 `READ_TOKEN`，寫入要 `TOKEN`（`Authorization: Bearer …`，常數時間比對）；因為讀取會用看板自己的 `QUEUE_TOKEN` 代查排隊器，所以不開放匿名讀取。看板網頁本身是靜態的：打開後輸入一次讀取權杖，或直接開 `https://<你的網址>/#t=<讀取權杖>`（`#` 後面不會送到伺服器，也不進請求紀錄），權杖會記在你的瀏覽器並從網址列移除，之後免再輸入。`READ_TOKEN` 只能讀（GET），不能寫，適合手機只看不改。
 ```sh
 B=https://<你的網址>
 curl -H "authorization: Bearer $READ_TOKEN" "$B/api/cards?status=open"       # 列卡（依優先序，數字小先）；加 live=1 向上游刷新
