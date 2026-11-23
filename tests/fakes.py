@@ -21,8 +21,8 @@ class FakeRepo:
         self.broken = set()     # (父 head, 子 head)：父不是子的祖先（子沒重新接上）
 
     def add(self, name, reds=(), gate_reds=(), sha=None, files=("src/a.py",), conflict_main=False,
-            conflict_with=()):
-        self.branches[name] = dict(sha=sha or f"{name}-1", reds=set(reds), gate_reds=set(gate_reds),
+            conflict_with=(), fixes=()):
+        self.branches[name] = dict(sha=sha or f"{name}-1", reds=set(reds), gate_reds=set(gate_reds), fixes=set(fixes),
                                    files=list(files),
                                    conflict_main=conflict_main, conflict_with=set(conflict_with))
 
@@ -107,6 +107,7 @@ class FakeRepo:
             reds |= r["reds"]
             if layer == "gate":
                 reds |= r["gate_reds"]
+            reds -= r.get("fixes", set())                  # 這張卡修好的 main 紅項
         return reds
 
 

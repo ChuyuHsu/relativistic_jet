@@ -207,3 +207,9 @@ du -sh $JET_HOME/work/mirror.git; ls -la $JET_HOME/work/mirror.git/objects/pack 
 - `limits.handover=false` 可關掉，退回「等手上的做完（上限 drain_max_s）」。`jet stop` 與 `jet restart --now` 仍是排空／立刻停。
 
 仍做不到的情況：①換版前舊版啟動器開的測試（exec 版，沒有 exit.json）收不到退出碼，跑完會被當 infra 重排一次；②重啟當下那一步剛好在推 main，由原本的 pushing 復原處理（不是接管）；③已經跑完的批測點結果不保留，下一輪重跑；④exit.json 的 v 不是 1 時視同沒有（當 infra）。
+
+## 13. 紅項複驗、main 自己紅、純文件保險
+
+- **紅項複驗**（`policy.recheck_red`，預設開）：卡自測紅、而且有「基準裡沒有」的新紅項時，先不退回，把這些項目放在乾淨 main 上單獨重跑（`{only}`＝逗號分隔的項目 id；測試指令不認 `{only}` 也行，只是會整層跑）。main 上也紅的項目不算這張卡的錯：寫進這個 main 的基準（不進歷史，main 一動就失效）、發一筆 queue_error「main 自己紅了：…，最近合入：…」；剩下的才退回。
+- **main 自己紅著時不推批次**：只有「自測時這些紅項是綠的」的卡（能修它的）可以進批；其他卡照常自測、排隊，但不進批；純文件直接合入也停。main 一動（修的卡合入）就自動解除；人確認處理完可用 `jet main-red-ack`（誰、何時留在 audit）。`jet status` 不加 -v 就會顯示。
+- **純文件保險**：每次純文件直接合入記下來；之後只要真的量過基準（不是沿用）或複驗發現 main 出現上一次真基準沒有的紅項，就點名這段期間所有純文件直接合入、發 queue_error，並暫停「純文件直接合入」（之後純文件卡照一般卡測）。查完用 `jet resume-docs` 恢復（誰、何時留在 audit）。

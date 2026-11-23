@@ -23,7 +23,7 @@ from . import ops
 from .page import PAGE_HTML
 
 READ_ROUTES = ["/status", "/branches", "/branches/<name>", "/merged", "/todo", "/metrics", "/"]
-WRITE_ROUTES = ["/approve", "/revoke", "/priority", "/set-parent", "/adhoc-run", "/pause", "/resume", "/resolve", "/stop"]
+WRITE_ROUTES = ["/approve", "/revoke", "/priority", "/set-parent", "/adhoc-run", "/pause", "/resume", "/resolve", "/stop", "/resume-docs", "/main-red-ack"]
 
 MAX_BODY = 64 * 1024          # 請求內容上限，擋掉亂塞
 WRITE_WAIT_S = 10.0           # 等主行程處理的時間；超過就回 202，命令仍在佇列裡

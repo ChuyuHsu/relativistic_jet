@@ -1,5 +1,5 @@
-import os, tempfile, unittest
-from jet import config, db, store
+import json, os, tempfile, unittest
+from jet import config, db, ops, store
 from jet.scheduler import Scheduler
 from tests.fakes import FakeRepo, FakeExecutor
 
@@ -611,3 +611,92 @@ class ArtifactsKeep(Base):
         self.assertTrue(big.endswith(b"END"))
         self.assertFalse(os.path.exists(os.path.join(d, "skip.txt")))
         self.assertFalse(os.path.exists(os.path.join(d, "out", "link.log")))     # 指到工作目錄外的連結不留
+
+
+class RecheckAndGuards(Base):
+    """紅項複驗（main 自己紅了不算卡的錯）、main 紅時不推批次、純文件合入保險。"""
+
+    def events_of(self, kind):
+        return self.con.execute("SELECT * FROM events WHERE kind=?", (kind,)).fetchall()
+
+    def baseline_ready(self):
+        self.go(10, until=lambda: store.get_baseline(self.con, "m0", "gate") is not None)
+
+    def test_card_not_blamed_when_main_is_red_too(self):
+        self.mk(policy={"require_approval": False})
+        self.baseline_ready()
+        self.repo.main_red = {"X"}                               # 基準之後 main 才紅（基準裡沒有）
+        self.repo.add("a")
+        self.go(30, until=lambda: self.state("a") in ("queued", "rejected"))
+        self.assertEqual(self.state("a"), "queued")              # 不退卡
+        mr = json.loads(store.get_meta(self.con, "main_red"))
+        self.assertEqual(mr["items"], ["X"])
+        errs = [e["detail"] for e in self.events_of("queue_error")]
+        self.assertTrue(any("main 自己紅了" in d and "X" in d for d in errs))
+        self.assertTrue(any(r["kind"] == "recheck" for r in self.con.execute("SELECT kind FROM runs")))
+
+    def test_card_own_red_still_rejected_after_recheck(self):
+        self.mk(policy={"require_approval": False})
+        self.baseline_ready()
+        self.repo.main_red = {"X"}
+        self.repo.add("a", reds={"t"})                           # 自己多紅一項 t；X 是 main 的
+        self.go(40, until=lambda: self.state("a") == "rejected")
+        self.assertIn("t", store.get_branch(self.con, "a")["reject_reason"])
+        self.assertNotIn("X", store.get_branch(self.con, "a")["reject_reason"])
+
+    def test_batches_blocked_until_a_fixer_merges(self):
+        self.mk(policy={"require_approval": False})
+        self.baseline_ready()
+        self.repo.main_red = {"X"}
+        self.repo.add("a")
+        self.go(30, until=lambda: self.state("a") == "queued")
+        self.go(15)
+        self.assertEqual(self.state("a"), "queued")              # main 紅著：a 進不了批
+        self.assertEqual(self.repo.main, "m0")
+        self.repo.add("fix", fixes={"X"})                        # 這張卡讓 X 轉綠
+        self.go(80, until=lambda: self.state("fix") == "merged")
+        self.assertEqual(self.state("fix"), "merged")
+        self.assertIn("fix", self.repo.main)
+        self.go(80, until=lambda: self.state("a") == "merged")   # main 一動就失效：a 之後照常合入
+        self.assertEqual(self.state("a"), "merged")
+
+    def test_ack_unblocks(self):
+        self.mk(policy={"require_approval": False})
+        self.baseline_ready()
+        self.repo.main_red = {"X"}
+        self.repo.add("a")
+        self.go(30, until=lambda: self.state("a") == "queued")
+        ops.apply(self.con, "main-red-ack", {}, "tester")
+        self.go(60, until=lambda: self.state("a") == "merged")
+        self.assertEqual(self.state("a"), "merged")
+        self.assertTrue(any(r["action"] == "main-red-ack" and r["actor"] == "tester"
+                            for r in self.con.execute("SELECT * FROM audit")))
+
+    def test_recheck_can_be_turned_off(self):
+        self.mk(policy={"require_approval": False, "recheck_red": False})
+        self.baseline_ready()
+        self.repo.main_red = {"X"}
+        self.repo.add("a")
+        self.go(30, until=lambda: self.state("a") == "rejected")
+        self.assertEqual(self.state("a"), "rejected")
+
+    def test_docs_guard_pauses_direct_docs_merge_on_new_red(self):
+        self.mk(commands={"test": ["t"], "classify": ["python3", CLASSIFY, "{files}"]}, policy={"require_approval": False})
+        self.baseline_ready()
+        self.repo.add("d", files=("docs/a.md",))                 # 被當成純文件直接合入
+        self.go(10, until=lambda: self.state("d") == "merged")
+        self.assertEqual(self.state("d"), "merged")
+        self.repo.main_red = {"data_test"}                       # 其實它弄紅了 main：下一次真基準才看得到
+        self.repo.add("code", files=("src/x.py",))
+        self.go(60, until=lambda: self.state("code") in ("merged", "rejected", "queued") and self._paused())
+        self.assertTrue(self._paused())
+        errs = [e["detail"] for e in self.events_of("queue_error")]
+        self.assertTrue(any("純文件" in d and "d" in d for d in errs))
+        self.repo.add("d2", files=("docs/b.md",))                # 暫停後，純文件卡不再直接合入：要走一般測試
+        self.go(5)
+        self.assertNotEqual(self.state("d2"), "merged")
+        ops.apply(self.con, "resume-docs", {}, "tester")
+        self.assertFalse(self._paused())
+
+    def _paused(self):
+        return bool(store.get_meta(self.con, "docs_direct_paused"))

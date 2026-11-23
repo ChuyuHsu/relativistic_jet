@@ -88,6 +88,11 @@ def cmd_status(args):
         lines.append(f"最近合入：{_ts(lm['finished_at'])}（{lm['merged_count']} 條）")
     if s.get("restored_at"):
         lines.append(f"（資料庫曾在 {_ts(float(s['restored_at']))} 從備份還原）")
+    g = (s.get("scheduler") or {}).get("guard") or {}
+    if g.get("main_red"):
+        lines.append(f"⚠ main 自己紅了：{'、'.join(g['main_red']['items'])}；不推批次，只放行能修它的卡（{'、'.join(g['main_red']['fixers']) or '目前沒有'}）。查完 jet main-red-ack")
+    if g.get("docs_paused"):
+        lines.append(f"⚠ 純文件直接合入已暫停：{'、'.join(g['docs_paused'].get('items', []))}；疑似誤判的合入 {'、'.join(g['docs_paused'].get('merges', [])[-5:])}。查完 jet resume-docs")
     for name, nl in sorted((s.get("notify_last") or {}).items()):     # 通知出問題要一眼看到（不用加 -v）
         if nl.get("error") or nl.get("skipped"):
             bits = []
@@ -217,6 +222,10 @@ def cmd_pause(args): _post(args, "/pause", {}, "已暫停（不再派新工作�
 
 def cmd_resume(args):
     _post(args, "/resume", {"branch": args.branch} if args.branch else {}, "已恢復" + (f" {args.branch}" if args.branch else ""))
+
+
+def cmd_resume_docs(args): _post(args, "/resume-docs", {}, "已恢復純文件直接合入")
+def cmd_main_red_ack(args): _post(args, "/main-red-ack", {}, "已確認 main 自己紅的狀況，解除不推批次的擋")
 
 
 def cmd_run_test(args):
@@ -433,6 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("run-test", cmd_run_test, "插隊跑一次指定測試")
     sp.add_argument("branch"); sp.add_argument("--layer", default="selftest", choices=ops.LAYERS); sp.add_argument("--only")
     add("pause", cmd_pause, "暫停派工")
+    add("resume-docs", cmd_resume_docs, "恢復純文件直接合入（保險觸發暫停後）")
+    add("main-red-ack", cmd_main_red_ack, "確認 main 自己紅的狀況已處理，解除不推批次的擋")
     sp = add("resume", cmd_resume, "恢復派工；給 --branch 就是恢復那條暫停的分支"); sp.add_argument("--branch")
     sp = add("resolve", cmd_resolve, "把待辦事件標成已處理"); sp.add_argument("id", type=int)
 

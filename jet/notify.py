@@ -181,7 +181,7 @@ def _enrich(con, r) -> Dict[str, Any]:
                 d = {"reason": ("已全部包含於 " if d.get("covered") else "有 %s 個檔不在 " % d.get("missing_count")) + str(d.get("target"))}
             e["detail"] = str(d.get("reason") or d.get("merged_sha") or d.get("by") or "")[:MAX_DETAIL] or None
     if e["kind"] in ("rejected", "tested_red", "halted") and e.get("branch"):
-        run = con.execute("SELECT id FROM runs WHERE branch=? AND status IN ('fail','timeout') ORDER BY id DESC LIMIT 1",
+        run = con.execute("SELECT id FROM runs WHERE branch=? AND kind!='recheck' AND status IN ('fail','timeout') ORDER BY id DESC LIMIT 1",
                           (e["branch"],)).fetchone()
         if run is None:   # 批測紅：紅項記在這條分支所屬批次的測試上
             run = con.execute(

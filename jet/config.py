@@ -49,6 +49,7 @@ class Config:
     listen: str = "127.0.0.1:8080"
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
+    recheck_red: bool = True          # 自測紅時，先把新紅項放在乾淨 main 上單獨重跑；main 也紅就不算這張卡的錯
     order: str = "parallel"           # review_first＝先審後測；parallel＝不分先後
     source: Optional[dict] = None     # 外部來源（選配）：{url, token_file, poll_seconds, max_age_s, timeout_s}
 
@@ -114,6 +115,7 @@ def parse(d: dict) -> Config:
         read_key_file=api.get("read_key_file"),
         write_key_file=api.get("write_key_file"),
         order=pol.get("order", "parallel"),
+        recheck_red=pol.get("recheck_red", True),
         source=_parse_source(d.get("source")),
     )
     _validate(cfg)
@@ -165,6 +167,8 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.scope not in ("all", "tracked"):
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
+    if not isinstance(c.recheck_red, bool):
+        raise ConfigError("policy.recheck_red 必須是 true 或 false")
     if c.order not in ("parallel", "review_first"):
         raise ConfigError('policy.order 必須是 "parallel" 或 "review_first"')
     if c.order == "review_first" and not c.require_approval:

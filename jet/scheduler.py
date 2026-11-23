@@ -114,6 +114,8 @@ class Scheduler:
             source = SourcePoller(sc["url"], sc["token_file"], sc["poll_seconds"], sc["timeout_s"])
         self.source = source                # SourcePoller 或 None（外部來源）
         self._drop_sig = None
+        self._rc: Dict[str, dict] = {}                     # 複驗中的卡 → 原本的自測結果
+        self._rc_wait: Dict[str, dict] = {}                # 複驗還沒排到核
         self._entries: Optional[Dict[str, dict]] = None    # 清單最後一次成功的內容（依分支名）
         self._src_err_last: Optional[str] = None
         self._unres_since: Dict[Tuple[str, str], float] = {}
@@ -409,8 +411,10 @@ class Scheduler:
         if self.source is not None:
             self._apply_source_approvals()
         self._collect()
+        self._start_rechecks()
         self._reap_orphans()
         self._enforce_review_first()
+        self._put("guard", self._guard_info())
         self._promote()
         if store.is_paused(self.con) or not self.resources_ok():
             return
@@ -668,7 +672,7 @@ class Scheduler:
 
     # ---------- 派工與收工 ----------
     def _launch(self, kind, layer, sha, ncores, timeout, branch=None, size=None, batch_id=None,
-                base_sha=None, head_sha=None) -> bool:
+                base_sha=None, head_sha=None, only=None) -> bool:
         cores = self._acquire(ncores)
         if not cores:
             return False
@@ -686,7 +690,7 @@ class Scheduler:
         self.con.execute("UPDATE runs SET log_path=?, report_path=? WHERE id=?", (log_p, rep_p, rid))
         try:
             handle = self.executor.start(Job(layer=layer, workdir=wd, cores=cores, timeout_s=timeout,
-                                             report_path=rep_p, log_path=log_p))
+                                             report_path=rep_p, log_path=log_p, only=only))
         except Exception as e:
             ctx.__exit__(None, None, None)
             self.pool.release(cores)
@@ -744,8 +748,11 @@ class Scheduler:
                 n += 1
 
     def _cancel_jobs(self, branch=None, batch=False):
+        if branch:
+            self._rc.pop(branch, None)
+            self._rc_wait.pop(branch, None)
         for rid, j in list(self.jobs.items()):
-            if (branch and j.branch == branch and j.kind == "selftest") or \
+            if (branch and j.branch == branch and j.kind in ("selftest", "recheck")) or \
                (batch and j.kind in ("point", "probe")):
                 try:
                     self.executor.cancel(j.handle)
@@ -763,6 +770,8 @@ class Scheduler:
                 self._infra_streak = 0
             if j.kind == "selftest":
                 self._on_selftest(j, res)
+            elif j.kind == "recheck":
+                self._on_recheck(j, res)
             elif j.kind == "baseline":
                 self._on_baseline(j, res)
             else:
@@ -821,6 +830,7 @@ class Scheduler:
         store.set_meta(self.con, "last_main", dst)
 
     def _set_baseline_all(self, sha, failed):
+        self._check_docs_guard(sha, set(failed))
         for layer in ("gate", "selftest"):
             store.set_baseline(self.con, sha, layer, failed)
         store.set_meta(self.con, "last_main", sha)
@@ -858,7 +868,7 @@ class Scheduler:
 
     def _dispatch_selftests(self):
         c = self.con
-        rows = [r for r in store.list_branches(c, S.PENDING.value) if r["docs_only"] != 1]
+        rows = [r for r in store.list_branches(c, S.PENDING.value) if not self._direct_docs(r)]
         rows.sort(key=lambda r: (-r["prio_override"], r["seen_at"], r["name"]))
         in_use = sum(j.units for j in self.jobs.values() if j.kind == "selftest")
         slots = sum(1 for j in self.jobs.values() if j.kind == "selftest")
@@ -929,12 +939,160 @@ class Scheduler:
             store.apply_event(c, j.branch, Event.RETRY)       # 父卡的錯不算子卡的：父卡過了再測一次
             return
         if self._red(res, base):
+            new_red = set(res.failed_items) - base
+            if self.cfg.recheck_red and res.status == "fail" and new_red and j.branch not in self._rc:
+                self._rc_wait[j.branch] = {"new_red": new_red, "items": list(res.failed_items), "run_id": j.run_id,
+                                           "approved": (j.approved_sha, j.retest)}
+                return                                         # 先不判：新紅項放到乾淨 main 上單獨重跑，main 也紅就不是這張卡的錯
             why = "自測逾時" if res.status == "timeout" else \
                 "自測紅：" + ",".join(sorted(set(res.failed_items) - base)) 
             store.apply_event(c, j.branch, Event.SELFTEST_FAIL, reject_reason=why)
             store.add_event(c, "rejected", j.branch, why)
         else:
+            mr = self._main_red()
+            if mr and not (set(res.failed_items) & set(mr["items"])):     # main 自己紅著，這張卡的自測沒有這些紅項：它能修
+                self._mark_fixer(j.branch, row["head_sha"])
             store.apply_event(c, j.branch, Event.SELFTEST_PASS)
+
+    # ---------- 紅項複驗、main 自己紅、純文件保險 ----------
+    def _start_rechecks(self):
+        for name, rec in list(self._rc_wait.items()):
+            row = store.get_branch(self.con, name)
+            if row is None or row["state"] != S.SELFTESTING.value:
+                self._rc_wait.pop(name, None)
+                continue
+            if self._launch("recheck", "selftest", self.main, self.cfg.selftest_cores, self.cfg.selftest_timeout_s,
+                            branch=name, base_sha=self.main, only=",".join(sorted(rec["new_red"]))):
+                self._rc[name] = self._rc_wait.pop(name)
+
+    def _on_recheck(self, j, res):
+        c = self.con
+        rec = self._rc.pop(j.branch, None)
+        row = store.get_branch(c, j.branch)
+        if rec is None or row is None or row["state"] != S.SELFTESTING.value:
+            return
+        ctx = rec["approved"]
+        with store.event_ctx(j.branch, ctx[0], ctx[1]):
+            if res.status in ("infra", "cancelled"):
+                self._infra_retry("recheck:" + j.branch)
+                store.apply_event(c, j.branch, Event.RETRY)
+                return
+            if self.source is not None and tuple(ctx) != (row["approved_sha"], row["retest"]):
+                store.apply_event(c, j.branch, Event.RETRY)        # 照舊放行測的結果：丟掉，照現在的放行重測
+                return
+            main_red = (set(res.failed_items) & rec["new_red"]) if res.status in ("fail", "pass") else set()
+            if main_red:
+                self._declare_main_red(main_red, j.branch)
+            remaining = rec["new_red"] - main_red
+            if remaining:
+                why = "自測紅：" + ",".join(sorted(remaining))
+                store.apply_event(c, j.branch, Event.SELFTEST_FAIL, reject_reason=why)
+                store.add_event(c, "rejected", j.branch, why)
+            else:
+                store.add_info_event(c, "recheck_cleared", j.branch,
+                                     "自測的紅項在乾淨 main 上也紅（" + ",".join(sorted(main_red)) + "），不算這張卡的錯")
+                store.apply_event(c, j.branch, Event.SELFTEST_PASS)
+
+    def _recent_merges(self, n=8) -> List[str]:
+        rows = self.con.execute("SELECT name, docs_only FROM branches WHERE state='merged' ORDER BY updated_at DESC LIMIT ?",
+                                (n,)).fetchall()
+        return [r["name"] + ("（純文件）" if r["docs_only"] == 1 else "") for r in rows]
+
+    def _main_red(self) -> Optional[dict]:
+        """目前 main 自己有沒有被發現紅（跟 main 的版本綁在一起；main 一動就失效；人可以 ack）。"""
+        raw = store.get_meta(self.con, "main_red")
+        if not raw:
+            return None
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return None
+        return d if d.get("main") == self.main and not d.get("acked") else None
+
+    def _declare_main_red(self, items: Set[str], trigger: str):
+        mr = self._main_red() or {"main": self.main, "items": [], "fixers": {}, "at": self.clock()}
+        new = sorted(set(items) - set(mr["items"]))
+        mr["items"] = sorted(set(mr["items"]) | set(items))
+        store.set_meta(self.con, "main_red", json.dumps(mr, ensure_ascii=False))
+        for layer in ("gate", "selftest"):                    # 寫進這個 main 的基準（不算進歷史；main 一動就失效）
+            b = store.get_baseline(self.con, self.main, layer) or set()
+            store.set_baseline(self.con, self.main, layer, b | set(items), copied=True)
+        self._maybe_pause_docs(set(items))
+        if new:
+            msg = (f"main 自己紅了：{'、'.join(mr['items'])}（{trigger} 的自測發現，在乾淨 main 上單獨重跑也紅）；"
+                   f"最近合入：{'、'.join(self._recent_merges()) or '無'}。"
+                   "這些紅項修好之前不會推任何批次進 main（能讓它們轉綠的卡除外）")
+            log.error(msg)
+            store.add_event(self.con, "queue_error", None, msg[:900])
+
+    def _mark_fixer(self, name: str, head_sha: str):
+        mr = self._main_red()
+        if mr:
+            mr["fixers"][name] = head_sha
+            store.set_meta(self.con, "main_red", json.dumps(mr, ensure_ascii=False))
+
+    def _blocked_by_main_red(self, r) -> bool:
+        """main 自己紅著時，只有「自測時這些紅項是綠的」那個版本的卡可以進批。"""
+        mr = self._main_red()
+        return bool(mr) and mr["fixers"].get(r["name"]) != r["head_sha"]
+
+    def _docs_paused(self) -> Optional[dict]:
+        raw = store.get_meta(self.con, "docs_direct_paused")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            return None
+
+    def _direct_docs(self, r) -> bool:
+        return r["docs_only"] == 1 and not self._docs_paused()
+
+    def _note_docs_merge(self, name, sha, main_before):
+        raw = store.get_meta(self.con, "docs_merges")
+        try:
+            lst = json.loads(raw) if raw else []
+        except ValueError:
+            lst = []
+        lst.append({"name": name, "sha": sha, "at": self.clock()})
+        store.set_meta(self.con, "docs_merges", json.dumps(lst[-50:], ensure_ascii=False))
+
+    def _maybe_pause_docs(self, new: Set[str]):
+        """有新紅項、而且上一次實測後有純文件直接合入：點名那幾筆、暫停直接合入。"""
+        raw = store.get_meta(self.con, "docs_merges")
+        try:
+            merges = json.loads(raw) if raw else []
+        except ValueError:
+            merges = []
+        if new and merges and not self._docs_paused():
+            names = [m["name"] for m in merges][-10:]
+            msg = (f"main 出現新紅項 {'、'.join(sorted(new))}，而上一次實測後有 {len(merges)} 筆純文件直接合入"
+                   f"（最近：{'、'.join(names)}）：疑似分類誤判。已暫停「純文件直接合入」，之後純文件卡照一般卡測；"
+                   "查完用 jet resume-docs 恢復")
+            store.set_meta(self.con, "docs_direct_paused", json.dumps({"at": self.clock(), "items": sorted(new), "merges": names},
+                                                                       ensure_ascii=False))
+            log.error(msg)
+            store.add_event(self.con, "queue_error", None, msg[:900])
+
+    def _check_docs_guard(self, sha, failed: Set[str]):
+        """真的量過一次基準（不是沿用）：跟上一次真基準比，出現新紅、而且這段期間有純文件直接合入 → 點名並暫停直接合入。"""
+        raw = store.get_meta(self.con, "last_real_baseline")
+        try:
+            prev = set(json.loads(raw).get("failed", [])) if raw else None
+        except ValueError:
+            prev = None
+        raw = store.get_meta(self.con, "docs_merges")
+        try:
+            merges = json.loads(raw) if raw else []
+        except ValueError:
+            merges = []
+        new = set(failed) - prev if prev is not None else set()
+        self._maybe_pause_docs(new)
+        store.set_meta(self.con, "last_real_baseline", json.dumps({"main": sha, "failed": sorted(failed)}))
+        store.set_meta(self.con, "docs_merges", "[]")
+
+    def _guard_info(self) -> dict:
+        mr = self._main_red()
+        return {"main_red": ({"items": mr["items"], "fixers": sorted(mr["fixers"]), "since": mr["at"]} if mr else None),
+                "docs_paused": self._docs_paused()}
 
     def _ancestor_unproven(self, name) -> bool:
         """疊在它下面的父卡還沒自測綠：這次紅可能是父卡造成的，不能算在這條分支頭上。"""
@@ -943,7 +1101,7 @@ class Scheduler:
 
     def _reap_orphans(self):
         """保險：狀態說在跑、其實沒有對應工作的，退回上一步（不讓分支卡死）。"""
-        live = {j.branch for j in self.jobs.values() if j.kind == "selftest"}
+        live = {j.branch for j in self.jobs.values() if j.kind in ("selftest", "recheck")} | set(self._rc_wait)
         for r in store.list_branches(self.con, S.SELFTESTING.value):
             if r["name"] not in live:
                 store.apply_event(self.con, r["name"], Event.RETRY)
@@ -981,8 +1139,8 @@ class Scheduler:
             elif r["name"] in self._blocked or self._parent_waiting(r):
                 store.apply_event(c, r["name"], Event.PARENT_CHANGED)   # 父卡不在了／還沒接上：排隊中的也回待自測等
         for r in store.list_branches(c, S.PENDING.value):
-            if r["docs_only"] == 1 and not r["parent"] and not self._src_parent(r["name"]) \
-                    and self._approved(r) and r["name"] not in self._blocked:
+            if self._direct_docs(r) and not r["parent"] and not self._src_parent(r["name"]) \
+                    and self._approved(r) and r["name"] not in self._blocked and not self._main_red():
                 self._merge_docs_only(r)
 
     def _merge_docs_only(self, r):
@@ -1002,6 +1160,7 @@ class Scheduler:
         except MainMoved:
             return
         new = res.prefixes[0]
+        self._note_docs_merge(r["name"], new, main)
         store.apply_event(c, r["name"], Event.DOCS_MERGED, merged_sha=new)
         self._after_merge([r["name"]], new, None, main_before=main)
 
@@ -1347,7 +1506,8 @@ class Scheduler:
 
     def _select(self):
         """依順序挑最多 N 條；子一定在父後面、而且父也被選上。"""
-        rows = [r for r in store.list_branches(self.con, S.QUEUED.value) if r["docs_only"] != 1]
+        rows = [r for r in store.list_branches(self.con, S.QUEUED.value) if not self._direct_docs(r)]
+        rows = [r for r in rows if not self._blocked_by_main_red(r)]       # main 自己紅著：只有能修它的卡可以進批
         rows.sort(key=lambda r: (-r["prio_override"], r["queued_at"] or 0, r["name"]))
         chosen: List = []
         names: Set[str] = set()
@@ -1506,6 +1666,10 @@ class Scheduler:
             if m2 < m:
                 log.info("推 main 前重拉清單：只推前 %d 條（原本 %d 條）", m2, m)
             m = m2
+            if m > 0 and self._main_red() and any(self._blocked_by_main_red(store.get_branch(self.con, n) or {"name": n, "head_sha": h})
+                                                  for n, _, h in b.members[:m]):
+                self._abort_batch("測批途中發現 main 自己紅了：這批先不推（只有能修它的卡可以進）")
+                return
         final = b.prefixes[m - 1] if m > 0 else None
         if m > 0:
             cur = self.repo.main_sha()

@@ -97,7 +97,7 @@ def query_status(con, now: Optional[float] = None) -> Dict[str, Any]:
         "open_todo": open_todo,
         "restored_at": _meta(con, "restored_at"),
         "flaky": sorted(flaky_items(con, "gate", int(_meta(con, "baseline_history", "5") or 5))),
-        "scheduler": {k: _json_meta(con, "obs_" + k) for k in ("tick", "scan", "fetch", "last_error", "source", "drop", "drain")},
+        "scheduler": {k: _json_meta(con, "obs_" + k) for k in ("tick", "scan", "fetch", "last_error", "source", "drop", "drain", "guard")},
         "notify_last": {r[0][len("notify_last:"):]: json.loads(r[1]) for r in con.execute(
             "SELECT key, value FROM meta WHERE key LIKE 'notify_last:%'")},
     }
@@ -332,6 +332,23 @@ def op_resume(con, now, actor, args):
     return {"paused": False}
 
 
+def op_resume_docs(con, now, actor, args):
+    """恢復純文件直接合入（保險觸發暫停後，人查完才用）；誰、何時留在 audit。"""
+    store.set_meta(con, "docs_direct_paused", "")
+    return {"docs_direct_paused": False}
+
+
+def op_main_red_ack(con, now, actor, args):
+    """人確認 main 自己紅的狀況已處理（或接受）：解除「不推批次」的擋；誰、何時留在 audit。"""
+    raw = store.get_meta(con, "main_red")
+    if not raw:
+        raise OpError("目前沒有 main 自己紅的紀錄")
+    d = json.loads(raw)
+    d["acked"] = True
+    store.set_meta(con, "main_red", json.dumps(d, ensure_ascii=False))
+    return {"main_red_acked": True}
+
+
 def op_stop(con, now, actor, args):
     """停機或換版：主行程自己收尾後退出（不需要任何 kill）。
     mode=graceful（預設）：不再派新工作，等正在跑的批測與自測到安全點再退出；now：立刻停掉測試行程群組再退出。
@@ -360,6 +377,7 @@ ACTIONS: Dict[str, Callable] = {
     "approve": op_approve, "revoke": op_revoke, "priority": op_priority,
     "set-parent": op_set_parent, "adhoc-run": op_adhoc_run,
     "pause": op_pause, "resume": op_resume, "resolve": op_resolve, "stop": op_stop,
+    "resume-docs": op_resume_docs, "main-red-ack": op_main_red_ack,
 }
 
 

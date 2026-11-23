@@ -71,7 +71,7 @@ class CF(Base):
         self.s.source._next = 1e18          # 只剩「推 main 前重拉」會去拿新清單
 
     def selftests(self):
-        return sum(1 for j in self.ex.started if j.layer == "selftest")
+        return sum(1 for j in self.ex.started if j.layer == "selftest" and not j.only)
 
     def row(self, n):
         return store.get_branch(self.con, n)
@@ -659,7 +659,7 @@ class StaleResult(CF):
         self.repo.push_new("a", reds={"t"})                       # 單純 rebase：內容一樣
         self.appr("a")                                            # 重新放行新版本
         old_ap = "a-1"
-        for _ in range(8):
+        for _ in range(30):
             self.tick(1)
             if self.state("a") == "rejected":
                 break
