@@ -26,6 +26,7 @@ from .states import Event, State
 
 log = logging.getLogger("jet")
 S = State
+UNKNOWN_GRACE_S = 120         # 放行版本解不出來（遠端拿不到）超過這麼久就當「內容不同」
 MAX_OVERLOAD_RETRY = 2        # 超載造成的逾時最多重排幾次，再逾時就當是測試自己慢
 
 
@@ -102,6 +103,7 @@ class Scheduler:
         self.source = source                # SourcePoller 或 None（外部來源）
         self._entries: Optional[Dict[str, dict]] = None    # 清單最後一次成功的內容（依分支名）
         self._src_err_last: Optional[str] = None
+        self._unres_since: Dict[Tuple[str, str], float] = {}
         self._unres: Dict[Tuple[str, str], float] = {}     # 解不出來的放行版本：稍後再試
         self._repulled = False                             # 這一輪是不是已經重拉過清單
         self._wait_proven: Set[str] = set()                # 因父卡還沒綠而被重排的子分支：父卡綠了才再測
@@ -860,16 +862,19 @@ class Scheduler:
             return "yes"
         cid = store.known_content_id(self.con, name, ap)
         if cid is None:
+            now = self.clock()
             last = self._unres.get((name, ap))
-            if last is not None and self.clock() - last < 30:
-                return "unknown"
-            try:
-                cid = self.repo.content_id(ap, self._base_for(row))
-                store.note_sha(self.con, name, ap, cid)
-                self._unres.pop((name, ap), None)
-            except Exception:
-                self._unres[(name, ap)] = self.clock()
-                return "unknown"
+            if last is None or now - last >= 30:
+                try:
+                    cid = self.repo.content_id(ap, self._base_for(row))
+                    store.note_sha(self.con, name, ap, cid)
+                    self._unres.pop((name, ap), None)
+                    self._unres_since.pop((name, ap), None)
+                except Exception:
+                    self._unres[(name, ap)] = now
+            if cid is None:
+                since = self._unres_since.setdefault((name, ap), now)
+                return "no" if now - since >= UNKNOWN_GRACE_S else "unknown"
         return "yes" if cid == row["content_id"] else "no"
 
     def _apply_source_approvals(self):

@@ -530,6 +530,20 @@ class Rules(CF):
         self.go(until=lambda: self.merged() == {"a"})
 
 
+class UnknownGrace(CF):
+    def test_unresolvable_approved_sha_becomes_superseded_after_grace(self):
+        self.mk()
+        self.repo.add("a")
+        self.ent("a", None, "ghost-v1")                   # 放行的版本遠端拿不到（已被新提交蓋掉）
+        self.tick(3)
+        self.assertEqual(self.events("superseded", "a"), [])   # 還在寬限期：先等 fetch
+        self.assertEqual(self.state("a"), "pending")
+        self.tick(10)                                       # 每輪 16 秒，超過 120 秒
+        self.assertEqual(len(self.events("superseded", "a")), 1)
+        self.tick(5)
+        self.assertEqual(len(self.events("superseded", "a")), 1)
+
+
 class SourcePollerTest(unittest.TestCase):
     def test_parse_ok(self):
         out = parse_list([{"branch": "a"}, {"branch": "b", "parent": "a", "approved_sha": "x", "retest": 2}])
