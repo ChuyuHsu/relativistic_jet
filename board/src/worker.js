@@ -1,6 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxPending, resultOf, stuckCheck } from './queue.js';
+import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
@@ -113,7 +113,7 @@ export async function handle(req, env, ctx) {
   if (path === '/api/queue/desired') return desired(req, env);
   if (path === '/api/outbox/pending') return outboxPending(req, env);
   if (!(write ? bearerIs(req, env.TOKEN) : bearerIs(req, env.TOKEN, env.READ_TOKEN))) return json({ error: 'unauthorized' }, 401);
-  if (path === '/api/outbox/claim' || path === '/api/outbox/ack') return (path.endsWith('claim') ? outboxClaim : outboxAck)(req.clone(), env);
+  if (path === '/api/outbox/claim' || path === '/api/outbox/ack' || path === '/api/outbox/release') return (path.endsWith('claim') ? outboxClaim : path.endsWith('ack') ? outboxAck : outboxRelease)(req.clone(), env);
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
     const status = url.searchParams.get('status');

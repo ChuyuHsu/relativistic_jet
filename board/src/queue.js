@@ -269,6 +269,17 @@ export async function outboxClaim(req, env) {
   const fallback = list(env.ADMIN_THREADS)[0] || '';
   const groups = new Map();
   for (const r of rows) { const to = r.owner_thread || fallback; (groups.get(to) || groups.set(to, []).get(to)).push(r); }
+  // 發信端有限額：每個收件串兩則之間至少隔 min_gap_s（同一串的通知攢到下一輪一起發）、一次最多 max_messages 個收件串；
+  // 沒輪到的不是丟掉，只是把領取標記放掉，下一次 claim 再給（claimed_at 清空，不用等 5 分鐘）。
+  const minGap = Math.max(0, Number(body.min_gap_s) || 0), maxMsg = Number.isInteger(body.max_messages) && body.max_messages > 0 ? body.max_messages : Infinity;
+  const lastSent = new Map();
+  if (minGap > 0) for (const r of (await db.prepare('SELECT owner_thread, max(sent_at) AS t FROM outbox WHERE sent_at IS NOT NULL GROUP BY owner_thread').all()).results) lastSent.set(r.owner_thread || fallback, r.t);
+  const held = [];
+  let given = 0;
+  for (const [to, items] of [...groups].sort((a, b) => Math.min(...a[1].map(i => i.at)) - Math.min(...b[1].map(i => i.at)))) {
+    if ((lastSent.get(to) != null && t - lastSent.get(to) < minGap) || given >= maxMsg) { groups.delete(to); held.push(...items.map(i => i.n)); } else given++;
+  }
+  if (held.length) await db.prepare(`UPDATE outbox SET claimed_at=NULL,claim_id=NULL WHERE sent_at IS NULL AND claim_id=? AND n IN (${held.map(() => '?').join(',')})`).bind(token, ...held).run();
   const out = [...groups].map(([to, items]) => ({
     to_thread: to || null,
     ids: items.map(i => i.n),
@@ -278,6 +289,20 @@ export async function outboxClaim(req, env) {
     text: items.map(i => `【${i.card_id || '無卡'}】分支 ${i.branch || '（無）'}：${KIND_TEXT[i.kind] || i.kind}${i.detail ? `（${i.detail}）` : ''}\n  下一步：${NEXT[i.kind] || '請到看板查詳情。'}`).join('\n'),
   }));
   return json({ messages: out });
+}
+
+// 發信失敗（例如被限額）：把領走的信放回去，hold_s 秒內不再給（預設 0＝下一次 claim 就再給）
+export async function outboxRelease(req, env) {
+  if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
+  const body = await req.json().catch(() => ({}));
+  const actor = String(body.actor ?? '').trim();
+  if (!actor || actor.toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter(Number.isInteger).slice(0, 500);
+  if (!ids.length) return json({ error: 'ids 要是非空的數字陣列（claim 回傳的 ids）' }, 400);
+  const hold = Math.min(CLAIM_TTL, Math.max(0, Number(body.hold_s) || 0));
+  const claimedAt = hold > 0 ? now() - CLAIM_TTL + hold : null;
+  const r = await env.DB.prepare(`UPDATE outbox SET claimed_at=?,claim_id=NULL WHERE sent_at IS NULL AND n IN (${ids.map(() => '?').join(',')})`).bind(claimedAt, ...ids).run();
+  return json({ released: r.meta.changes });
 }
 
 export async function outboxAck(req, env) {

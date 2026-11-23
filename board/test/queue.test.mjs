@@ -427,6 +427,33 @@ test('信箱：claim 每收件串一則、領了不重給、5 分鐘沒 ack 再�
   assert.equal((await call(e, 'POST', '/api/outbox/claim', { actor: 'x' }, 'bad')).status, 401);
 });
 
+test('信箱限額：min_gap_s 同收件串攢批、max_messages 分輪、release 放回去不丟', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await approved(e, 'c1', 'th1'); await approved(e, 'c2', 'th2'); await approved(e, 'c3', 'th3');
+  for (const c of ['c1', 'c2', 'c3']) await ev(e, c, { kind: 'conflict', approved_sha: SHA });
+  const cl = b => call(e, 'POST', '/api/outbox/claim', { actor: '傳令', ...b }).then(r => r.json());
+  const a = await cl({ max_messages: 2 });
+  assert.equal(a.messages.length, 2);                                            // 一次最多 2 個收件串
+  const left = await cl({});
+  assert.equal(left.messages.length, 1);                                         // 沒輪到的立刻能領，不用等 5 分鐘
+  // 發送失敗（被限額）：release 放回去
+  const rel = await (await call(e, 'POST', '/api/outbox/release', { actor: '傳令', ids: left.messages.flatMap(m => m.ids) })).json();
+  assert.equal(rel.released, left.messages[0].ids.length);
+  assert.equal((await cl({})).messages.length, 1);                               // 馬上又領得到
+  // ack 前兩個後，同一收件串的新通知在 min_gap_s 內不給（攢到下一輪）
+  await call(e, 'POST', '/api/outbox/ack', { actor: '傳令', ids: a.messages.flatMap(m => m.ids) });
+  const first = a.messages[0].to_thread;
+  const card = { th1: 'c1', th2: 'c2', th3: 'c3' }[first];
+  await ev(e, card, { kind: 'tested_red', detail: 'y', approved_sha: SHA });
+  const gap = await cl({ min_gap_s: 600 });
+  assert.ok(!gap.messages.some(m => m.to_thread === first));                     // 剛發過，先攢著
+  const later = await cl({});
+  assert.ok(later.messages.some(m => m.to_thread === first));   // 沒帶 min_gap_s 就給（攢的東西沒丟）
+  // hold_s：release 後 hold 秒內不再給
+  const r2 = await cl({});
+  assert.equal(r2.messages.length, 0);
+});
+
 test('信箱 pending：HOOK／READ／TOKEN 都能查，不改狀態；領走後變 0', async () => {
   const e = mkenv({ READ_TOKEN: 'rd' }); await approved(e, 'c1', 'th1'); await ev(e, 'c1', { kind: 'tested_red', approved_sha: SHA });
   const g = tk => call(e, 'GET', '/api/outbox/pending', undefined, tk);

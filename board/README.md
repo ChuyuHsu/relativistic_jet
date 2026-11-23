@@ -53,3 +53,10 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 ## /hooks/queue 的批次處理
 
 一個請求最多處理 200 筆事件（超過的回 `remaining`，對方用 `processed` 之後的接著送）；回 `{ok, applied, unmatched, duplicate, stale, processed, remaining}`。處理方式：先用幾次查詢預載已見過的事件編號與牽涉的卡，在記憶體裡依序處理，寫入收成語句用 D1 batch 一次送出（每個事件的語句整組同進同出）。事件編號去重，整批重送不會重複寫；一批 50 筆約個位數次 D1 往返。
+
+### 發信端限額（claim 參數與 release）
+
+發信端有每小時訊息上限時，用這些參數避免洗版、被限額就不丟信：
+- `POST /api/outbox/claim {actor, min_gap_s?, max_messages?}`：`min_gap_s`＝同一收件串兩則之間至少隔幾秒（剛發過的先攢著，下次一起發）；`max_messages`＝這次最多給幾個收件串。沒輪到的不是丟掉，領取標記會放掉，下一次 claim 立刻再給。
+- `POST /api/outbox/release {actor, ids, hold_s?}`：發信失敗（例如被限額）時把領走的信放回去，不 ack；`hold_s` 秒內不再給（預設 0，最多 300）。
+- 只給看板看的事件（開始自測、開始批測、tested_green 等）本來就不進信箱，只更新卡片階段。
