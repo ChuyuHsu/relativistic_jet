@@ -1,0 +1,15 @@
+name = "task-board"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "task-board"
+database_id = "REPLACE_AFTER_d1_create"
+# 權杖用 `wrangler secret put TOKEN`，不進 repo
+
+[triggers]
+crons = ["*/2 * * * *"]

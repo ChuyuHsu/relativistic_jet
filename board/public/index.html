@@ -1,0 +1,29 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>任務看板</title>
+<style>
+:root{--bg:#fff;--fg:#1c1c1e;--mut:#6b6b70;--card:#f2f2f7;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#000;--fg:#f2f2f7;--mut:#9a9aa0;--card:#1c1c1e}}
+body{margin:0;padding:12px 16px 40px;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,sans-serif}
+h1{font-size:20px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.tabs button{border:0;border-radius:14px;padding:6px 12px;background:var(--card);color:var(--fg);font-size:14px}
+.tabs button.on{background:#0a84ff;color:#fff}
+.c{background:var(--card);border-radius:12px;padding:10px 12px;margin:8px 0}
+.c b{display:block}.m{color:var(--mut);font-size:13px}
+</style></head><body>
+<h1>任務看板</h1><div class="tabs" id="tabs"></div><div id="list">載入中…</div>
+<script>
+const S={open:'未認領',claimed:'進行中',done:'已合入',dropped:'放棄'};
+const P={pending:'待自測',selftesting:'自測中',selftest_green:'自測綠',queued:'排隊',batching:'批測中',merged:'已合入',rejected:'退回',halted:'暫停待人'};
+const key=c=>c.status==='claimed'&&c.phase==='merged'?'done':c.status;
+let cards=[],cur='claimed';
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function draw(){
+  const n=k=>cards.filter(c=>key(c)===k).length;
+  tabs.innerHTML=Object.keys(S).map(k=>`<button class="${k===cur?'on':''}" data-k="${k}">${S[k]} ${n(k)}</button>`).join('');
+  const l=cards.filter(c=>key(c)===cur);
+  list.innerHTML=l.length?l.map(c=>`<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.phase&&cur==='claimed'?'・'+esc(P[c.phase]||c.phase):''}${c.branch?'・'+esc(c.branch):''}</span></div>`).join(''):'<div class="m">沒有</div>';
+}
+tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
+async function load(){try{cards=await (await fetch('/api/cards?live=1')).json();draw()}catch(e){list.textContent='讀取失敗'}}
+load();setInterval(load,30000);
+</script></body></html>

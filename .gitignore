@@ -9,3 +9,6 @@ __pycache__/
 /local/
 *.token
 .env
+/board/wrangler.local.toml
+/board/node_modules/
+/board/.wrangler/
