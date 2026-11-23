@@ -33,9 +33,9 @@ class NotifyTest(unittest.TestCase):
     def _wait(self, n, now):
         for _ in range(200):
             n.tick(self.con, now)
-            if n._thread is None:
+            if n.dests[0].thread is None:
                 return
-            n._thread.join(0.05)
+            n.dests[0].thread.join(0.05)
         self.fail("通知沒完成")
 
     def test_batch_wait_then_send_only_notify_kinds(self):
@@ -44,7 +44,7 @@ class NotifyTest(unittest.TestCase):
         n.tick(self.con, 150)          # 還沒攢滿
         self.assertEqual(sent, [])
         n.tick(self.con, 300)
-        n._thread.join()
+        n.dests[0].thread.join()
         n.tick(self.con, 301)          # 收結果
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["count"], 1)
@@ -60,14 +60,14 @@ class NotifyTest(unittest.TestCase):
                 raise notify.NotifyError("boom")
         n = notify.Notifier("http://127.0.0.1:1/x", batch_s=0, poster=poster)
         n.tick(self.con, 1000)
-        n._thread.join()
+        n.dests[0].thread.join()
         n.tick(self.con, 1001)
         self.assertIsNotNone(n.last_error)
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM events WHERE notified_at IS NOT NULL").fetchone()[0], 0)
         n.tick(self.con, 1010)         # 還在退避
         self.assertEqual(len(calls), 1)
         n.tick(self.con, 1100)
-        n._thread.join()
+        n.dests[0].thread.join()
         n.tick(self.con, 1101)
         self.assertEqual(len(calls), 2)
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM events WHERE notified_at IS NOT NULL").fetchone()[0], 1)

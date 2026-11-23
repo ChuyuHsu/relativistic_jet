@@ -54,7 +54,7 @@ class Server:
             self.api = api.ApiServer(maintenance.db_path(self.state_dir), self.wq, rk, wk, self.cfg.listen,
                                       hide=[self.cfg.state_dir, self.cfg.work_dir, os.path.abspath(self.cfg.state_dir),
                                             os.path.abspath(self.cfg.work_dir)])
-            self.notifier = notify.Notifier(self.cfg.notify_url, self.cfg.notify_batch_s)
+            self.notifier = self._make_notifier(self.cfg)
             self.backups = maintenance.BackupSchedule(self.state_dir)
             self.watcher = maintenance.ConfigWatcher(config_path, self.cfg)
             self.exposer = self._make_exposer(self.cfg)
@@ -69,6 +69,13 @@ class Server:
         # 撤回要先落到只增不改的紀錄檔（fsync）才提交；寫失敗就整個撤回失敗，避免還原後撤回過的放行復活
         if action == "revoke":
             maintenance.log_revocation(self.state_dir, str(args.get("branch")), now)
+
+    def _make_notifier(self, cfg):
+        n = notify.Notifier(cfg.notify_url, cfg.notify_batch_s, destinations=cfg.notify_destinations)
+        # 有目的地要收狀態變化時，store 才寫那類事件（不然資料庫白長）
+        self.con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('emit_machine_events', ?)",
+                         ("1" if n.wants_machine_events else "0",))
+        return n
 
     @staticmethod
     def _make_exposer(cfg):
@@ -90,7 +97,7 @@ class Server:
             maintenance.record_queue_error(self.con, err, now)
         elif cfg is not self.cfg:
             self.cfg = cfg
-            self.notifier = notify.Notifier(cfg.notify_url, cfg.notify_batch_s)
+            self.notifier = self._make_notifier(cfg)
             if hasattr(self.scheduler, "update_config"):
                 self.scheduler.update_config(cfg)
         if self.scheduler is not None:

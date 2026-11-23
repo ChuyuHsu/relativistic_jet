@@ -54,6 +54,11 @@ def set_baseline(con, main_sha, layer, failed: Iterable[str]):
 
 
 # ---- 狀態 ----
+# 哪些狀態轉移要對外報：事件種類 → webhook 事件名
+_EVENT_KIND = {Event.PUSHED: "pushed", Event.SELFTEST_PASS: "tested_green", Event.SELFTEST_FAIL: "tested_red",
+               Event.READY: "queued", Event.BATCH_MERGED: "merged", Event.DOCS_MERGED: "merged"}
+
+
 def apply_event(con, name, event: Event, **fields) -> State:
     """依狀態機轉移並寫回，fields 一併更新（如 reject_reason）。"""
     r = get_branch(con, name)
@@ -61,11 +66,33 @@ def apply_event(con, name, event: Event, **fields) -> State:
     sets = {"state": new.value, "updated_at": now(), **fields}
     con.execute(f"UPDATE branches SET {','.join(k+'=?' for k in sets)} WHERE name=?",
                 (*sets.values(), name))
+    kind = _EVENT_KIND.get(event)
+    if kind and new.value != r["state"]:
+        cur = get_branch(con, name)   # 推新提交時 head_sha 已經在 fields 裡換掉了，要讀更新後的
+        emit(con, kind, name, {"from": r["state"], "to": new.value, "reason": fields.get("reject_reason"),
+                               "merged_sha": cur["merged_sha"] if kind == "merged" else None}, cur["head_sha"])
     return new
 
 
 def add_event(con, kind, branch=None, detail=None):
-    con.execute("INSERT INTO events(kind,branch,detail,at) VALUES(?,?,?,?)", (kind, branch, detail, now()))
+    sha = None
+    if branch:
+        b = get_branch(con, branch)
+        sha = b["head_sha"] if b else None
+    con.execute("INSERT INTO events(kind,branch,detail,at,commit_sha) VALUES(?,?,?,?,?)",
+                (kind, branch, detail, now(), sha))
+
+
+MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
+
+
+def emit(con, kind, branch, detail: dict, commit_sha=None):
+    """寫一筆給 webhook 的狀態事件；只有設定了要送這類事件時（meta emit_machine_events=1）才寫。"""
+    if get_meta(con, "emit_machine_events", "0") != "1":
+        return
+    t = now()
+    con.execute("INSERT INTO events(kind,branch,detail,at,resolved_at,commit_sha) VALUES(?,?,?,?,?,?)",
+                (kind, branch, json.dumps(detail, ensure_ascii=False, sort_keys=True), t, t, commit_sha))
 
 
 def audit(con, actor, action, args=None):
@@ -91,12 +118,14 @@ def approve(con, name, by="?"):
     con.execute("INSERT INTO approvals(branch,content_id,by,at) VALUES(?,?,?,?)",
                 (name, r["content_id"], by, now()))
     audit(con, by, "approve", {"branch": name, "content_id": r["content_id"]})
+    emit(con, "approved", name, {"by": by, "content_id": r["content_id"]}, r["head_sha"])
 
 
 def revoke(con, name, by="?"):
-    _must(con, name)
+    r = _must(con, name)
     con.execute("UPDATE approvals SET revoked_at=? WHERE branch=? AND revoked_at IS NULL", (now(), name))
     audit(con, by, "revoke", {"branch": name})
+    emit(con, "revoked", name, {"by": by}, r["head_sha"])
 
 
 def set_priority(con, name, prio: int, by="?"):

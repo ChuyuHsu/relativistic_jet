@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS baseline(   -- main 基準：該層在這個 main 上
 CREATE TABLE IF NOT EXISTS events(     -- 待辦／通知事件
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,                -- rejected|conflict|halted|queue_error
-  branch TEXT, detail TEXT, at REAL NOT NULL, notified_at REAL, resolved_at REAL
+  branch TEXT, detail TEXT, at REAL NOT NULL, notified_at REAL, resolved_at REAL,
+  commit_sha TEXT                    -- 事件發生時分支的提交（給 webhook 用）
 );
 CREATE TABLE IF NOT EXISTS audit(      -- 所有寫入操作留紀錄
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +88,9 @@ def connect(path: str) -> sqlite3.Connection:
 
 def migrate(con: sqlite3.Connection) -> None:
     con.executescript(SCHEMA)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(events)")]
+    if "commit_sha" not in cols:   # 舊資料庫補欄位
+        con.execute("ALTER TABLE events ADD COLUMN commit_sha TEXT")
     row = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if row is None:
         con.execute("INSERT INTO meta VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))

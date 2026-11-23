@@ -36,6 +36,7 @@ class Config:
     classify_cmd: Optional[List[str]] = None
     notify_url: Optional[str] = None
     notify_batch_s: int = 180
+    notify_destinations: List[dict] = field(default_factory=list)   # 多個通知目的地（選配）
     listen: str = "127.0.0.1:8080"
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
@@ -91,6 +92,7 @@ def parse(d: dict) -> Config:
         classify_cmd=cmds.get("classify"),
         notify_url=notify.get("url"),
         notify_batch_s=notify.get("batch_seconds", 180),
+        notify_destinations=_parse_destinations(notify.get("destinations")),
         listen=api.get("listen", "127.0.0.1:8080"),
         read_key_file=api.get("read_key_file"),
         write_key_file=api.get("write_key_file"),
@@ -98,6 +100,14 @@ def parse(d: dict) -> Config:
     )
     _validate(cfg)
     return cfg
+
+
+def _parse_destinations(d):
+    from . import notify as _n
+    try:
+        return _n.check_destinations(d)
+    except _n.NotifyError as ex:
+        raise ConfigError(f"notify.destinations：{ex}")
 
 
 def _parse_expose(e):

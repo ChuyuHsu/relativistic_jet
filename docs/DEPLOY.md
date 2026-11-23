@@ -143,3 +143,41 @@ du -sh $JET_HOME/work/mirror.git; ls -la $JET_HOME/work/mirror.git/objects/pack 
 - 「掃描：…遠端 0 條」或 `doctor` 的「分支樣式 ✗」＝`git.branch_patterns` 沒對上遠端分支名（樣式比對的是去掉 `origin/` 的名稱，例如 `dev/foo`）。
 - 「心跳」超過 60 秒沒動＝主迴圈卡住，看 supervisor 輸出；所有 git 呼叫都有逾時（`git.timeout_s` 預設 900 秒），卡住的 ssh 會整群被殺。
 - 鏡像（`work/mirror.git`）可以隨時整個刪掉重建，不影響正確性，只是下次要重新抓一次。
+
+## 9. 通知與 webhook
+
+設定檔 `notify.destinations` 可以放多個目的地（舊的 `notify.url` 仍可用，等於一個叫 `default` 的目的地，只收要人處理的事件）：
+
+```json
+"notify": {
+  "destinations": [
+    {"name": "board", "url": "https://board.example.test/hooks/queue", "token_file": "/path/to/board-token",
+     "kinds": "all", "batch_seconds": 5},
+    {"name": "people", "url": "https://chat.example.test/in", "kinds": ["rejected", "conflict", "halted", "queue_error"]}
+  ]
+}
+```
+
+- `kinds`：要收的事件種類，或 `"all"`。要人處理的：`rejected`、`conflict`、`halted`、`queue_error`；
+  狀態變化：`pushed`（有新提交）、`tested_green`、`tested_red`（自測）、`queued`（進佇列）、`merged`、`approved`、`revoked`。
+  只有某個目的地要收狀態變化時，排隊器才會寫那類事件。
+- `token_file`：有就帶 `Authorization: Bearer <權杖>`（每次送出才從檔案讀）；帶權杖的網址只收 https（本機位址才可 http）。
+- `batch_seconds`：最舊的事件滿這麼多秒才送一批（給機器的可以設很短，例如 5）。
+- 每個目的地各有進度，事件依 id 由小到大送；送失敗就保留、退避重送（60 秒起倍增到 30 分鐘），不丟、不亂序。
+  至少送一次，每筆帶 `id`（單調遞增，對方依此去重）。新加的目的地只收從加入起的事件，不重送歷史。
+
+送出的內容（`POST`，JSON，`schema` 目前是 1，之後只會加欄位）：
+
+```json
+{"schema": 1, "sent_at": 1700000000.0, "destination": "board", "count": 1,
+ "text": "合併佇列有 1 件事要看：...",
+ "events": [{"id": 42, "kind": "tested_red", "branch": "feat-x", "commit": "<提交 hash>",
+             "detail": "<hash 前 8 碼>｜原因｜紅項：t1、t2", "at": 1700000000.0,
+             "from": "selftesting", "to": "rejected",
+             "failed_items": [{"item_id": "t1", "status": "fail", "summary": "..."}]}]}
+```
+
+- 必有欄位：`id`、`kind`、`branch`（系統事件為 null）、`detail`、`at`；`commit` 是事件發生時分支的提交。
+- `detail` 是給人看的一行（提交前 8 碼、原因、紅項），只讀這幾個欄位的對方就夠用。
+- `from`／`to` 只在狀態變化類事件；`failed_items` 只在 `tested_red`、`rejected`（最近一次紅的測試的紅項）。
+- 對方要查更多：`GET /branches/<名字>`（含 `last_selftest`、`last_batch` 與各自的紅項）；放行 `POST /approve` 要帶 `sha`（審過的提交），撤回 `POST /revoke`。

@@ -128,8 +128,25 @@ def query_branch(con, name: str) -> Dict[str, Any]:
             (r["id"],)))
     b["runs"] = runs
     b["events"] = _rows(con.execute(
-        "SELECT id, kind, detail, at, resolved_at FROM events WHERE branch=? ORDER BY id DESC LIMIT 10",
+        "SELECT id, kind, detail, at, resolved_at FROM events WHERE branch=? "
+        "AND kind IN ('rejected','conflict','halted','queue_error') ORDER BY id DESC LIMIT 10",
         (name,)))
+    b["last_selftest"] = next((r for r in runs if r["kind"] == "selftest"), None)
+    # 最近一次批測：這條分支所屬最近一批，與那批測試的結果、紅項
+    bm = con.execute("SELECT b.id, b.status, b.started_at, b.finished_at FROM batches b JOIN batch_members m "
+                     "ON m.batch_id=b.id WHERE m.branch=? ORDER BY b.id DESC LIMIT 1", (name,)).fetchone()
+    if bm is None:
+        b["last_batch"] = None
+    else:
+        lb = dict(bm)
+        lb["runs"] = _rows(con.execute(
+            "SELECT id, kind, size, status, exit_code, commit_sha FROM runs WHERE batch_id=? ORDER BY id DESC LIMIT 20",
+            (bm["id"],)))
+        for r in lb["runs"]:
+            r["failed_items"] = _rows(con.execute(
+                "SELECT item_id, status, summary FROM run_items WHERE run_id=? AND status IN ('fail','timeout')",
+                (r["id"],)))
+        b["last_batch"] = lb
     return b
 
 

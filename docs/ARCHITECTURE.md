@@ -65,7 +65,7 @@ docs/           DESIGN（設計）、ARCHITECTURE（本檔）
 | limits | selftest_timeout_s、batch_timeout_s、batch_max、points、double_fail_halt、min_free_mem_mb、min_free_disk_mb |
 | policy | require_approval |
 | commands | test（必要）、classify（選配） |
-| notify | url、batch_seconds |
+| notify | url、batch_seconds、destinations（name、url、token_file、kinds、batch_seconds） |
 | api | listen、read_key_file、write_key_file |
 | expose（選配，預設關；換設定要重啟） | tunnel_command、url_pattern、register_url（只收 https，本機位址才可 http）、register_token_file、reregister_seconds |
 
