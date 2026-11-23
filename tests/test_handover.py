@@ -136,11 +136,16 @@ class Handover(E2E):
         self.system2(selftest_timeout_s=3)
         self.tick_until(lambda: self.state("a") == "selftesting" and self.running())
         rid = self.running()[0]["id"]
-        time.sleep(2.5)
+        # 不靠真實睡眠：把這筆的開跑時間往前挪過逾時上限，重啟後要「從原本的開跑時間算」，立刻判逾時
+        # （若重新計時，起算點會是重啟那一刻，幾個 tick 內不會逾時）。不依賴牆鐘，機器忙也穩。
+        self.con.execute("UPDATE runs SET started_at = started_at - 10 WHERE id=?", (rid,))
+        self.con.commit()
         self.s = self.restart()
-        t0 = time.time()
-        self.tick_until(lambda: self.state("a") == "rejected", timeout=20)
-        self.assertLess(time.time() - t0, 2.5)                     # 從原本的開跑時間算，不是重新計時
+        for _ in range(5):
+            self.s.tick()
+            if self.state("a") == "rejected":
+                break
+        self.assertEqual(self.state("a"), "rejected")
         self.assertEqual(self.con.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()[0], "timeout")
 
     def test_adopted_not_reaped_as_orphan(self):
