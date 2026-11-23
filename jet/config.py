@@ -45,7 +45,8 @@ class Config:
     listen: str = "127.0.0.1:8080"
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
-    expose: Optional[dict] = None   # 對外開放（選配），沒設就什麼都不做
+    order: str = "parallel"           # review_first＝先審後測；parallel＝不分先後
+    source: Optional[dict] = None     # 外部來源（選配）：{url, token_file, poll_seconds, max_age_s, timeout_s}
 
 
 def _need(d, k, typ):
@@ -67,7 +68,6 @@ def parse(d: dict) -> Config:
     cmds = _need(d, "commands", dict)
     notify = d.get("notify", {})
     api = d.get("api", {})
-    expose = d.get("expose")
     try:
         pool = parse_cores(_need(cores, "pool", str))
     except ValueError as e:
@@ -106,7 +106,8 @@ def parse(d: dict) -> Config:
         listen=api.get("listen", "127.0.0.1:8080"),
         read_key_file=api.get("read_key_file"),
         write_key_file=api.get("write_key_file"),
-        expose=_parse_expose(expose),
+        order=pol.get("order", "parallel"),
+        source=_parse_source(d.get("source")),
     )
     _validate(cfg)
     return cfg
@@ -120,20 +121,26 @@ def _parse_destinations(d):
         raise ConfigError(f"notify.destinations：{ex}")
 
 
-def _parse_expose(e):
+def _parse_source(e):
     if e is None:
         return None
     if not isinstance(e, dict):
-        raise ConfigError("expose 必須是物件")
-    from . import expose as _x   # 延後載入，沒設 expose 就不會牽動
-    out = {"tunnel_command": e.get("tunnel_command"), "url_pattern": e.get("url_pattern"),
-           "register_url": e.get("register_url"), "register_token_file": e.get("register_token_file"),
-           "reregister_seconds": e.get("reregister_seconds", 600)}
+        raise ConfigError("source 必須是物件")
+    from . import notify as _n
+    out = {"url": e.get("url"), "token_file": e.get("token_file"), "poll_seconds": e.get("poll_seconds", 15),
+           "max_age_s": e.get("max_age_s", 600), "timeout_s": e.get("timeout_s", 10)}
     try:
-        _x.check_settings(out["tunnel_command"], out["url_pattern"], out["register_url"],
-                          out["register_token_file"], out["reregister_seconds"])
-    except _x.ExposeError as ex:
-        raise ConfigError(str(ex))
+        _n.check_bearer_url(out["url"]) if out["token_file"] else _n.check_url(out["url"] or None)
+    except _n.NotifyError as ex:
+        raise ConfigError(f"source.url：{ex}")
+    if not out["url"]:
+        raise ConfigError("source.url 必填")
+    if out["token_file"] is not None and (not isinstance(out["token_file"], str) or not out["token_file"]):
+        raise ConfigError("source.token_file 必須是檔案路徑字串")
+    for k in ("poll_seconds", "max_age_s", "timeout_s"):
+        v = out[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            raise ConfigError(f"source.{k} 必須 > 0")
     return out
 
 
@@ -148,6 +155,12 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.scope not in ("all", "tracked"):
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
+    if c.order not in ("parallel", "review_first"):
+        raise ConfigError('policy.order 必須是 "parallel" 或 "review_first"')
+    if c.order == "review_first" and not c.require_approval:
+        raise ConfigError("policy.order=review_first 需要 policy.require_approval=true")
+    if c.source is not None and c.scope != "tracked":
+        raise ConfigError('有設 source 時 git.scope 必須是 "tracked"（清單裡有的才管）')
     if c.core_unit not in ("logical", "physical") or c.threads not in ("all", "one"):
         raise ConfigError('cores.unit 要是 "logical" 或 "physical"，cores.threads 要是 "all" 或 "one"')
     if c.max_selftest_slots < 0:

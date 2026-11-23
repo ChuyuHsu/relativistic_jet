@@ -96,16 +96,20 @@ def apply_event(con, name, event: Event, **fields) -> State:
     return new
 
 
+def _ctx(con, branch):
+    """事件帶的分支現況：提交、依據的放行版本、重測計數。"""
+    b = get_branch(con, branch) if branch else None
+    return (b["head_sha"], b["approved_sha"], b["retest"]) if b else (None, None, None)
+
+
 def add_event(con, kind, branch=None, detail=None):
-    sha = None
-    if branch:
-        b = get_branch(con, branch)
-        sha = b["head_sha"] if b else None
-    con.execute("INSERT INTO events(kind,branch,detail,at,commit_sha) VALUES(?,?,?,?,?)",
-                (kind, branch, detail, now(), sha))
+    sha, appr, rt = _ctx(con, branch)
+    con.execute("INSERT INTO events(kind,branch,detail,at,commit_sha,approved_sha,retest) VALUES(?,?,?,?,?,?,?)",
+                (kind, branch, detail, now(), sha, appr, rt))
 
 
-MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
+MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
+                 "superseded", "parent_blocked")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
 
 
 def emit(con, kind, branch, detail: dict, commit_sha=None):
@@ -113,15 +117,17 @@ def emit(con, kind, branch, detail: dict, commit_sha=None):
     if get_meta(con, "emit_machine_events", "0") != "1":
         return
     t = now()
-    con.execute("INSERT INTO events(kind,branch,detail,at,resolved_at,commit_sha) VALUES(?,?,?,?,?,?)",
-                (kind, branch, json.dumps(detail, ensure_ascii=False, sort_keys=True), t, t, commit_sha))
+    _, appr, rt = _ctx(con, branch)
+    con.execute("INSERT INTO events(kind,branch,detail,at,resolved_at,commit_sha,approved_sha,retest) VALUES(?,?,?,?,?,?,?,?)",
+                (kind, branch, json.dumps(detail, ensure_ascii=False, sort_keys=True), t, t, commit_sha, appr, rt))
 
 
 def add_info_event(con, kind, branch=None, detail=None):
     """資訊型事件（tracked／untracked）：記錄用，不算待辦、不通知。"""
     t = now()
-    con.execute("INSERT INTO events(kind,branch,detail,at,notified_at,resolved_at) VALUES(?,?,?,?,?,?)",
-                (kind, branch, detail, t, t, t))
+    sha, appr, rt = _ctx(con, branch)
+    con.execute("INSERT INTO events(kind,branch,detail,at,notified_at,resolved_at,commit_sha,approved_sha,retest)"
+                " VALUES(?,?,?,?,?,?,?,?,?)", (kind, branch, detail, t, t, t, sha, appr, rt))
 
 
 def audit(con, actor, action, args=None):
@@ -261,3 +267,34 @@ def untrack(con, branch: str, by="?") -> bool:
         add_info_event(con, "untracked", branch)
         audit(con, by, "untrack", {"branch": branch})
     return existed
+
+
+# ---- 外部來源（source）：清單是唯一依據 ----
+def note_sha(con, branch, sha, content_id):
+    con.execute("INSERT OR REPLACE INTO shas(branch,sha,content_id) VALUES(?,?,?)", (branch, sha, content_id))
+
+
+def known_content_id(con, branch, sha) -> Optional[str]:
+    r = _row(con, "SELECT content_id FROM shas WHERE branch=? AND sha=?", branch, sha)
+    return r[0] if r else None
+
+
+def sync_tracked(con, entries: List[dict]) -> dict:
+    """依清單整張換掉登記表：有的登記（父分支有變就標成要重新套用）、沒有的取消。回傳 {added, removed, parent_changed}。"""
+    want = {e["branch"]: e.get("parent") for e in entries}
+    have = {r["branch"]: r["parent"] for r in con.execute("SELECT branch,parent FROM tracked")}
+    out = {"added": [], "removed": [], "parent_changed": []}
+    for b, par in want.items():
+        if b not in have:
+            con.execute("INSERT INTO tracked(branch,parent,parent_applied,at) VALUES(?,?,0,?)", (b, par, now()))
+            add_info_event(con, "tracked", b, f"parent={par}" if par else None)
+            out["added"].append(b)
+        elif have[b] != par:
+            con.execute("UPDATE tracked SET parent=?, parent_applied=0 WHERE branch=?", (par, b))
+            out["parent_changed"].append(b)
+    for b in have:
+        if b not in want:
+            con.execute("DELETE FROM tracked WHERE branch=?", (b,))
+            add_info_event(con, "untracked", b)
+            out["removed"].append(b)
+    return out

@@ -17,6 +17,7 @@ jet/            核心套件（只用標準庫，Python ≥ 3.9）
   scheduler.py  主迴圈 tick 順序
   api.py        HTTP 路由表
   notify.py     通知（M1）
+  source.py     外部來源輪詢（清單格式檢查、背景拉取、保留上一份成功的）
   cli.py        命令列
 board/          選配的任務看板（Cloudflare Worker＋D1，JavaScript，單獨用 wrangler 部署；核心不依賴它，細節見 board/README.md）
 examples/       合成範例專案（測試指令、分類指令、範例設定）
@@ -45,6 +46,20 @@ docs/           DESIGN（設計）、ARCHITECTURE（本檔）
 `ready` 事件由 scheduler 在「自測綠且（有效放行或不需放行）」時發出。
 內容指紋（content_id）沒變、只是重疊到新 main：放行、自測結果、`queued_at` 都保留。
 
+先審後測（`policy.order=review_first`）：沒有有效放行的版本不開自測；自測中放行沒了（撤回、內容變了）就停掉、回待自測；
+父卡要「已合入或已在隊伍裡（自測中／自測綠／排隊／批測中）」才測子卡；父卡還沒綠時子卡紅，不算子卡的，重排等父卡綠。
+不分先後（`parallel`，預設）行為不變。
+
+外部來源（`source`）：每輪 `_source_step` 收背景執行緒拉到的清單 → `store.sync_tracked` 換掉登記表 →
+掃 Git（父在前）→ `_reconcile_parents`（清單上的父分支套上，放行保留、從待自測重來）→
+`_apply_source_approvals`：每條分支對一次清單——`approved_sha` 等於 head 或內容指紋相同就放行、否則撤回；
+內容不同且新版本第一次出現發 `superseded`（每個版本一次）；`retest` 變大清掉退回／暫停；
+父卡不在清單上發 `parent_blocked`（一次）並擋住。拉不到、非 200、格式錯：沿用上一份、發 `source_error`（同樣的錯一次），
+絕不取消登記或撤回放行。推 main 之前（批測與純文件）`_repull` 同步重拉一次，`_valid_prefix` 只推「成員全都還有效」的最大已測綠點，
+撤掉的與它的子孫留下；清單超過 `max_age_s` 沒更新成功就只測不推（`_may_push`）。
+每個事件帶 `approved_sha`、`retest`（事件寫入時從分支現況取）與事件 id（`events.id`，只增不減）。
+`shas` 表記每個看過的提交的內容指紋，放行版本被新提交覆蓋後仍能比對是不是同一份內容。
+
 堆疊：`branches.parent` 指向父分支。排隊條件多一條「父已合入或也在隊裡」，
 組批時父一定排在子前面。父被退回或有新提交 → 子收到 `parent_changed` 回待自測。
 父是兇手 → 子孫一起 `batch_deferred`，不算紅。父合入 → `parent` 清為 NULL。
@@ -64,11 +79,11 @@ docs/           DESIGN（設計）、ARCHITECTURE（本檔）
 | paths | state_dir、work_dir |
 | cores | pool（如 `"0-7"`）、selftest_cores、batch_cores、reserve_for_selftest |
 | limits | selftest_timeout_s、batch_timeout_s、batch_max、points、double_fail_halt、min_free_mem_mb、min_free_disk_mb |
-| policy | require_approval |
+| policy | require_approval、order（`parallel` 不分先後／`review_first` 先審後測） |
 | commands | test（必要）、classify（選配） |
 | notify | url、batch_seconds、destinations（name、url、token_file、kinds、batch_seconds） |
 | api | listen、read_key_file、write_key_file |
-| expose（選配，預設關；換設定要重啟） | tunnel_command、url_pattern、register_url（只收 https，本機位址才可 http）、register_token_file、reregister_seconds |
+| source（選配；要求 git.scope="tracked"；換設定要重啟） | url、token_file、poll_seconds（預設 15）、max_age_s（預設 600）、timeout_s（預設 10） |
 
 載入前先 `config.parse` 檢查；壞的不載、沿用舊的（`safe_reload`）。金鑰只放檔案路徑，不放值。
 

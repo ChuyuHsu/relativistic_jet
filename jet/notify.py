@@ -16,12 +16,14 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 NOTIFY_KINDS = ("rejected", "conflict", "halted", "queue_error")   # 要人處理的（預設只送這些）
-MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked")  # 給機器看的狀態變化
+MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
+                 "superseded", "parent_blocked")  # 給機器看的狀態變化
 ALL_KINDS = NOTIFY_KINDS + MACHINE_KINDS
 KIND_TEXT = {
     "rejected": "被退回", "conflict": "跟 main 撞檔", "halted": "暫停待人處理", "queue_error": "排隊器出狀況",
     "pushed": "有新提交", "tested_green": "自測綠", "tested_red": "自測紅", "queued": "進佇列",
     "merged": "已合入", "approved": "已放行", "revoked": "已撤回放行",
+    "superseded": "內容變了、放行失效", "parent_blocked": "父分支擋住",
 }
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -133,6 +135,7 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
             "id": e["id"], "kind": e["kind"], "branch": e.get("branch"), "commit": e.get("commit"),
             "detail": e.get("detail"), "at": e["at"],
             "from": e.get("from"), "to": e.get("to"), "failed_items": e.get("failed_items"),
+            "approved_sha": e.get("approved_sha"), "retest": e.get("retest"),
         }.items() if v is not None or k in ("branch", "detail")} for e in events],
     }
     if destination:
@@ -275,7 +278,7 @@ class Notifier:
         mm = ",".join("?" * len(MACHINE_KINDS))
         extra = " AND notified_at IS NULL" if d.replay else ""
         rows = con.execute(
-            f"SELECT id, kind, branch, detail, at, commit_sha FROM events WHERE id>? AND kind IN ({marks}) "
+            f"SELECT id, kind, branch, detail, at, commit_sha, approved_sha, retest FROM events WHERE id>? AND kind IN ({marks}) "
             f"AND (resolved_at IS NULL OR kind IN ({mm})){extra} ORDER BY id LIMIT ?",
             (cur, *d.kinds, *MACHINE_KINDS, MAX_EVENTS_PER_POST)).fetchall()
         if not rows:

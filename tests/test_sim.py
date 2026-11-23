@@ -171,8 +171,13 @@ class SimTest(unittest.TestCase):
                             self.fail(f"seed={seed} 無辜分支 {x['name']} 被抖動項退回：{why}")
                 for x in store.list_branches(sim.con):
                     st = x["state"]
-                    waiting_parent = x["parent"] and (store.get_branch(sim.con, x["parent"]) or {"state": ""})["state"] in (
-                        "rejected", "halted", "pending")
+                    waiting_parent, anc = False, x["parent"]       # 任何一代祖先還在退回／暫停／待自測：子孫等著，不算沒收斂
+                    while anc and not waiting_parent:
+                        pr = store.get_branch(sim.con, anc)
+                        if pr is None:
+                            break
+                        waiting_parent = pr["state"] in ("rejected", "halted", "pending")
+                        anc = pr["parent"]
                     if st in ACTIVE and not waiting_parent:
                         self.fail(f"seed={seed} 沒收斂：{x['name']} {st} {x['reject_reason']}")
             finally:

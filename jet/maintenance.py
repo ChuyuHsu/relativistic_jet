@@ -27,7 +27,7 @@ REVOCATION_LOG = "revocations.log"
 LOCK_NAME = "jet.lock"
 
 # 換這些欄位要重啟才安全：熱重載時拒絕
-RESTART_ONLY = ("remote", "state_dir", "work_dir", "listen", "read_key_file", "write_key_file", "pool", "expose")
+RESTART_ONLY = ("remote", "state_dir", "work_dir", "listen", "read_key_file", "write_key_file", "pool", "source")
 
 
 class MaintenanceError(Exception):
