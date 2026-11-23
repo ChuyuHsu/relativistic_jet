@@ -75,7 +75,7 @@ export async function handle(req, env, ctx) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c || !c.branch) return json({ error: '卡不存在或還沒有分支' }, 404);
     if (m[2] === 'approve') {
-      if (!body.commit) return json({ error: '放行要帶審過的提交 hash（commit）' }, 400);
+      if (!/^[0-9a-f]{7,64}$/i.test(String(body.commit || ''))) return json({ error: '放行要帶審過的提交 hash（commit，7 到 64 碼十六進位）' }, 400);
       await db.prepare('UPDATE cards SET approved_commit=?,approved_by=?,approved_at=?,updated_at=? WHERE id=?').bind(String(body.commit), actor, now(), now(), c.id).run();
       await log(db, c.id, actor, `放行 ${String(body.commit).slice(0, 12)}`);
     } else {

@@ -59,6 +59,7 @@ test('排隊器 notify 的原格式（rejected/conflict/halted）能收', async 
 test('放行是卡片欄位：放行、撤回、換分支清空；不需要連排隊器', async () => {
   const e = mkenv(); await card(e, 'c1', 'a');
   assert.equal((await call(e, 'POST', '/api/cards/c1/approve', {})).status, 400);
+  assert.equal((await call(e, 'POST', '/api/cards/c1/approve', { commit: 'main' })).status, 400);
   const a = await (await call(e, 'POST', '/api/cards/c1/approve', { commit: 'abc1234', actor: 'rev' })).json();
   assert.deepEqual([a.approved_commit, a.approved_by], ['abc1234', 'rev']);
   const r = await (await call(e, 'POST', '/api/cards/c1/revoke', {})).json();
