@@ -11,9 +11,9 @@ jet/            核心套件（只用標準庫，Python ≥ 3.10）
   batch.py      測點階梯、判決、找兇手（純函式）  ← 已實作
   config.py     設定檔載入與檢查                ← 已實作
   db.py         SQLite 結構、遷移、備份          ← 已實作
-  cores.py      核池（專屬核、不共用）            ← 池已實作；foreign_busy 待做
+  cores.py      核池（專屬核、不共用）            ← 已實作（含 foreign_busy、/proc 掃描）
   gitops.py     Git 介面（只定 Protocol）
-  executor.py   執行器介面（行程群組、綁核、逾時）
+  executor.py   執行器（行程群組、綁核、逾時殺群）  ← 已實作
   scheduler.py  主迴圈 tick 順序
   api.py        HTTP 路由表
   notify.py     通知（M1）
@@ -92,6 +92,14 @@ stdout：`{"verdict":"docs_only"}` 或 `{"verdict":"test"}`。沒設定＝一律
   對被測專案只准寫兩件事：`fast_forward_main`（帶 expect_main，不 force）與 `delete_branch`（帶 expect_sha）。
 - **executor.Executor**：`start(Job)→handle`、`poll(handle)→JobResult|None`、`cancel(handle)`。
   一個工作一個行程群組，逾時／取消殺整群；開跑前 `cores.foreign_busy` 檢查核上沒有外人。
+  `start` 開不了時丟例外而不是回空：`CoreBusy(cores)`（核已被我方別的工作或外面綁核的行程佔住）、
+  `ResourceLow(reason)`（記憶體或磁碟低於水位）、`ExecutorError`（其他，例如指令不存在）。
+  `Job.argv` 可覆蓋 `Executor(test_cmd=…)` 的指令範本；handle 有 `.pgid`。`live_pgids()`／`live_cores()`
+  給排隊器查；`check_resources(path)` 讓排隊器派工前先問水位。
+  結果：退出碼 0→pass（但報告有紅項改判 fail）、1→fail、其他（含 2、被訊號殺）→infra；逾時 timeout、取消 cancelled；
+  `failed_items` 是報告裡 status=fail｜timeout 的項目 id。
+  `foreign_busy` 的「外人」＝可用核是基準（預設取 1 號行程的可用核）的真子集、與這些核有交集，
+  且不屬於我方行程群組或工作階段的行程；核心執行緒、殭屍、本行程不算。
 - **cores.CorePool**：`acquire(n)`（不夠不部分給）、`release`、`free_count`。批測空閒時，
   排隊器把批測核借給自測；批測要用時只用空的核，不搶正在跑的自測。
 - **batch.judge(n, results, probes)**：純函式，回 `Verdict(wait|probe|done, merge_upto, culprit, probe)`。
