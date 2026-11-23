@@ -323,6 +323,14 @@ class Scheduler:
     def stop(self):
         self._stop = True
 
+    def drain_waiting(self) -> List[dict]:
+        """停機等待中還在跑的工作（給 status 看：還在等哪個 run）。"""
+        now = self.clock()
+        out = [{"run": j.run_id, "kind": j.kind, "branch": j.branch, "size": j.size} for j in self.jobs.values()]
+        if self.batch is not None and not out:
+            out.append({"run": None, "kind": "batch", "branch": None, "size": None})
+        return out
+
     def idle(self) -> bool:
         return not self.jobs and self.batch is None
 
@@ -925,6 +933,7 @@ class Scheduler:
         src = self.source
         if src.drops_ver == 0:
             return
+        form = getattr(src.drops, "form", "array")
         sig = (src.drops_ver, self.main)
         if sig == self._drop_sig:
             return
@@ -953,7 +962,7 @@ class Scheduler:
                 store.set_meta(self.con, f"dcr:{card}", sigr)
                 emitted += 1
         self._put("drop", {"at": self.clock(), "requested": len(src.drops), "checked": checked,
-                           "emitted": emitted, "failed": failed})
+                           "emitted": emitted, "failed": failed, "form": form})
 
     def _source_error(self, msg: str):
         """拉不到、格式不對：記錄＋一筆 source_error 事件（同樣的錯只發一次），絕不動登記與放行。"""

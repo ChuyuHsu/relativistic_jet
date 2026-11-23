@@ -97,7 +97,7 @@ def query_status(con, now: Optional[float] = None) -> Dict[str, Any]:
         "open_todo": open_todo,
         "restored_at": _meta(con, "restored_at"),
         "flaky": sorted(flaky_items(con, "gate", int(_meta(con, "baseline_history", "5") or 5))),
-        "scheduler": {k: _json_meta(con, "obs_" + k) for k in ("tick", "scan", "fetch", "last_error", "source", "drop")},
+        "scheduler": {k: _json_meta(con, "obs_" + k) for k in ("tick", "scan", "fetch", "last_error", "source", "drop", "drain")},
         "notify_last": {r[0][len("notify_last:"):]: json.loads(r[1]) for r in con.execute(
             "SELECT key, value FROM meta WHERE key LIKE 'notify_last:%'")},
     }

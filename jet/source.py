@@ -53,11 +53,17 @@ def parse_list(data) -> List[dict]:
     return out
 
 
+class Drops(list):
+    """放棄查核請求清單；form 記清單本體是 array 還是 object（診斷：網址沒帶 with 對方就回 array）。"""
+    form = "array"
+
+
 def parse_payload(data):
     """清單本體可以是陣列（舊格式），或物件 {"cards"|"entries"|"items": [...], "drop_checks": [...]}。
     回傳 (清單, 放棄查核請求)。drop_checks 每筆 {card, branch, superseded_by_branch|null}。"""
-    drops: List[dict] = []
+    drops = Drops()
     if isinstance(data, dict):
+        drops.form = "object"
         raw = data.get("cards", data.get("entries", data.get("items")))
         if raw is None:
             raw = []
@@ -144,7 +150,7 @@ class SourcePoller:
         self._res = None
         if ok:
             if isinstance(val, tuple):               # (清單, 放棄查核)
-                val, self.drops = val
+                val, self.drops = val[0], val[1]
             else:                                    # 測試或舊 fetcher 直接回清單
                 self.drops = []
             self.entries, self.ok_at, self.error, self.new_data = val, self.clock(), None, True

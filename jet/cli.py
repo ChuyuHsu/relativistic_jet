@@ -114,9 +114,15 @@ def _verbose_lines(sc: dict, now: float) -> List[str]:
             out.append(f"fetch：失敗 {_ts(f.get('finished_at'))}：{f.get('error')}")
     else:
         out.append("fetch：還沒開始")
+    dn = sc.get("drain")
+    if dn:
+        w = "、".join(f"#{x['run']} {x['kind']}" + (f" {x['branch']}" if x.get("branch") else "") for x in dn.get("waiting", [])) or "批測收尾"
+        lim = f"，最多等到 {dn['limit_s']:.0f} 秒" if dn.get("limit_s") else "（不限時）"
+        out.append(f"⏳ 等待停機／重啟中（{_ts(dn['since'])} 起{lim}）：還在等 {w}")
     dr = sc.get("drop")
     out.append(f"放棄查核：{_ts(dr['at'])} 清單 {dr['requested']} 筆、查了 {dr['checked']}、發事件 {dr['emitted']}、失敗 {dr['failed']}"
-               if dr else "放棄查核：清單沒帶 drop_checks（來源網址要加 ?with=drop_checks）")
+               + f"，清單形式 {dr.get('form')}" + ("" if dr.get("form") == "object" else "（不是物件：來源網址要加 ?with=drop_checks、或對方沒照辦）")
+               if dr else "放棄查核：還沒處理過清單（剛啟動、或還沒成功拉到清單）")
     sn = sc.get("scan")
     if sn and sn.get("waiting"):
         out.append(f"掃描：{sn['waiting']}")

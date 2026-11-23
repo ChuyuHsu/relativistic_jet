@@ -64,7 +64,7 @@ class Server:
             raise
         self._stop = threading.Event()
         self.exit_code = 0
-        self.con.execute("DELETE FROM meta WHERE key='shutdown_request'")   # 上一輪留下的停機要求不算
+        self.con.execute("DELETE FROM meta WHERE key IN ('shutdown_request','obs_drain')")   # 上一輪留下的停機要求不算
 
     # ------------------------------------------------------------
     def _pre_commit(self, action: str, args: dict, now: float) -> None:
@@ -115,7 +115,15 @@ class Server:
             if sched is not None and hasattr(sched, "draining"):
                 sched.draining = True
             if sched is not None and hasattr(sched, "idle") and not sched.idle():
-                return                                   # 等手上的批測與自測到安全點
+                waiting = sched.drain_waiting() if hasattr(sched, "drain_waiting") else []
+                since = float(req.get("at") or self.now())
+                limit = float(getattr(self.cfg, "drain_max_s", 0) or 0)
+                store.set_meta(self.con, "obs_drain", json.dumps(
+                    {"since": since, "limit_s": limit, "waiting": waiting}, ensure_ascii=False))
+                if not (limit and self.now() - since > limit):
+                    return                               # 等手上的批測與自測到安全點
+                log.warning("優雅停機等了超過 %.0f 秒：立刻收，沒做完的留給啟動復原重排", limit)
+                sched.shutdown()
         self.exit_code = guard.RESTART_CODE if req.get("restart") else 0
         log.info("依停機要求退出（%s，%s）", req.get("mode"), "重啟" if req.get("restart") else "停止")
         self._stop.set()
