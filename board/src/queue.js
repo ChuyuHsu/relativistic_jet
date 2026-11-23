@@ -8,7 +8,7 @@ const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, header
 const now = () => Math.floor(Date.now() / 1000);
 
 // 事件種類 → 上游分支狀態快取（phase；用上游自己的狀態名）。事件只當快取與叫醒，不當真相；沒列的只記錄。
-const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red: 'rejected', queued: 'queued', merged: 'merged', rejected: 'rejected', conflict: 'rejected', halted: 'halted' };
+const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red: 'rejected', queued: 'queued', merged: 'merged', rejected: 'rejected', conflict: 'rejected', halted: 'halted', selftest_started: 'selftesting', batch_started: 'batching' };
 // 需要人處理、要叫醒負責串的種類
 const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);   // → 領卡的開發者
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者

@@ -180,6 +180,7 @@ def _enrich(con, r) -> Dict[str, Any]:
             if e["kind"] in ("selftest_started", "batch_started"):
                 for k in ("run_id", "cores", "batch_id", "pos", "batch_size"):
                     e[k] = d.get(k)
+                e["to"] = "selftesting" if e["kind"] == "selftest_started" else "batching"   # 看板的 phase 靠它顯示「自測中／批測中」
                 d = {"reason": (f"run #{d.get('run_id')} 核 {d.get('cores')}" if e["kind"] == "selftest_started"
                                 else f"批 #{d.get('batch_id')} 第 {d.get('pos')}/{d.get('batch_size')} 條")}
             if e["kind"] == "drop_checked":

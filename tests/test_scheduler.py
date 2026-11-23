@@ -725,10 +725,11 @@ class StartedEvents(Base):
         p = notify.build_payload([e], 1.0)["events"][0]
         self.assertEqual(p["kind"], "selftest_started")
         self.assertTrue(p["run_id"] and p["cores"] and p["commit"])
+        self.assertEqual(p["to"], "selftesting")                    # 看板 phase 用它
         bs = self.con.execute("SELECT * FROM events WHERE kind='batch_started' ORDER BY id").fetchall()
         self.assertEqual({e["branch"] for e in bs}, {"a", "b"})
         p = notify.build_payload([notify._enrich(self.con, bs[0])], 1.0)["events"][0]
-        self.assertEqual((p["batch_size"], p["pos"] in (1, 2)), (2, True))
+        self.assertEqual((p["batch_size"], p["pos"] in (1, 2), p["to"]), (2, True, "batching"))
 
 
 class SlotsWithBatch(Base):
