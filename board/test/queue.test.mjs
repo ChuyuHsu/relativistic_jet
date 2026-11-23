@@ -443,6 +443,20 @@ test('信箱：claim 每收件串一則、領了不重給、5 分鐘沒 ack 再�
   assert.equal((await call(e, 'POST', '/api/outbox/claim', { actor: 'x' }, 'bad')).status, 401);
 });
 
+test('信箱：同一收件串同一張卡的舊通知被新的取代（只送最新一則，舊的直接標成已送）', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await approved(e, 'c1', 'th1'); await approved(e, 'c2', 'th1');
+  await ev(e, 'c1', { kind: 'conflict', approved_sha: SHA });
+  await ev(e, 'c1', { kind: 'tested_red', detail: 'latest-c1', approved_sha: SHA });
+  await ev(e, 'c2', { kind: 'conflict', approved_sha: SHA });
+  const a = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
+  assert.equal(a.messages.length, 1);                                      // 同一收件串合成一則
+  assert.deepEqual([...a.messages[0].card_ids].sort(), ['c1', 'c2']);
+  assert.equal(a.messages[0].ids.length, 2);                               // c1 兩則只剩最新一則
+  assert.match(a.messages[0].text, /latest-c1/);
+  assert.equal((await e.DB.prepare('SELECT count(*) AS n FROM outbox WHERE sent_at IS NOT NULL').first()).n, 1);   // 被取代的那則直接標成已送
+});
+
 test('信箱限額：min_gap_s 同收件串攢批、max_messages 分輪、release 放回去不丟', async () => {
   const e = mkenv({ ADMIN_THREADS: 'adm' });
   await approved(e, 'c1', 'th1'); await approved(e, 'c2', 'th2'); await approved(e, 'c3', 'th3');

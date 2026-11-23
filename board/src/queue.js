@@ -269,8 +269,17 @@ export async function outboxClaim(req, env) {
   await db.prepare('UPDATE outbox SET claimed_at=?,claim_id=? WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(t, token, t - CLAIM_TTL).run();
   const rows = (await db.prepare('SELECT * FROM outbox WHERE sent_at IS NULL AND claim_id=? ORDER BY n').bind(token).all()).results;
   const fallback = list(env.ADMIN_THREADS)[0] || '';
+  // 同一個收件串、同一張卡的通知只留最新一則（舊的已被新的取代，直接標成已送）：壓低發信量。沒有卡號的通知不合併。
+  const latest = new Map(), stale = [];
+  for (const r of rows) {
+    if (!r.card_id) continue;
+    const k = `${r.owner_thread || fallback}\u0000${r.card_id}`, prev = latest.get(k);
+    if (!prev || r.n > prev.n) { if (prev) stale.push(prev.n); latest.set(k, r); } else stale.push(r.n);
+  }
+  if (stale.length) await db.prepare(`UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND claim_id=? AND n IN (${stale.map(() => '?').join(',')})`).bind(t, token, ...stale).run();
+  const dropped = new Set(stale);
   const groups = new Map();
-  for (const r of rows) { const to = r.owner_thread || fallback; (groups.get(to) || groups.set(to, []).get(to)).push(r); }
+  for (const r of rows) { if (dropped.has(r.n)) continue; const to = r.owner_thread || fallback; (groups.get(to) || groups.set(to, []).get(to)).push(r); }
   // 發信端有限額：每個收件串兩則之間至少隔 min_gap_s（同一串的通知攢到下一輪一起發）、一次最多 max_messages 個收件串；
   // 沒輪到的不是丟掉，只是把領取標記放掉，下一次 claim 再給（claimed_at 清空，不用等 5 分鐘）。
   const minGap = Math.max(0, Number(body.min_gap_s) || 0), maxMsg = Number.isInteger(body.max_messages) && body.max_messages > 0 ? body.max_messages : Infinity;

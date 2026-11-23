@@ -58,5 +58,6 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 
 發信端有每小時訊息上限時，用這些參數避免洗版、被限額就不丟信：
 - `POST /api/outbox/claim {actor, min_gap_s?, max_messages?}`：`min_gap_s`＝同一收件串兩則之間至少隔幾秒（剛發過的先攢著，下次一起發）；`max_messages`＝這次最多給幾個收件串。沒輪到的不是丟掉，領取標記會放掉，下一次 claim 立刻再給。
+- 同一收件串、同一張卡的通知只送最新一則（舊的在 claim 時直接標成已送）；同一輪同一收件串本來就合成一則。
 - `POST /api/outbox/release {actor, ids, hold_s?}`：發信失敗（例如被限額）時把領走的信放回去，不 ack；`hold_s` 秒內不再給（預設 0，最多 300）。
 - 只給看板看的事件（開始自測、開始批測、tested_green 等）本來就不進信箱，只更新卡片階段。
