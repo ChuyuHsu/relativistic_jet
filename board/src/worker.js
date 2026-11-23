@@ -34,6 +34,22 @@ async function notify(db, owners, c, kind, detail) {
 }
 const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 
+// 設父卡：不能是自己、不存在、已放棄，也不能成環（沿父鏈走回自己）。回錯誤訊息或 null。
+async function badParent(db, id, parent) {
+  if (parent == null || parent === '') return null;
+  parent = String(parent);
+  if (parent === id) return '父卡不能是自己';
+  const p = await db.prepare('SELECT id,status,parent FROM cards WHERE id=?').bind(parent).first();
+  if (!p) return '父卡不存在';
+  if (p.status === 'dropped') return '父卡已放棄';
+  let cur = p, hops = 0;
+  while (cur && cur.parent && hops++ < 100) {
+    if (cur.parent === id) return '父卡會造成循環';
+    cur = await db.prepare('SELECT id,parent FROM cards WHERE id=?').bind(cur.parent).first();
+  }
+  return null;
+}
+
 async function log(db, id, actor, note) {
   await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(id, now(), actor, note).run();
 }
@@ -142,10 +158,11 @@ export async function handle(req, env, ctx) {
   }
   if (req.method === 'POST' && path === '/api/cards') {
     if (!body.id || !body.title) return json({ error: 'id 與 title 必填' }, 400);
+    { const bad = await badParent(db, String(body.id), body.parent); if (bad) return json({ error: bad }, 409); }
     const t = now();
     try {
       await db.prepare('INSERT INTO cards(id,title,body,area,priority,parent,owner_thread,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
-        .bind(String(body.id), String(body.title), String(body.body || ''), String(body.area || ''), Number(body.priority ?? 100), body.parent ?? null, body.owner_thread ?? null, t, t).run();
+        .bind(String(body.id), String(body.title), String(body.body || ''), String(body.area || ''), Number(body.priority ?? 100), body.parent || null, body.owner_thread ?? null, t, t).run();
     } catch (e) { return json({ error: 'id 已存在' }, 409); }
     await log(db, body.id, actor, '建立');
     return json({ ok: true }, 201);
@@ -191,7 +208,12 @@ export async function handle(req, env, ctx) {
     if (!c) return json({ error: 'not found' }, 404);
     const sets = [], vals = [];
     if ('branch' in body) return json({ error: '分支名由看板給定，領卡後不會變' }, 400);
-    for (const k of ['title', 'body', 'area', 'parent', 'owner_thread']) if (k in body) { sets.push(`${k}=?`); vals.push(String(body[k])); }
+    for (const k of ['title', 'body', 'area', 'owner_thread']) if (k in body) { sets.push(`${k}=?`); vals.push(String(body[k])); }
+    if ('parent' in body) {   // 可改成別張卡或清空（null／空字串）；放行保留
+      const bad = await badParent(db, id, body.parent);
+      if (bad) return json({ error: bad }, 409);
+      sets.push('parent=?'); vals.push(body.parent ? String(body.parent) : null);
+    }
     if ('priority' in body) { sets.push('priority=?'); vals.push(Number(body.priority)); }
     let note = '修改';
     let after = null;

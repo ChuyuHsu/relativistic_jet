@@ -257,3 +257,19 @@ test('卡住提醒：開發中、審查中、退回超過時數才通知管理�
   assert.deepEqual(await stuckCheck(e), { notified: 0 });
   assert.deepEqual(await stuckCheck(mkenv()), { skipped: true });
 });
+
+test('設父卡：可改可清空且放行保留；拒絕自己、不存在、已放棄、循環', async () => {
+  const e = mkenv(); await approved(e, 'A'); await claim(e, 'B', 'b', { parent: 'A' }); await claim(e, 'C');
+  const patch = (id, parent) => call(e, 'PATCH', `/api/cards/${id}`, { parent });
+  assert.equal((await patch('A', 'A')).status, 409);          // 自己
+  assert.equal((await patch('A', 'zzz')).status, 409);        // 不存在
+  assert.equal((await patch('A', 'B')).status, 409);          // 循環：B 的父卡是 A
+  await claim(e, 'D'); await call(e, 'PATCH', '/api/cards/D', { status: 'dropped' });
+  assert.equal((await patch('C', 'D')).status, 409);          // 已放棄
+  assert.equal((await call(e, 'POST', '/api/cards', { id: 'E', title: 'e', parent: 'D' })).status, 409);
+  assert.equal((await patch('B', 'C')).status, 200);          // 改成別張卡
+  assert.equal((await getCard(e, 'B')).parent, 'C');
+  const r = await (await patch('A', null)).json();            // 清空；放行保留
+  assert.deepEqual([r.parent, r.stage, r.approved_commit], [null, 'selftesting', SHA]);
+  assert.equal((await getCard(e, 'B')).parent, 'C');
+});
