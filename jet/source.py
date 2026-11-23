@@ -29,7 +29,7 @@ def parse_list(data) -> List[dict]:
             raise SourceError("清單每一筆要有 branch（字串）")
         b = e["branch"]
         if b in seen:
-            raise SourceError(f"清單分支重複：{b}")
+            continue                      # 同名分支重複：留第一筆，不讓一筆壞資料拖垮整份清單
         seen.add(b)
         par, appr, rt = e.get("parent"), e.get("approved_sha"), e.get("retest", 0)
         if par is not None and (not isinstance(par, str) or not par or par == b):
@@ -38,7 +38,10 @@ def parse_list(data) -> List[dict]:
             raise SourceError(f"{b} 的 approved_sha 不對")
         if isinstance(rt, bool) or not isinstance(rt, int) or rt < 0:
             raise SourceError(f"{b} 的 retest 要是 ≥0 的整數")
-        out.append({"branch": b, "parent": par or None, "approved_sha": appr or None, "retest": rt})
+        ps = e.get("parent_status")
+        if ps is not None and ps not in ("open", "dropped"):
+            raise SourceError(f"{b} 的 parent_status 只能是 open 或 dropped")
+        out.append({"branch": b, "parent": par or None, "parent_status": ps, "approved_sha": appr or None, "retest": rt})
     names = {e["branch"] for e in out}
     for e in out:                      # 父鏈不能成環（父不在清單上是允許的：那是「父卡擋住」）
         p, hops = e["parent"], 0

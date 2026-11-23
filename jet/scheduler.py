@@ -42,6 +42,8 @@ class Running:
     size: Optional[int] = None
     batch_id: Optional[int] = None
     units: int = 0            # 占了幾個核單位（邏輯核或實體核，依設定）
+    approved_sha: Optional[str] = None   # 開跑時依據的放行版本與重測計數（事件帶這個，不帶送出當下的）
+    retest: Optional[int] = None
 
 
 @dataclass
@@ -54,6 +56,7 @@ class ActiveBatch:
     probes: Dict[int, str] = field(default_factory=dict)
     failed: Dict[int, Set[str]] = field(default_factory=dict)   # 大小 → 新增的紅項
     launched: Set[Tuple[str, int]] = field(default_factory=set)
+    ctx: Dict[str, Tuple[Optional[str], Optional[int]]] = field(default_factory=dict)   # 成員 → 組批時的 (放行版本, 重測)
 
 
 def make_pool(cfg):
@@ -106,6 +109,9 @@ class Scheduler:
         self._unres_since: Dict[Tuple[str, str], float] = {}
         self._unres: Dict[Tuple[str, str], float] = {}     # 解不出來的放行版本：稍後再試
         self._repulled = False                             # 這一輪是不是已經重拉過清單
+        self._repull_ok = False
+        self._repull_retry_at = 0.0
+        self._anc_cache: Dict[Tuple[str, str], bool] = {}
         self._wait_proven: Set[str] = set()                # 因父卡還沒綠而被重排的子分支：父卡綠了才再測
         self._blocked: Dict[str, str] = {}                 # 被父卡擋住的分支 → 原因
         self._stop = False
@@ -430,7 +436,7 @@ class Scheduler:
         if row["state"] == S.BATCHING.value:
             self._abort_batch("成員消失")
         for ch in store.children(self.con, name):
-            self.con.execute("UPDATE branches SET parent=NULL WHERE name=?", (ch["name"],))
+            self.con.execute("UPDATE branches SET parent=NULL WHERE name=?", (ch["name"],))   # 外鍵：先脫鉤；來源模式的父卡以清單為準（_src_parent），父卡回來會重新套上
             self._parent_changed(ch)
         self.con.execute("DELETE FROM branches WHERE name=?", (name,))
 
@@ -448,9 +454,12 @@ class Scheduler:
                 continue
             p = store.get_branch(self.con, r["parent"])
             if p is None:
-                self.con.execute("UPDATE branches SET parent=NULL WHERE name=?", (r["name"],))
+                self.con.execute("UPDATE branches SET parent=NULL WHERE name=?", (r["name"],))   # 來源模式下清單仍說有父卡，_src_parent 會擋住
             elif p["state"] in (S.REJECTED.value, S.HALTED.value):
                 self._parent_changed(r)
+            elif r["state"] == S.QUEUED.value and p["state"] in (S.PENDING.value, S.SELFTESTING.value,
+                                                                 S.SELFTEST_GREEN.value):
+                self._parent_changed(r)                  # 父卡不在隊伍裡了（放行被撤回、重測中）：子卡回待自測
 
     # ---------- 分類 ----------
     def _is_docs(self, files: List[str]) -> bool:
@@ -520,7 +529,9 @@ class Scheduler:
             return False
         self._start_fail = 0
         self.con.execute("UPDATE runs SET pgid=? WHERE id=?", (getattr(handle, "pgid", None), rid))
-        self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id, ncores)
+        row = store.get_branch(self.con, branch) if branch else None
+        self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id, ncores,
+                                 row["approved_sha"] if row else None, row["retest"] if row else None)
         return True
 
     def _release_job(self, rid, status):
@@ -658,11 +669,15 @@ class Scheduler:
                     if self._ancestor_unproven(r["name"]):
                         continue
                     self._wait_proven.discard(r["name"])
+            if self._stale_parent(r):
+                self._reject_stale(r)
+                continue
             chain = self._chain(r["name"])
             res = self.repo.stack(self.main, [(x["name"], x["head_sha"]) for x in chain])
             if len(res.kept) != len(chain):
-                store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason="疊不上 main（撞檔）")
-                store.add_event(c, "conflict", r["name"], "自測前疊不上 main")
+                why = "疊不上 main（撞檔）" if len(chain) == 1 else "疊不上 main 加父卡（撞檔）"
+                store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason=why)
+                store.add_event(c, "conflict", r["name"], "自測前" + why)
                 continue
             if not self._launch("selftest", "selftest", res.prefixes[-1], self.cfg.selftest_cores,
                                 self.cfg.selftest_timeout_s, branch=r["name"],
@@ -673,6 +688,10 @@ class Scheduler:
             slots += 1
 
     def _on_selftest(self, j, res):
+        with store.event_ctx(j.branch, j.approved_sha, j.retest):
+            self._on_selftest_inner(j, res)
+
+    def _on_selftest_inner(self, j, res):
         c = self.con
         row = store.get_branch(c, j.branch)
         if row is None or row["state"] != S.SELFTESTING.value:
@@ -723,6 +742,9 @@ class Scheduler:
         return (not self.cfg.require_approval) or store.is_approved(self.con, r["name"], r["content_id"])
 
     def _parent_ok(self, r) -> bool:
+        sp = self._src_parent(r["name"])
+        if sp and (store.get_branch(self.con, sp) is None or r["parent"] != sp):
+            return False                                  # 清單說有父卡，但父卡的分支還沒到或還沒套上：不能排隊
         if not r["parent"]:
             return True
         p = store.get_branch(self.con, r["parent"])
@@ -741,15 +763,17 @@ class Scheduler:
         for r in store.list_branches(c, S.QUEUED.value):
             if not self._approved(r):
                 store.apply_event(c, r["name"], Event.REVOKE)
+            elif r["name"] in self._blocked or self._parent_waiting(r):
+                store.apply_event(c, r["name"], Event.PARENT_CHANGED)   # 父卡不在了／還沒接上：排隊中的也回待自測等
         for r in store.list_branches(c, S.PENDING.value):
-            if r["docs_only"] == 1 and not r["parent"] and self._approved(r) and r["name"] not in self._blocked:
+            if r["docs_only"] == 1 and not r["parent"] and not self._src_parent(r["name"]) \
+                    and self._approved(r) and r["name"] not in self._blocked:
                 self._merge_docs_only(r)
 
     def _merge_docs_only(self, r):
         c, main = self.con, self.repo.main_sha()
-        if not self._may_push():
+        if not self._repull():
             return
-        self._repull()
         r = store.get_branch(c, r["name"])
         if r is None or r["state"] != S.PENDING.value or not self._approved(r) or not self._tracked_ok(r["name"]):
             return
@@ -812,19 +836,30 @@ class Scheduler:
         self._entries = {e["branch"]: e for e in entries}
         store.sync_tracked(self.con, entries)
 
-    def _repull(self):
-        """推 main 前重拉一次清單（每輪最多一次）；失敗就沿用上一份（太舊的由 _may_push 擋）。"""
-        if self.source is None or self._repulled:
-            return
+    def _repull(self) -> bool:
+        """推 main 前重拉一次清單（每輪最多一次）。一定要成功才能推：失敗就這輪不推，過一會兒再試。"""
+        if self.source is None:
+            return True
+        if self._repulled:
+            return self._repull_ok
+        if self.clock() < self._repull_retry_at:
+            return False
         self._repulled = True
         err = self.source.refresh_now()
+        self._repull_ok = err is None
         if err:
+            self._repull_retry_at = self.clock() + 15
             self._source_error(err)
+            self._note_error("外部來源", "推 main 前重拉清單失敗，這批只測不推（來源恢復後自動繼續）")
+            return False
+        if self._last_err_msg and self._last_err_msg.startswith("外部來源"):
+            self._last_err_msg = None
         if self.source.new_data:
             self.source.new_data = False
             self._apply_entries(self.source.entries)
             self._reconcile_parents()
             self._apply_source_approvals()
+        return True
 
     def _may_push(self) -> bool:
         """清單比設定的年齡還舊（或根本沒拉成功過）就只測不合。"""
@@ -930,12 +965,24 @@ class Scheduler:
                                {"from": st, "to": st, "reason": f"放行版本 {ap[:8]} 的內容跟目前 {row['head_sha'][:8]} 不同，放行失效"},
                                row["head_sha"])
 
+    def _src_parent(self, name) -> Optional[str]:
+        """來源模式：清單上這條分支還沒合併的父卡（沒有來源或沒有父卡回 None）。"""
+        if self.source is None or self._entries is None:
+            return None
+        e = self._entries.get(name)
+        par = e["parent"] if e else None
+        if not par:
+            return None
+        pr = store.get_branch(self.con, par)
+        return None if (pr is not None and pr["state"] == S.MERGED.value) else par
+
     def _check_blocked(self, row, e):
-        """清單上的父卡不在清單上（被放棄或不存在）：擋住這條分支，發 parent_blocked（同一條只發一次）。"""
+        """父卡被放棄（清單說 parent_status=dropped）：擋住這條分支，發 parent_blocked（同一條只發一次）。
+        父卡只是還沒推、還沒人領、被還卡（open）：只是等，不發事件。"""
         name, par = row["name"], e["parent"]
         key = f"pb:{name}"
         blocked = None
-        if par and par not in self._entries:
+        if par and par not in self._entries and e.get("parent_status") == "dropped":
             pr = store.get_branch(self.con, par)
             if pr is None or pr["state"] != S.MERGED.value:
                 blocked = par
@@ -943,12 +990,12 @@ class Scheduler:
             if store.get_meta(self.con, key):
                 store.set_meta(self.con, key, "")
             return
-        self._blocked[name] = f"父卡 {blocked} 不在清單上"
+        self._blocked[name] = f"父卡 {blocked} 被放棄"
         if store.get_meta(self.con, key) != blocked:
             store.set_meta(self.con, key, blocked)
             st = row["state"]
             store.emit(self.con, "parent_blocked", name,
-                       {"from": st, "to": st, "reason": f"父卡 {blocked} 被放棄或不存在，請改父卡"}, row["head_sha"])
+                       {"from": st, "to": st, "reason": f"父卡 {blocked} 被放棄，請改父卡"}, row["head_sha"])
 
     def _retest(self, row, rt: int):
         """清單上的重測計數變大：清掉退回／暫停，從待自測重來（放行保留）。"""
@@ -959,19 +1006,44 @@ class Scheduler:
             store.apply_event(self.con, name, Event.RESUME, fail_count=0, reject_reason=None)
 
     def _parent_waiting(self, r) -> bool:
-        """這條分支現在不該測：清單上的父卡還沒套上；先審後測時父卡要已合入或已在隊伍裡。"""
-        if self._entries is not None:
-            e = self._entries.get(r["name"])
-            if e and e["parent"]:
-                pr = store.get_branch(self.con, e["parent"])
-                if pr is not None and pr["state"] != S.MERGED.value and r["parent"] != e["parent"]:
-                    return True
+        """這條分支現在不該測：清單上有父卡但父卡的分支還沒到、不在清單上（還沒領／被還卡）、或還沒套上；
+        先審後測時父卡還要在隊伍裡（已放行）。"""
+        sp = self._src_parent(r["name"])
+        if sp:
+            pr = store.get_branch(self.con, sp)
+            if pr is None or sp not in (self._entries or {}) or r["parent"] != sp:
+                return True
         if self.cfg.order == "review_first" and r["parent"]:
             p = store.get_branch(self.con, r["parent"])
-            if p is not None and p["state"] not in (S.SELFTESTING.value, S.SELFTEST_GREEN.value, S.QUEUED.value,
-                                                    S.BATCHING.value, S.MERGED.value):
-                return True                                   # 父卡還沒放行進隊伍（待自測、退回、暫停）：等
+            if p is not None and p["state"] != S.MERGED.value:
+                if p["state"] in (S.SELFTESTING.value, S.QUEUED.value, S.BATCHING.value):
+                    return False
+                if p["state"] == S.SELFTEST_GREEN.value and self._approved(p):
+                    return False
+                return True                                   # 父卡還沒放行進隊伍（待自測、退回、暫停、放行被撤）：等
         return False
+
+    def _stale_parent(self, r) -> bool:
+        """父卡還沒合併、而且父卡現在的版本不是子卡的祖先（父卡改版了，子卡還沒重新接上）。"""
+        if not r["parent"]:
+            return False
+        p = store.get_branch(self.con, r["parent"])
+        if p is None or p["state"] == S.MERGED.value:
+            return False
+        key = (p["head_sha"], r["head_sha"])
+        if key not in self._anc_cache:
+            try:
+                self._anc_cache[key] = bool(self.repo.is_ancestor(p["head_sha"], r["head_sha"]))
+            except Exception:
+                self._anc_cache[key] = True               # 查不出來就不擋（不誤殺）；真正的疊不上由 stack 擋
+            if len(self._anc_cache) > 5000:
+                self._anc_cache.clear()
+        return not self._anc_cache[key]
+
+    def _reject_stale(self, r):
+        why = "父卡已更新，請重新接到父卡上"
+        store.apply_event(self.con, r["name"], Event.CONFLICT_MAIN, reject_reason=why)
+        store.add_event(self.con, "conflict", r["name"], why)
 
     def _enforce_review_first(self):
         """先審後測：放行沒了（撤回、內容變了）的版本，正在跑的自測停掉、回待自測。"""
@@ -988,8 +1060,13 @@ class Scheduler:
         first_bad = None
         for i, (name, cid, _) in enumerate(b.members[:m]):
             r = store.get_branch(c, name)
+            sp = self._src_parent(name)
+            before = {x[0] for x in b.members[:i]}
             ok = (r is not None and r["state"] == S.BATCHING.value and r["content_id"] == cid
-                  and self._approved(r) and self._tracked_ok(name) and name not in self._blocked)
+                  and self._approved(r) and self._tracked_ok(name) and name not in self._blocked
+                  and not self._stale_parent(r) and (not sp or sp in before)
+                  and (not r["parent"] or r["parent"] in before or
+                       (store.get_branch(c, r["parent"]) or {"state": "merged"})["state"] == S.MERGED.value))
             if not ok:
                 first_bad = i
                 break
@@ -1038,7 +1115,25 @@ class Scheduler:
 
     def _start_batch(self):
         c, main = self.con, self.main
+        if not self._may_push():
+            return                                        # 清單太舊：不開新批測（只做自測）
         cand = self._select()
+        for r in list(cand):                              # 父卡改版、子卡沒重接：退回，不進批
+            if self._stale_parent(r) or (self._src_parent(r["name"]) and
+                                         (store.get_branch(c, self._src_parent(r["name"])) is None or r["parent"] != self._src_parent(r["name"]))):
+                if self._stale_parent(r):
+                    self._reject_stale(r)
+                cand.remove(r)
+        keep = True
+        while keep:                                        # 父卡不在這批裡的，子孫一起留下
+            keep = False
+            names0 = {r["name"] for r in cand}
+            for r in list(cand):
+                if r["parent"] and r["parent"] not in names0:
+                    pr = store.get_branch(c, r["parent"])
+                    if pr is not None and pr["state"] != S.MERGED.value:
+                        cand.remove(r)
+                        keep = True
         # 撞 main 的先退回
         ok = []
         for r in cand:
@@ -1084,7 +1179,8 @@ class Scheduler:
             c.execute("INSERT INTO batch_members(batch_id,pos,branch,content_id,squash_sha) VALUES(?,?,?,?,?)",
                       (bid, i + 1, n, cid, res.prefixes[i]))
             store.apply_event(c, n, Event.BATCH_START)
-        self.batch = ActiveBatch(bid, main, members, list(res.prefixes))
+        self.batch = ActiveBatch(bid, main, members, list(res.prefixes),
+                                 ctx={r["name"]: (r["approved_sha"], r["retest"]) for r in cand})
 
     def _batch_step(self):
         if self.batch is None:
@@ -1134,14 +1230,18 @@ class Scheduler:
             b.failed[j.size] = set(res.failed_items) - base if red else set(res.failed_items)
 
     def _finish_batch(self, v):
+        import contextlib
+        with contextlib.ExitStack() as es:
+            for n, (ap, rt) in self.batch.ctx.items():
+                es.enter_context(store.event_ctx(n, ap, rt))
+            self._finish_batch_inner(v)
+
+    def _finish_batch_inner(self, v):
         b, c = self.batch, self.con
         m = v.merge_upto
         if m > 0:
-            if not self._may_push():
-                return                                   # 清單太舊：只測不合，等來源恢復
-            self._repull()
-            if not self._may_push():
-                return
+            if not self._repull():
+                return                                   # 推 main 前一定要重拉成功：拉不到就只測不推，等下一輪
             m2 = self._valid_prefix(b, m)
             if m2 == 0:
                 self._abort_batch("放行被撤回／分支不在清單／內容變了：整批重排")

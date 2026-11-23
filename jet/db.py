@@ -118,6 +118,9 @@ def migrate(con: sqlite3.Connection) -> None:
     for col, typ in (("approved_sha", "TEXT"), ("retest", "INTEGER")):
         if col not in cols:
             con.execute(f"ALTER TABLE branches ADD COLUMN {col} {typ}")
+    if con.execute("SELECT 1 FROM meta WHERE key='instance_id'").fetchone() is None:
+        import secrets
+        con.execute("INSERT INTO meta VALUES('instance_id', ?)", (secrets.token_hex(4),))   # 資料庫建立時產生，事件編號用它當前綴
     row = con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if row is None:
         con.execute("INSERT INTO meta VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))

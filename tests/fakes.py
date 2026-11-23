@@ -16,6 +16,7 @@ class FakeRepo:
         self.main_files = {}    # main sha → 該次更動的檔案（給純文件判斷）
         self.merged = {}
         self.ff_log = []
+        self.broken = set()     # (父 head, 子 head)：父不是子的祖先（子沒重新接上）
 
     def add(self, name, reds=(), gate_reds=(), sha=None, files=("src/a.py",), conflict_main=False,
             conflict_with=()):
@@ -69,6 +70,8 @@ class FakeRepo:
         return sha.rsplit('>', 1)[1].split('+') if '>' in sha else []
 
     def is_ancestor(self, a, b):
+        if ">" not in a and ">" not in b and a != b:
+            return (a, b) not in self.broken               # 分支提交之間：預設是祖先，除非測試說不是
         return b == a or b.startswith(a + ">")
 
     def fast_forward_main(self, sha, expect_main):

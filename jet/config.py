@@ -159,6 +159,8 @@ def _validate(c: Config) -> None:
         raise ConfigError('policy.order 必須是 "parallel" 或 "review_first"')
     if c.order == "review_first" and not c.require_approval:
         raise ConfigError("policy.order=review_first 需要 policy.require_approval=true")
+    if c.source is not None and c.order != "review_first":
+        raise ConfigError('有設 source 時 policy.order 必須是 "review_first"（清單搭先審後測）')
     if c.source is not None and c.scope != "tracked":
         raise ConfigError('有設 source 時 git.scope 必須是 "tracked"（清單裡有的才管）')
     if c.core_unit not in ("logical", "physical") or c.threads not in ("all", "one"):

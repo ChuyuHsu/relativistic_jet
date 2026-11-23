@@ -354,6 +354,9 @@ class StateEvents(CF):
         self.appr("a"); self.appr("b", "a")
         self.tick(1)
         self.list = [e for e in self.list if e["branch"] != "a"]   # 父卡被放棄：不在清單上
+        for e in self.list:
+            if e["branch"] == "b":
+                e["parent_status"] = "dropped"
         self.tick(6)
         self.assertEqual(len(self.events("parent_blocked", "b")), 1)
         self.assertNotIn(self.state("b"), ("selftesting", "merged"))
@@ -512,12 +515,21 @@ class Rules(CF):
         self.go(until=lambda: self.merged() == {"d"})
         self.assertEqual(self.selftests(), 0)                     # 沒測就合
 
-    def test_two_modes_both_run_parallel_mode_tests_before_approval(self):
-        self.mk(order="parallel")
-        self.repo.add("a"); self.ent("a")
-        self.go(until=lambda: self.state("a") == "selftest_green")  # 不分先後：沒放行也先測
-        self.appr("a")
-        self.go(until=lambda: self.merged() == {"a"})
+    def test_parallel_mode_without_source_tests_before_approval(self):
+        Base.mk(self)                                              # 不分先後、本機模式：一推上來就測
+        self.repo.add("a")
+        for _ in range(8):
+            self.s.tick()
+        self.assertEqual(self.state("a"), "selftest_green")        # 沒放行也先測
+        store.approve(self.con, "a", "t")
+        for _ in range(30):
+            self.s.tick()
+        self.assertEqual(self.merged(), {"a"})
+
+    def test_source_requires_review_first(self):
+        from jet import config
+        with self.assertRaises(config.ConfigError):
+            Base.mk(self, git={"scope": "tracked"}, source={"url": "http://127.0.0.1:9/x"})
 
     def test_local_api_approval_without_source_in_review_first(self):
         self.mk()
@@ -527,6 +539,115 @@ class Rules(CF):
         self.tick(5)
         self.assertEqual(self.state("a"), "pending")             # 本機模式也是先審後測
         store.approve(self.con, "a", "t")
+        self.go(until=lambda: self.merged() == {"a"})
+
+
+class AuditFixes(CF):
+    def test_h1_parent_branch_not_pushed_child_never_merges_alone(self):
+        self.mk()
+        self.repo.add("b")                                         # 父卡 a 的分支還沒推上來
+        self.ent("b", "a", self.sha("b"))
+        for e in self.list:
+            e["parent_status"] = "open"
+        self.tick(20)
+        self.assertEqual(self.merged(), set())
+        self.assertEqual(self.selftests(), 0)                      # 不測、不進批
+        self.assertEqual(self.events("parent_blocked"), [])        # open 只是等，不叫管理者
+        self.repo.add("a")                                         # 父卡推上來、放行：整串進
+        self.appr("a"); self.appr("b", "a")
+        self.go(until=lambda: self.merged() == {"a", "b"})
+
+    def test_h1_parent_card_returned_child_waits_and_keeps_parent(self):
+        self.mk()
+        self.repo.add("a"); self.repo.add("b")
+        self.appr("a"); self.appr("b", "a")
+        self.tick(1)
+        self.list = [e for e in self.list if e["branch"] != "a"]   # 父卡被還卡：清單上沒有它
+        self.ent("b", "a", self.sha("b"))
+        self.list[-1]["parent_status"] = "open"
+        self.tick(10)
+        self.assertNotIn("b", self.merged())
+        self.assertEqual(self.events("parent_blocked"), [])
+
+    def test_h2_parent_updated_child_not_rebased_is_rejected_then_rebase_continues(self):
+        self.mk()
+        self.repo.add("a"); self.repo.add("b")
+        self.appr("a"); self.appr("b", "a")
+        self.tick(1)
+        old_a = self.sha("a")
+        self.repo.push_new("a")                                    # 父卡改版（內容一樣只是換提交）
+        self.appr("a")
+        self.repo.broken.add((self.sha("a"), self.sha("b")))       # 子卡沒接在新版父卡上
+        self.go(until=lambda: self.state("b") == "rejected")
+        self.assertIn("重新接到父卡", self.row("b")["reject_reason"])
+        self.assertNotIn("b", self.merged())
+        self.repo.push_new("b")                                    # 重新接上，自己那一段沒變
+        self.repo.broken.clear()
+        self.appr("b", "a")
+        self.go(until=lambda: self.merged() == {"a", "b"})
+        self.assertEqual(self.events("superseded", "b"), [])
+
+    def test_m1_event_carries_approved_sha_of_test_start(self):
+        self.mk(delay=3)
+        self.repo.add("a", reds={"t"})
+        self.appr("a", retest=0)
+        self.go(until=lambda: self.state("a") == "selftesting")
+        self.repo.push_new("a", reds={"t"})                        # 純 rebase：看板改放行新版本、重測加一
+        self.appr("a", retest=0)
+        self.tick(1)
+        self.go(until=lambda: bool(self.events("rejected", "a")) or self.state("a") == "rejected")
+        for e in self.events("tested_red", "a") + self.events("rejected", "a"):
+            self.assertEqual(e["approved_sha"], "a-1")             # 開跑時依據的放行版本，不是現況
+
+    def test_m8_repull_must_succeed_before_push(self):
+        self.mk(delay=1)
+        self.repo.add("a"); self.appr("a")
+        self.go(until=lambda: self.state("a") == "batching")
+        self.freeze_poll()
+        self.src_err = "連不上"                                    # 重拉失敗
+        self.tick(6)
+        self.assertEqual(self.repo.ff_log, [])                     # 不能用舊清單推
+        self.assertTrue(self.events("queue_error"))
+        self.src_err = None
+        self.go(until=lambda: self.merged() == {"a"})
+
+    def test_m8_old_list_stops_opening_new_batches(self):
+        self.mk()
+        self.repo.add("a"); self.appr("a")
+        self.tick(1)
+        self.src_err = "down"
+        self.t[0] += 2000                                          # 清單超過 600 秒沒更新成功
+        self.tick(8)
+        self.assertEqual(self.repo.ff_log, [])
+        self.assertEqual(self.state("a"), "queued")                # 自測照做，但不開新批
+        self.src_err = None
+        self.go(until=lambda: self.merged() == {"a"})
+
+    def test_m9_event_ids_carry_instance_prefix(self):
+        from jet import notify
+        self.mk()
+        self.repo.add("a", reds={"t"}); self.appr("a")
+        self.go(until=lambda: self.state("a") == "rejected")
+        rows = self.con.execute("SELECT id,kind,branch,detail,at,commit_sha,approved_sha,retest FROM events").fetchall()
+        out = notify.build_payload([notify._enrich(self.con, r) for r in rows], 1.0)["events"]
+        iid = store.get_meta(self.con, "instance_id")
+        self.assertTrue(iid)
+        self.assertTrue(all(str(e["id"]).startswith(iid + ":") for e in out))
+
+    def test_l1_parent_approval_revoked_child_not_counted_in_pipeline(self):
+        self.mk(delay=0)
+        self.repo.add("a"); self.repo.add("b")
+        self.appr("a"); self.ent("b", "a", None)
+        self.go(until=lambda: self.state("a") in ("batching", "queued"))
+        self.appr("b", "a")
+        self.ent("a")                                             # 父卡放行被撤
+        self.tick(6)
+        self.assertEqual(self.state("b"), "pending")
+
+    def test_l2_dup_branch_in_list_does_not_kill_whole_list(self):
+        self.mk()
+        self.repo.add("a")
+        self.list = [{"branch": "a", "retest": 0, "approved_sha": "a-1"}, {"branch": "a", "retest": 0}]
         self.go(until=lambda: self.merged() == {"a"})
 
 
@@ -551,7 +672,8 @@ class SourcePollerTest(unittest.TestCase):
         self.assertIsNone(out[0]["approved_sha"])
 
     def test_parse_errors(self):
-        for bad in ({}, [1], [{"branch": ""}], [{"branch": "a"}, {"branch": "a"}],
+        self.assertEqual(len(parse_list([{"branch": "a"}, {"branch": "a"}])), 1)   # 同名重複：留第一筆，不拒收整份
+        for bad in ({}, [1], [{"branch": ""}], [{"branch": "a", "parent_status": "x"}],
                     [{"branch": "a", "retest": -1}], [{"branch": "a", "approved_sha": 3}]):
             with self.assertRaises(SourceError):
                 parse_list(bad)

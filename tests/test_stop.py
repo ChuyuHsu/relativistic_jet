@@ -140,6 +140,8 @@ class CliTest(unittest.TestCase):
         self.assertTrue(a.now)
         self.assertEqual(a.wait, 3)
         self.assertTrue(p.parse_args(["restart"]).fn)
+        self.assertTrue(p.parse_args(["restart", "--root", "/x", "--config", "/y"]).fn)   # 三個指令收同一組旗標
+        self.assertTrue(p.parse_args(["stop", "--config", "/y"]).fn)
         self.assertTrue(p.parse_args(["start", "--root", "/x"]).fn)
 
 

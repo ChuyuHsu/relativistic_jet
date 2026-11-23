@@ -243,6 +243,8 @@ def _wait_gone(root: str, secs: float) -> bool:
 
 def cmd_stop(args):
     """停機：請排隊器自己收尾後退出，守護跟著停。預設等手上的批測做完；--now 立刻停。"""
+    if not args.root:
+        raise ClientError("要給 --root（或設環境變數 JET_HOME）")
     root = os.path.abspath(args.root)
     with open(os.path.join(root, guard.STOP_FILE), "w", encoding="utf-8") as f:   # 守護看到就不再拉起
         f.write("stop\n")
@@ -265,6 +267,8 @@ def cmd_restart(args):
 
 
 def cmd_start(args):
+    if not args.root:
+        raise ClientError("要給 --root（或設環境變數 JET_HOME）")
     pid = guard.start_background(args.root, _cfg_path(args))
     print(f"已啟動守護（pid {pid}），輸出在 {os.path.join(os.path.abspath(args.root), 'supervisor.log')}")
     return 0
@@ -390,10 +394,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("restore", cmd_restore, "從備份還原（主行程要先停）"); sp.add_argument("--from", dest="source")
     sp = add("deploy", cmd_deploy, "換版：releases/<版本> 變成 current"); sp.add_argument("--root", required=True); sp.add_argument("release")
     sp = add("rollback", cmd_rollback, "退回上一版"); sp.add_argument("--root", required=True)
-    sp = add("stop", cmd_stop, "停機（排隊器自己收尾退出、守護跟著停；不需要 kill）"); sp.add_argument("--root", required=True)
+    sp = add("stop", cmd_stop, "停機（排隊器自己收尾退出、守護跟著停；不需要 kill）"); sp.add_argument("--root", default=os.environ.get("JET_HOME"))
     sp.add_argument("--now", action="store_true", help="立刻停，不等手上的批測"); sp.add_argument("--wait", type=float, default=0, help="等守護完全停掉（秒）")
-    sp = add("restart", cmd_restart, "重啟（換版後用：守護用 current 的新版重新拉起，連守護自己也換）"); sp.add_argument("--now", action="store_true")
-    sp = add("start", cmd_start, "把守護叫起來（背景）"); sp.add_argument("--root", required=True)
+    sp = add("restart", cmd_restart, "重啟（換版後用：守護用 current 的新版重新拉起，連守護自己也換）"); sp.add_argument("--now", action="store_true"); sp.add_argument("--root", default=os.environ.get("JET_HOME"), help="跟 stop／start 同一組旗標；restart 用不到，收下不報錯")
+    sp = add("start", cmd_start, "把守護叫起來（背景）"); sp.add_argument("--root", default=os.environ.get("JET_HOME"))
     sp = add("supervise", cmd_supervise, "守著主行程：掛了重啟，連續當掉三次自動退版"); sp.add_argument("--root", required=True)
     return p
 

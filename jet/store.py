@@ -96,10 +96,33 @@ def apply_event(con, name, event: Event, **fields) -> State:
     return new
 
 
+_OVERRIDE: dict = {}
+
+
+class event_ctx:
+    """寫事件時，這條分支依據的放行版本與重測計數改用「測試開跑時」的值（不是寫事件當下的現況）。"""
+
+    def __init__(self, branch, approved_sha, retest):
+        self.branch, self.val = branch, (approved_sha, retest)
+
+    def __enter__(self):
+        self.old = _OVERRIDE.get(self.branch)
+        _OVERRIDE[self.branch] = self.val
+
+    def __exit__(self, *a):
+        if self.old is None:
+            _OVERRIDE.pop(self.branch, None)
+        else:
+            _OVERRIDE[self.branch] = self.old
+
+
 def _ctx(con, branch):
     """事件帶的分支現況：提交、依據的放行版本、重測計數。"""
     b = get_branch(con, branch) if branch else None
-    return (b["head_sha"], b["approved_sha"], b["retest"]) if b else (None, None, None)
+    if not b:
+        return (None, None, None)
+    ap, rt = _OVERRIDE.get(branch, (b["approved_sha"], b["retest"]))
+    return (b["head_sha"], ap, rt)
 
 
 def add_event(con, kind, branch=None, detail=None):

@@ -28,7 +28,7 @@ class CardSim:
             "git": {"remote": "x", "scope": "tracked"}, "paths": {"state_dir": os.path.join(tmp, "st")},
             "cores": {"pool": "0-11", "selftest_cores": 1, "batch_cores": 1, "reserve_for_selftest": 2},
             "limits": {"batch_max": r.choice([2, 4, 16]), "double_fail_halt": r.choice([2, 3]), "baseline_history": 500},
-            "policy": {"order": r.choice(["review_first", "review_first", "parallel"])},
+            "policy": {"order": "review_first"},
             "source": {"url": "http://127.0.0.1:9/x", "max_age_s": 600, "poll_seconds": 15},
             "commands": {"test": ["t"]}})
         self.con = db.connect(os.path.join(tmp, "a.sqlite"))
@@ -37,6 +37,7 @@ class CardSim:
         self.t = 1000.0
         self.board = {}            # 分支 → {"parent", "ap"(放行的 sha 或 None), "retest"}
         self.down = False
+        self.dropped = set()
         self.violations = []
         self.last_ok = 1000.0
         self.counter = 0
@@ -70,8 +71,11 @@ class CardSim:
                     elif self.cid_of(n, e["ap"]) != self.repo.content_id(b["sha"], None):
                         self.violations.append(f"推 main 帶了放行版本內容不符的卡 {n}")
                     par = e["parent"]
-                    if par and par in self.board and par not in seen and par in self.repo.branches:
-                        self.violations.append(f"推 main 時 {n} 的父卡 {par} 沒有排在它前面")
+                    if par and par not in seen and par not in self.repo.merged:
+                        self.violations.append(f"推 main 時 {n} 的父卡 {par} 沒進 main、也沒排在它前面")
+                    if par and par in self.repo.branches and \
+                            (self.repo.branches[par]["sha"], b["sha"]) in self.repo.broken:
+                        self.violations.append(f"推 main 帶了沒接上新版父卡的卡 {n}")
                     seen.add(n)
         self.repo.fast_forward_main = ff
         self.shas = {}             # (分支, sha) → 內容指紋，模擬「看過的提交」
@@ -107,8 +111,10 @@ class CardSim:
             out = []
             for n, e in self.board.items():
                 d = {"branch": n, "retest": e["retest"]}
-                if e["parent"] and e["parent"] in self.board or (e["parent"] and e["parent"] not in self.repo.merged):
+                if e["parent"] and e["parent"] not in self.repo.merged:
                     d["parent"] = e["parent"]
+                    if e["parent"] not in self.board:
+                        d["parent_status"] = "dropped" if e["parent"] in self.dropped else "open"
                 if e["ap"]:
                     d["approved_sha"] = e["ap"]
                 out.append(d)
@@ -169,6 +175,16 @@ class CardSim:
             n = r.choice(names)
             if not any(e["parent"] == n for e in self.board.values()) or r.random() < 0.3:
                 self.board.pop(n, None)
+                self.dropped.add(n)
+        if names and r.random() < 0.03 * p:                            # 父卡缺席：父卡還沒推／沒人領
+            g = r.choice(names)
+            if g in self.board:
+                self.board[g]["parent"] = "ghost"
+        if names and r.random() < 0.05 * p:                            # 父卡改版、子卡沒重接
+            n = r.choice(names)
+            par = self.board.get(n, {}).get("parent")
+            if par in repo.branches and n in repo.branches:
+                repo.broken.add((repo.branches[par]["sha"], repo.branches[n]["sha"]))
         if r.random() < 0.04 * p:
             self.down = not self.down                                  # 來源壞掉／恢復
         if r.random() < 0.02 * p:
@@ -214,16 +230,21 @@ class CardSimTest(unittest.TestCase):
                 for x in store.list_branches(sim.con):
                     if x["state"] not in ACTIVE:
                         continue
-                    anc, waiting = x["parent"], False
-                    while anc and not waiting:
-                        pr = store.get_branch(sim.con, anc)
-                        if pr is None:
+                    anc, waiting, hop = x["name"], False, 0     # 沿著看板的父卡一路看：任何一代缺席／被放棄／退回／還沒放行，子孫就是在等
+                    while anc and not waiting and hop < 50:
+                        e = sim.board.get(anc)
+                        if e is None:
+                            waiting = True
                             break
-                        waiting = pr["state"] in ("rejected", "halted", "pending")
-                        anc = pr["parent"]
-                    e = sim.board.get(x["name"], {})
-                    par = e.get("parent")
-                    blocked = par and par not in sim.board and par not in sim.repo.merged
+                        par = e["parent"]
+                        if par and par not in sim.repo.merged:
+                            pp = store.get_branch(sim.con, par)
+                            if pp is None or par not in sim.board or pp["state"] in ("rejected", "halted", "pending"):
+                                waiting = True
+                                break
+                        anc = par if par and par not in sim.repo.merged else None
+                        hop += 1
+                    blocked = False
                     if not waiting and not blocked:
                         self.fail(f"seed={seed} 沒收斂：{x['name']} {x['state']} parent={x['parent']} {x['reject_reason']}")
             finally:

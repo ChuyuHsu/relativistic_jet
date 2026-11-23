@@ -132,7 +132,7 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
         "count": len(events),
         "text": f"合併佇列有 {len(events)} 件事要看：\n" + "\n".join(lines),
         "events": [{k: v for k, v in {
-            "id": e["id"], "kind": e["kind"], "branch": e.get("branch"), "commit": e.get("commit"),
+            "id": e.get("eid", e["id"]), "kind": e["kind"], "branch": e.get("branch"), "commit": e.get("commit"),
             "detail": e.get("detail"), "at": e["at"],
             "from": e.get("from"), "to": e.get("to"), "failed_items": e.get("failed_items"),
             "approved_sha": e.get("approved_sha"), "retest": e.get("retest"),
@@ -146,6 +146,9 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
 def _enrich(con, r) -> Dict[str, Any]:
     """主行程裡補欄位：commit、狀態事件的 from／to、被退回事件的紅項清單。"""
     e = dict(r)
+    iid = con.execute("SELECT value FROM meta WHERE key='instance_id'").fetchone()
+    if iid:
+        e["eid"] = f"{iid[0]}:{e['id']}"       # 跨資料庫重置仍唯一
     e["commit"] = e.pop("commit_sha", None)
     if e.get("detail"):
         e["detail"] = str(e["detail"])[:MAX_DETAIL]
