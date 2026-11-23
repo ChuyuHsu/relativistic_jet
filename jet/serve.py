@@ -1,0 +1,113 @@
+"""排隊器主行程（DESIGN 原則 2：狀態只有主行程能寫）。
+
+這個檔把介面與維運的零件接起來：
+  每一輪：執行 HTTP／命令列送來的寫入命令 → 設定檔熱重載（先自檢）→ 調度核心 tick
+         → 通知 → 每小時備份。
+調度核心（scheduler）由 `scheduler_factory(cfg, con, wq)` 提供；沒提供時只跑介面與維運
+（讀得到、寫得進、會備份、會通知，但不會自己排隊測試）。
+"""
+import logging
+import os
+import threading
+import time
+from typing import Any, Callable, Optional
+
+from . import api, config, db, guard, maintenance, notify, ops
+
+log = logging.getLogger("jet")
+TICK_S = 0.5
+
+
+def init_keys(read_key_file: str, write_key_file: str, force: bool = False) -> None:
+    """產生兩把隨機鑰匙（檔案權限 600）。已存在就不蓋掉，除非 force。"""
+    import secrets
+    for p in (read_key_file, write_key_file):
+        if os.path.exists(p) and not force:
+            raise FileExistsError(f"{p} 已存在（要覆蓋請加 --force）")
+    for p in (read_key_file, write_key_file):
+        os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(secrets.token_urlsafe(32) + "\n")
+
+
+class Server:
+    """可在測試裡直接建立、手動 `step()`，也可以 `run_forever()`。"""
+
+    def __init__(self, config_path: str,
+                 scheduler_factory: Optional[Callable[[config.Config, Any, ops.WriteQueue], Any]] = None,
+                 now: Callable[[], float] = time.time):
+        self.config_path = config_path
+        self.now = now
+        self.cfg = config.load(config_path)
+        self.state_dir = self.cfg.state_dir
+        os.makedirs(self.state_dir, exist_ok=True)
+        self.lock = maintenance.StateLock(self.state_dir)
+        if not self.lock.acquire():
+            raise RuntimeError("另一個排隊器已經在用這個 state_dir")
+        try:
+            self.con = db.connect(maintenance.db_path(self.state_dir))
+            guard.ingest_events(self.con, self.state_dir)
+            rk = api.read_key_file(self.cfg.read_key_file, "讀取")
+            wk = api.read_key_file(self.cfg.write_key_file, "寫入")
+            self.wq = ops.WriteQueue()
+            self.api = api.ApiServer(maintenance.db_path(self.state_dir), self.wq, rk, wk, self.cfg.listen)
+            self.notifier = notify.Notifier(self.cfg.notify_url, self.cfg.notify_batch_s)
+            self.backups = maintenance.BackupSchedule(self.state_dir)
+            self.watcher = maintenance.ConfigWatcher(config_path, self.cfg)
+            self.scheduler = scheduler_factory(self.cfg, self.con, self.wq) if scheduler_factory else None
+        except BaseException:
+            self.lock.release()
+            raise
+        self._stop = threading.Event()
+
+    # ------------------------------------------------------------
+    def _on_applied(self, action: str, args: dict, result: Any, now: float) -> None:
+        if action == "revoke":
+            maintenance.log_revocation(self.state_dir, str(args.get("branch")), now)
+
+    def step(self) -> None:
+        now = self.now()
+        self.wq.drain(self.con, now, on_applied=self._on_applied)
+        cfg, err = self.watcher.poll()
+        if err:
+            log.warning("%s", err)
+            maintenance.record_queue_error(self.con, err, now)
+        elif cfg is not self.cfg:
+            self.cfg = cfg
+            self.notifier = notify.Notifier(cfg.notify_url, cfg.notify_batch_s)
+        if self.scheduler is not None:
+            self.scheduler.tick()
+        self.notifier.tick(self.con, now)
+        if self.backups.tick(self.con, now) is None and self.backups.last_error:
+            log.warning("備份失敗：%s", self.backups.last_error)
+
+    def run_forever(self) -> None:
+        self.api.start()
+        host, port = self.api.address
+        log.info("介面開在 %s:%d%s", host, port, "" if self.scheduler else "（調度核心未接上，只跑介面與維運）")
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.step()
+                except Exception:   # 單一輪出錯不能弄掛主行程；記下來、通知，下一輪再來
+                    log.exception("主迴圈這一輪出錯")
+                    try:
+                        maintenance.record_queue_error(self.con, "主迴圈出錯，詳見排隊器紀錄", self.now())
+                    except Exception:
+                        pass
+                self._stop.wait(TICK_S)
+        finally:
+            self.close()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def close(self) -> None:
+        try:
+            self.api.stop()
+        finally:
+            try:
+                self.con.close()
+            finally:
+                self.lock.release()
