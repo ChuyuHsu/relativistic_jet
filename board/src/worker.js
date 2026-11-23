@@ -13,9 +13,9 @@ const branchFor = (env, id, attempt = 1) =>
   `${env.BRANCH_PREFIX ?? 'dev/'}${String(id).toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}${attempt > 1 ? `-r${attempt}` : ''}`;
 // 父卡資訊給排隊器：父卡已合併就省略；父卡不在清單上（還沒認領、已釋放、已放棄、不存在）也要給 parent 與 parent_status，
 // 子卡才知道要等（open）或被擋（dropped）。
-async function parentInfo(env, c) {
+function parentInfo(env, c, by) {
   if (!c.parent) return null;
-  const p = await env.DB.prepare('SELECT id,status,branch,phase FROM cards WHERE id=?').bind(c.parent).first();
+  const p = by.get(c.parent);
   if (p && p.phase === 'merged') return null;
   const onList = p && p.status === 'claimed' && p.branch;
   const branch = p ? (p.branch || branchFor(env, p.id)) : branchFor(env, c.parent);
@@ -79,24 +79,24 @@ async function desired(req, env) {
   if (req.method !== 'GET') return json({ error: 'GET only' }, 405);
   if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
   try {
-    const rows = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' AND branch IS NOT NULL AND (phase IS NULL OR phase!='merged') AND dropping_at IS NULL ORDER BY priority,created_at").all()).results;
+    // 一次把卡讀進記憶體再算（原本每張卡多查一兩次 D1，卡多了會超過 10 秒）
+    const all = (await env.DB.prepare('SELECT * FROM cards ORDER BY priority,created_at').all()).results;
+    const by = new Map(all.map(c => [c.id, c]));
     const out = [];
-    for (const c of rows) {
+    for (const c of all) {
+      if (!(c.status === 'claimed' && c.branch && c.phase !== 'merged' && !c.dropping_at)) continue;
       const e = { branch: c.branch };
-      const p = await parentInfo(env, c);
+      const p = parentInfo(env, c, by);
       if (p) Object.assign(e, p);
       if (c.approved_commit) e.approved_sha = c.approved_commit;
       e.retest = c.retest;
       out.push(e);
     }
     if (new URL(req.url).searchParams.get('with') === 'drop_checks') {   // 放棄待查：排隊器要查這些分支有沒有改動漏掉
-      const dc = (await env.DB.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped' ORDER BY dropping_at").all()).results;
-      const drop_checks = [];
-      for (const c of dc) {
-        let sb = null;
-        if (c.superseded_by) { const sc = await env.DB.prepare('SELECT id,branch FROM cards WHERE id=?').bind(c.superseded_by).first(); sb = sc ? (sc.branch || branchFor(env, sc.id)) : null; }
-        drop_checks.push({ card: c.id, branch: c.branch || branchFor(env, c.id), superseded_by_branch: sb, dropping_at: c.dropping_at });   // dropping_at 請原樣帶回事件，用來認是哪一次放棄
-      }
+      const drop_checks = all.filter(c => c.dropping_at && c.status !== 'dropped').sort((a, b) => a.dropping_at - b.dropping_at).map(c => {
+        const sc = c.superseded_by ? by.get(c.superseded_by) : null;
+        return { card: c.id, branch: c.branch || branchFor(env, c.id), superseded_by_branch: sc ? (sc.branch || branchFor(env, sc.id)) : null, dropping_at: c.dropping_at };   // dropping_at 請原樣帶回事件，用來認是哪一次放棄
+      });
       return json({ cards: out, drop_checks });
     }
     return json(out);

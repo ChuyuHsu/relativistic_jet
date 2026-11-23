@@ -120,6 +120,8 @@ export async function handleHook(req, env, ctx) {
       const sameApproval = e.approved_sha == null || sameCommit(String(e.approved_sha), card.approved_commit);
       const sameRetest = e.retest == null || Number(e.retest) === card.retest;
       if (kind !== 'merged' && (!claimedAndApproved || !sameApproval || !sameRetest)) { stale++; return; }   // 已合併事實一律接受（main 已經有了）
+      // superseded 說「放行版本的內容變了」，但事件帶的現版跟放行版本是同一個提交：不可能，丟掉（不能因為排隊器誤報就洗掉送審與放行）
+      if (kind === 'superseded' && e.commit && card.approved_commit && sameCommit(String(e.commit), card.approved_commit)) { stale++; hl(e, 'superseded 的現版跟放行版本是同一個提交，不採信'); return; }
       applied++;
       if (kind === 'superseded') {   // 內容變了：送審、放行、舊結果作廢，回到開發中
         patch(card, { submitted_commit: null, submitted_at: null, rejected_reason: null, rejected_by: null, rejected_at: null, approved_commit: null, approved_by: null, approved_at: null, phase: null, phase_at: null, last_result: null, updated_at: T });

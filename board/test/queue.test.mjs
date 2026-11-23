@@ -650,3 +650,20 @@ test('放棄待查太久沒結果通知管理者一次；舊一輪的查驗結�
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, dropping_at: old });
   assert.equal(await stageOf(e, 'c1'), 'dropping');
 });
+
+test('desired：一次讀卡，D1 往返只有一次（卡再多也不慢）', async () => {
+  const e = mkenv();
+  for (let i = 0; i < 40; i++) await claim(e, `d${i}`, `t${i}`, i ? { parent: `d${i - 1}` } : {});
+  let trips = 0; const real = e.DB;
+  e.DB = { prepare: sql => { const st = real.prepare(sql); const w = { bind: (...a) => { st.bind(...a); return w; }, all: () => { trips++; return st.all(); }, first: () => { trips++; return st.first(); }, run: () => { trips++; return st.run(); } }; return w; }, batch: l => real.batch(l) };
+  const r = await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json();
+  assert.equal(r.cards.length, 40); assert.equal(trips, 1);
+});
+
+test('superseded 的現版跟放行版本是同一個提交：不採信，送審與放行保留', async () => {
+  const e = mkenv(); await approved(e, 'c1', 'th1');
+  const r = await (await ev(e, 'c1', { kind: 'superseded', commit: SHA, approved_sha: SHA, detail: '放行版本 abc1234 的內容跟目前 abc1234 不同' })).json();
+  assert.equal(r.stale, 1); assert.equal(await stageOf(e, 'c1'), 'selftesting');
+  const r2 = await (await ev(e, 'c1', { kind: 'superseded', commit: SHA2, approved_sha: SHA })).json();   // 真的換了版本：照樣失效
+  assert.equal(r2.applied, 1); assert.equal(await stageOf(e, 'c1'), 'developing');
+});
