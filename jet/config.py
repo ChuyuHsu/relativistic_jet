@@ -36,6 +36,7 @@ class Config:
     listen: str = "127.0.0.1:8080"
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
+    expose: Optional[dict] = None   # 對外開放（選配），沒設就什麼都不做
 
 
 def _need(d, k, typ):
@@ -57,6 +58,7 @@ def parse(d: dict) -> Config:
     cmds = _need(d, "commands", dict)
     notify = d.get("notify", {})
     api = d.get("api", {})
+    expose = d.get("expose")
     try:
         pool = parse_cores(_need(cores, "pool", str))
     except ValueError as e:
@@ -86,9 +88,27 @@ def parse(d: dict) -> Config:
         listen=api.get("listen", "127.0.0.1:8080"),
         read_key_file=api.get("read_key_file"),
         write_key_file=api.get("write_key_file"),
+        expose=_parse_expose(expose),
     )
     _validate(cfg)
     return cfg
+
+
+def _parse_expose(e):
+    if e is None:
+        return None
+    if not isinstance(e, dict):
+        raise ConfigError("expose 必須是物件")
+    from . import expose as _x   # 延後載入，沒設 expose 就不會牽動
+    out = {"tunnel_command": e.get("tunnel_command"), "url_pattern": e.get("url_pattern"),
+           "register_url": e.get("register_url"), "register_token_file": e.get("register_token_file"),
+           "reregister_seconds": e.get("reregister_seconds", 600)}
+    try:
+        _x.check_settings(out["tunnel_command"], out["url_pattern"], out["register_url"],
+                          out["register_token_file"], out["reregister_seconds"])
+    except _x.ExposeError as ex:
+        raise ConfigError(str(ex))
+    return out
 
 
 def _validate(c: Config) -> None:

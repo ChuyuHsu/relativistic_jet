@@ -62,11 +62,14 @@ class ApiServer:
     """把 HTTP 服務包起來：start() 開執行緒、stop() 關。"""
 
     def __init__(self, db_path: str, wq: ops.WriteQueue, read_key: str, write_key: str,
-                 listen: str = "127.0.0.1:0"):
+                 listen: str = "127.0.0.1:0", hide: Optional[list] = None):
         if _same(read_key, write_key):
             raise KeyError_("讀、寫鑰匙不能相同")
         self.db_path, self.wq = db_path, wq
         self._read_key, self._write_key = read_key, write_key
+        # 回應裡不能出現的字串（本機路徑、鑰匙）：對外開放時就算測試輸出夾帶也會被遮掉
+        self._hide = sorted({h for h in (hide or []) + [read_key, write_key] if isinstance(h, str) and len(h) >= 4},
+                            key=len, reverse=True)
         host, port = parse_listen(listen)
         handler = self._make_handler()
         self.httpd = ThreadingHTTPServer((host, port), handler)
@@ -105,6 +108,7 @@ class ApiServer:
         class Handler(BaseHTTPRequestHandler):
             server_version = "jet"
             sys_version = ""
+            timeout = 15   # 連線太久沒動就斷，擋慢速連線佔著不放
 
             def log_message(self, fmt, *args):   # 不把請求寫到 stderr（鑰匙雖然在標頭，仍不留）
                 pass
@@ -120,8 +124,11 @@ class ApiServer:
                 self.wfile.write(body)
 
             def _json(self, code: int, obj: Any) -> None:
-                self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                           "application/json; charset=utf-8")
+                text = json.dumps(obj, ensure_ascii=False)
+                for h in server._hide:
+                    if h in text:
+                        text = text.replace(h, "[已遮蔽]")
+                self._send(code, text.encode("utf-8"), "application/json; charset=utf-8")
 
             def _err(self, code: int, msg: str) -> None:
                 self._json(code, {"error": msg})

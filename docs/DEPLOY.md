@@ -96,3 +96,31 @@ python3 -m jet rollback --root $JET_HOME                    # 手動退版（cur
 - 記憶體或磁碟低於設定水位就暫停派新工作（`limits.min_free_mem_mb`、`min_free_disk_mb`）。
 - 讀、寫用不同鑰匙；寫入都留在 `audit` 表。對外開放（改 `api.listen`）前先確認鑰匙檔權限，並放在反向代理或隧道後面。
 - 排隊器對被測專案只做兩種寫入：快轉 `main`、刪已合入的分支。給它的 Git 憑證只需要這兩種權限。
+
+## 8. 對外開放（選配）
+
+排隊器預設只聽本機。要從外面看進度頁、用命令列操作，可以讓它自己開一條通道、把通道的公開網址登記到一個固定的轉送點。
+核心不認識任何特定的通道服務或轉送服務：指令、抓網址的正規式、登記網址都在設定檔的 `expose` 區塊（沒設就什麼都不做）。
+
+```json
+"expose": {
+  "tunnel_command": ["cloudflared", "tunnel", "--url", "http://127.0.0.1:8080"],
+  "url_pattern": "https://[a-z0-9-]+\\.trycloudflare\\.com",
+  "register_url": "https://relay.example.test/relay/queue",
+  "register_token_file": "/path/to/relay-token",
+  "reregister_seconds": 600
+}
+```
+
+上面用 cloudflared 的臨時通道當例子，換成別的通道指令一樣用。行為：
+
+- 排隊器啟動後由背景執行緒跑 `tunnel_command`，從輸出用 `url_pattern` 抓網址（有括號群組取第一組，沒有取整段，必須是 http／https）。
+- 抓到就 `PUT register_url`，內容 `{"url": "<網址>"}`，標頭 `Authorization: Bearer <權杖>`；權杖每次登記時才從檔案讀。
+- 通道行程死掉就重啟、拿新網址重新登記；每 `reregister_seconds` 秒（至少 10）重登記一次；登記失敗退避重試（5 秒起、倍增到 5 分鐘），第一次失敗與恢復各留一筆待辦事件。
+- 排隊器結束時整個通道行程群組一起收掉。換 `expose` 設定要重啟才生效（熱重載會拒絕）。
+
+對外時的安全：
+
+- 所有資料（含進度頁用的）都要讀鑰匙，寫入要寫鑰匙，比對用常數時間；`/` 只回一個不含資料的頁面外殼。
+- 請求內容上限 64 KB，連線 15 秒沒動就斷；回應裡本機的資料夾路徑與鑰匙字串一律遮蔽。
+- 鑰匙檔權限 600；對外前先換掉預設產生的鑰匙以外的任何舊鑰匙。

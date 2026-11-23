@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from . import api, config, db, guard, maintenance, notify, ops
+from . import api, config, db, expose, guard, maintenance, notify, ops
 
 log = logging.getLogger("jet")
 TICK_S = 0.5
@@ -51,10 +51,13 @@ class Server:
             rk = api.read_key_file(self.cfg.read_key_file, "讀取")
             wk = api.read_key_file(self.cfg.write_key_file, "寫入")
             self.wq = ops.WriteQueue()
-            self.api = api.ApiServer(maintenance.db_path(self.state_dir), self.wq, rk, wk, self.cfg.listen)
+            self.api = api.ApiServer(maintenance.db_path(self.state_dir), self.wq, rk, wk, self.cfg.listen,
+                                      hide=[self.cfg.state_dir, self.cfg.work_dir, os.path.abspath(self.cfg.state_dir),
+                                            os.path.abspath(self.cfg.work_dir)])
             self.notifier = notify.Notifier(self.cfg.notify_url, self.cfg.notify_batch_s)
             self.backups = maintenance.BackupSchedule(self.state_dir)
             self.watcher = maintenance.ConfigWatcher(config_path, self.cfg)
+            self.exposer = self._make_exposer(self.cfg)
             self.scheduler = scheduler_factory(self.cfg, self.con, self.wq) if scheduler_factory else None
         except BaseException:
             self.lock.release()
@@ -67,8 +70,19 @@ class Server:
         if action == "revoke":
             maintenance.log_revocation(self.state_dir, str(args.get("branch")), now)
 
+    @staticmethod
+    def _make_exposer(cfg):
+        e = cfg.expose
+        if not e:
+            return None
+        return expose.Exposer(e["tunnel_command"], e["url_pattern"], e["register_url"],
+                              e["register_token_file"], e["reregister_seconds"])
+
     def step(self) -> None:
         now = self.now()
+        if self.exposer is not None:
+            for msg in self.exposer.drain_events():   # 資料庫只有主行程寫
+                maintenance.record_queue_error(self.con, msg, now)
         self.wq.drain(self.con, now, pre_commit=self._pre_commit)
         cfg, err = self.watcher.poll()
         if err:
@@ -87,6 +101,8 @@ class Server:
 
     def run_forever(self) -> None:
         self.api.start()
+        if self.exposer is not None:
+            self.exposer.start()
         host, port = self.api.address
         log.info("介面開在 %s:%d%s", host, port, "" if self.scheduler else "（調度核心未接上，只跑介面與維運）")
         try:
@@ -108,6 +124,8 @@ class Server:
 
     def close(self) -> None:
         try:
+            if self.exposer is not None:
+                self.exposer.stop()
             self.api.stop()
         finally:
             try:
