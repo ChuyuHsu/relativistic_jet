@@ -8,7 +8,7 @@ infra（不算紅，重跑）。退出碼 0 但報告裡有紅項時以報告為
 報告（{report}）缺、壞、沒有項目，或退出碼 1 卻沒有任何紅項：一律判 infra 重跑（寧可重跑，不可誤合）。
 
 只用標準庫、Linux。排隊器主行程可以有別的執行緒：開子行程時 fork 與 exec 之間不跑任何 Python
-（不用 preexec_fn）；綁核由小啟動器 jet/_launch.py 在新行程裡做，做完 exec 成真正的指令。本模組不寫資料庫、不碰 Git；呼叫它的是排隊器主行程（單執行緒）。
+（不用 preexec_fn）；綁核由小啟動器 jet/_launch.py 在新行程裡做，做完 exec 成真正的指令。本模組不寫資料庫、不碰 Git；呼叫它的是排隊器主行程。
 """
 import json
 import os
