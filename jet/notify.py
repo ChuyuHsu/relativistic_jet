@@ -165,11 +165,12 @@ def _enrich(con, r) -> Dict[str, Any]:
     if iid:
         e["eid"] = f"{iid[0]}:{e['id']}"       # 跨資料庫重置仍唯一
     e["commit"] = e.pop("commit_sha", None)
+    raw_detail = e.get("detail")
     if e.get("detail"):
         e["detail"] = str(e["detail"])[:MAX_DETAIL]
     if e["kind"] in MACHINE_KINDS and e.get("detail"):
         try:
-            d = json.loads(e["detail"])
+            d = json.loads(str(raw_detail))           # 用完整內容解析：結構化欄位不能被截短的 detail 弄壞（檔案清單很長時）
         except ValueError:
             d = {}
         if isinstance(d, dict):

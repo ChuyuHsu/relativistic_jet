@@ -796,6 +796,20 @@ class DropCheckFlowTest(CF):
         self.tick(2)
         self.assertEqual(len(self.events("drop_checked", "x")), 2)
 
+    def test_long_file_list_not_broken_by_detail_truncation(self):
+        """檔案清單很長時 detail 會超過 500 字：結構化欄位照樣要齊。"""
+        from jet import notify
+        files = [f"some/deep/dir/with/long/path/file_{i:03d}.gd" for i in range(20)]
+        self.repo.drop_res["x"] = self.res(missing_count=20, missing_files=files)
+        self.drops = [{"card": "C1", "branch": "x", "dropping_at": 5}]
+        self.tick(2)
+        row = self.events("drop_checked", "x")[0]
+        self.assertGreater(len(row["detail"]), 500)
+        p = notify.build_payload([notify._enrich(self.con, row)], 1.0)["events"][0]
+        self.assertEqual((p["card"], p["target"], p["missing_count"], p["dropping_at"]), ("C1", "main", 20, 5))
+        self.assertEqual(len(p["missing_files"]), 20)
+        self.assertIn("20", p["detail"])
+
     def test_git_error_emits_nothing_and_retries(self):
         self.repo.drop_res["x"] = RuntimeError("boom")
         self.drops = [{"card": "C1", "branch": "x"}]

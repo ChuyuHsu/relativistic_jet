@@ -955,7 +955,7 @@ class Scheduler:
                 res["dropping_at"] = d["dropping_at"]
             key = json.dumps([r.get("branch_sha"), r.get("target_sha"), r.get("main_sha"), sup, d.get("dropping_at")],
                              sort_keys=True)
-            sigr = json.dumps([card, key, res], sort_keys=True)
+            sigr = json.dumps(["v2", card, key, res], sort_keys=True)     # v2：改版後所有現行的待查卡重發一次
             if store.get_meta(self.con, f"dcr:{card}", None) == sigr:
                 continue                       # 同一輪、同樣的內容、結論沒變：不重發
             if store.emit(self.con, "drop_checked", br, dict(res, card=card)):
