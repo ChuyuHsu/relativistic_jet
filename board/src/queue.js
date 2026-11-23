@@ -2,7 +2,7 @@
 // 機密：HOOK_TOKEN（排隊器送事件、拉清單用）、ROUTINE_KEY（叫醒用）。
 // 設定：ROUTINE_ID、WAKE_BATCH_S（預設 300）、WAKE_MAX_PER_HOUR（預設 10）。
 import { bearerIs } from './auth.js';
-import { stageOf } from './stage.js';
+import { stageOf, sameCommit } from './stage.js';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -20,6 +20,7 @@ export async function handleHook(req, env, ctx) {
   const db = env.DB, source = String(body.source || 'queue');
   let applied = 0, unmatched = 0, dup = 0;
   for (const e of body.events.slice(0, 200)) {
+    let superseded = false;
     const kind = String(e.kind || ''), branch = e.branch ? String(e.branch) : null;
     if (e.id != null) {
       const r = await db.prepare('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)').bind(`${source}:${e.id}`).run();
@@ -29,7 +30,9 @@ export async function handleHook(req, env, ctx) {
     const detail = e.detail ? String(e.detail).slice(0, 500) : '';
     if (card) {
       applied++;
-      if (kind === 'superseded') {   // 內容又改了：送審、放行、舊結果作廢，回到開發中
+      // 送審後分支又推了內容不同的新提交（排隊器送 pushed 帶 commit）也算「內容又改了」
+      superseded = kind === 'superseded' || (kind === 'pushed' && e.commit && card.submitted_commit && !sameCommit(String(e.commit), card.submitted_commit));
+      if (superseded) {   // 內容又改了：送審、放行、舊結果作廢，回到開發中
         await db.prepare('UPDATE cards SET submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,phase=NULL,phase_at=NULL,last_result=NULL,updated_at=? WHERE id=?').bind(now(), card.id).run();
       }
       // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
@@ -42,9 +45,9 @@ export async function handleHook(req, env, ctx) {
       await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)')
         .bind(card.id, now(), source, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`).run();
     } else unmatched++;
-    if (ATTENTION.has(kind)) {
+    if (ATTENTION.has(kind) || (card && superseded)) {
       await db.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)')
-        .bind(card?.owner_thread || '', card?.id ?? null, branch, kind, detail, now()).run();
+        .bind(card?.owner_thread || '', card?.id ?? null, branch, superseded ? 'superseded' : kind, detail, now()).run();
     }
   }
   if (ctx && ctx.waitUntil) ctx.waitUntil(flush(env));

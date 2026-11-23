@@ -223,3 +223,15 @@ test('卡住提醒：開發中或退回超過時數才通知管理串，同一�
   assert.deepEqual([row.owner_thread, row.card_id], ['boss', 'c1']);
   assert.deepEqual(await stuckCheck(mkenv()), { skipped: true });   // 沒設管理串就略過
 });
+
+test('送審後分支推了不同提交（pushed）也算內容又改了；同一提交不算', async () => {
+  const e = mkenv({ ROUTINE_ID: 'i', ROUTINE_KEY: 'k', WAKE_BATCH_S: 0 }); await card(e, 'c1', 'dev1');
+  await submit(e, 'c1');
+  await hook(e, [{ id: 1, kind: 'pushed', branch: 'dev/c1', commit: 'abc1234ffff' }]);   // 同一提交（前綴相同）
+  assert.equal((await getCard(e, 'c1')).stage, 'reviewing');
+  await hook(e, [{ id: 2, kind: 'pushed', branch: 'dev/c1', commit: '9999999' }]);
+  const c = await getCard(e, 'c1');
+  assert.deepEqual([c.stage, c.submitted_commit, c.phase], ['developing', null, 'pending']);
+  const texts = []; await withFetch(() => flush(e), async (u, init) => { texts.push(JSON.parse(init.body).text); return new Response('{}'); });
+  assert.match(texts.join(), /要重新送審/);
+});
