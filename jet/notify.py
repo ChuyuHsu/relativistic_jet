@@ -160,7 +160,7 @@ def _enrich(con, r) -> Dict[str, Any]:
         if isinstance(d, dict):
             e["from"], e["to"] = d.get("from"), d.get("to")
             e["detail"] = str(d.get("reason") or d.get("merged_sha") or d.get("by") or "")[:MAX_DETAIL] or None
-    if e["kind"] in ("rejected", "tested_red") and e.get("branch"):
+    if e["kind"] in ("rejected", "tested_red", "halted") and e.get("branch"):
         run = con.execute("SELECT id FROM runs WHERE branch=? AND status IN ('fail','timeout') ORDER BY id DESC LIMIT 1",
                           (e["branch"],)).fetchone()
         if run is None:   # 批測紅：紅項記在這條分支所屬批次的測試上

@@ -158,6 +158,7 @@
 
 - 「依據的 `approved_sha`、`retest`」是這次測試**開跑時**的值，不是送出事件當下的值。
 - 事件編號要跨資料庫重置仍唯一（帶資料庫建立時產生的識別碼）。
+- 紅項：`rejected`、`tested_red`、`halted` 事件（自測與批測兇手都是）帶 `failed_items` 陣列，每項 `{item_id, status, summary}`（status 是 `fail` 或 `timeout`；逾時的 `item_id` 是「逾時」）；main 本來就紅的項目不列。人看的 `detail` 字串也有紅項摘要。
 - 「合併」是既成事實：看板收到合併事件一律接受，不做過期比對。
 
 | 事件 | 看板的 `queue` 階段 | 對應狀態 |

@@ -77,6 +77,18 @@ class FailedItemsInEvents(Base):
         for e in out:
             self.assertEqual(sorted(x["item_id"] for x in e["failed_items"]), ["t1", "t2"])
 
+    def test_halted_event_carries_failed_items(self):
+        self.mk(limits={"double_fail_halt": 1})
+        self.repo.add("a", gate_reds={"g1"})
+        self.s.tick()
+        self.approve_all("a")
+        self.go(60, until=lambda: self.state("a") == "halted")
+        r = self.con.execute("SELECT id,kind,branch,detail,at,commit_sha,approved_sha,retest FROM events "
+                             "WHERE branch='a' AND kind='halted'").fetchone()
+        e = notify._enrich(self.con, r)
+        self.assertEqual([x["item_id"] for x in e["failed_items"]], ["g1"])
+        self.assertEqual(set(e["failed_items"][0]), {"item_id", "status", "summary"})
+
     def test_known_red_items_not_listed(self):
         self.mk()
         self.repo.main_red = {"old"}
