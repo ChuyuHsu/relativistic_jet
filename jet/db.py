@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS branches(
   content_id TEXT NOT NULL,          -- 內容指紋（patch-id）；重疊到新 main 不變
   parent TEXT REFERENCES branches(name),  -- 堆疊：父分支（NULL＝普通分支）
   state TEXT NOT NULL,
-  queued_at REAL,                    -- 首次排隊時間（順位保留用）
+  seen_at REAL NOT NULL DEFAULT 0,   -- 首次看到時間（自測順序，換新提交不變）
+  queued_at REAL,                    -- 首次排隊時間（順位保留用；內容變了才清）
   prio_override INTEGER NOT NULL DEFAULT 0,
   fail_count INTEGER NOT NULL DEFAULT 0,   -- 批測紅次數
   docs_only INTEGER,                 -- 分類指令結果：1 純文件／0 要測／NULL 未分類

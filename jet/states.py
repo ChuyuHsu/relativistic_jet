@@ -29,6 +29,7 @@ class Event(str, Enum):
     DOUBLE_FAIL = "double_fail"        # 批測紅兩次
     PARENT_CHANGED = "parent_changed"  # 父分支被退回或有新提交
     RESUME = "resume"                  # 人工恢復
+    DOCS_MERGED = "docs_merged"        # 純文件分支放行後直接合入
 
 
 class IllegalTransition(Exception):
@@ -48,6 +49,8 @@ _T = {
     (S.BATCHING, E.DOUBLE_FAIL): S.HALTED,
     (S.QUEUED, E.CONFLICT_MAIN): S.REJECTED,
     (S.HALTED, E.RESUME): S.PENDING,
+    (S.PENDING, E.DOCS_MERGED): S.MERGED,
+    (S.PENDING, E.CONFLICT_MAIN): S.REJECTED,   # 自測前疊不上 main
 }
 # 新提交：任何非終態都回待自測（已合入除外）
 for _s in (S.PENDING, S.SELFTESTING, S.SELFTEST_GREEN, S.QUEUED,
