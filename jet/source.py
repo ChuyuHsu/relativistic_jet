@@ -54,11 +54,11 @@ def parse_list(data) -> List[dict]:
 
 
 def parse_payload(data):
-    """清單本體可以是陣列（舊格式），或物件 {"entries"|"items": [...], "drop_checks": [...]}。
+    """清單本體可以是陣列（舊格式），或物件 {"cards"|"entries"|"items": [...], "drop_checks": [...]}。
     回傳 (清單, 放棄查核請求)。drop_checks 每筆 {card, branch, superseded_by_branch|null}。"""
     drops: List[dict] = []
     if isinstance(data, dict):
-        raw = data.get("entries", data.get("items"))
+        raw = data.get("cards", data.get("entries", data.get("items")))
         if raw is None:
             raw = []
         dc = data.get("drop_checks") or []

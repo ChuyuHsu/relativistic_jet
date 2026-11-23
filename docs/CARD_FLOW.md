@@ -225,8 +225,8 @@
 人要放棄一張卡之前，先確認「它的改動是不是都已經在別處了」。排隊器只回答事實，要不要放棄由看板與人決定。
 
 **來源清單的形狀**：除了舊的 JSON 陣列，也接受物件
-`{"entries": [...同 §6...], "drop_checks": [{"card", "branch", "superseded_by_branch": 分支名或 null}]}`。
-`entries` 也可以叫 `items`。同一個 `card` 重複只留第一筆。
+`{"cards": [...同 §6...], "drop_checks": [{"card", "branch", "superseded_by_branch": 分支名或 null}]}`。
+清單鍵名 `cards`（看板實際用的），`entries`、`items` 也接受。同一個 `card` 重複只留第一筆。
 
 **判斷方式（結果比對，不比行數、沒有門檻）**：
 - 目標 T＝`superseded_by_branch` 的頭；沒填、或那條分支已不存在，就是 main 的頭。

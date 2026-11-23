@@ -743,6 +743,8 @@ class DropCheckFlowTest(CF):
                                                      {"card": "C1", "branch": "dup"}]})
         self.assertEqual(len(ents), 1)
         self.assertEqual(drops, [{"card": "C1", "branch": "x", "superseded_by_branch": None}])
+        e2, _ = parse_payload({"cards": [{"branch": "b"}], "drop_checks": []})     # 看板實際用的鍵名
+        self.assertEqual(e2[0]["branch"], "b")
         with self.assertRaises(SourceError):
             parse_payload({"entries": [], "drop_checks": [{"card": "C"}]})
 
