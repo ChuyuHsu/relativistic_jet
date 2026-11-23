@@ -1,0 +1,15 @@
+{
+  "git": {"remote": "/path/to/project.git", "main": "main", "branch_patterns": ["*"]},
+  "paths": {"state_dir": "state", "work_dir": "work"},
+  "cores": {"pool": "2-9", "selftest_cores": 1, "batch_cores": 1, "reserve_for_selftest": 2},
+  "limits": {"selftest_timeout_s": 600, "batch_timeout_s": 3600, "batch_max": 16,
+             "points": [2, 4, 8, 16], "double_fail_halt": 2,
+             "min_free_mem_mb": 1024, "min_free_disk_mb": 2048},
+  "policy": {"require_approval": true},
+  "commands": {
+    "test": ["python3", "examples/toy_project/run_tests.py", "{layer}", "{ncores}", "{report}"],
+    "classify": ["python3", "examples/toy_project/classify.py", "{files}"]
+  },
+  "notify": {"url": null, "batch_seconds": 180},
+  "api": {"listen": "127.0.0.1:8080", "read_key_file": "keys/read", "write_key_file": "keys/write"}
+}

@@ -1,0 +1,9 @@
+[project]
+name = "relativistic-jet"
+version = "0.0.1"
+description = "合併佇列加測試調度器"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["jet"]
