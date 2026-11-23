@@ -14,6 +14,14 @@ const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者
 const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
+// 放棄查驗事件的原文與看板怎麼處理的，留最近 100 筆，查問題用
+async function hookLog(db, e, outcome) {
+  try {
+    await db.prepare('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)').bind(now(), JSON.stringify(e).slice(0, 600), outcome).run();
+    await db.prepare('DELETE FROM hook_log WHERE n NOT IN (SELECT n FROM hook_log ORDER BY n DESC LIMIT 100)').run();
+  } catch {}
+}
+
 export async function handleHook(req, env, ctx) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
   if (!bearerIs(req, env.HOOK_TOKEN)) return json({ error: 'unauthorized' }, 401);
@@ -35,21 +43,23 @@ export async function handleHook(req, env, ctx) {
     const detail = e.detail ? String(e.detail).slice(0, 500) : '';
     if (!card) {
       unmatched++;
+      if (kind === 'drop_checked') await hookLog(db, e, '找不到對應的卡（branch／card 都對不上）');
       if (ADMIN_KINDS.has(kind)) await post(admins.length ? admins : [''], null, kind, branch, detail);   // 排隊器自己的問題：通知管理者
       continue;
     }
     if (kind === 'drop_checked') {   // 放棄待查的結果：只對「放棄待查」的卡有效，其他一律當過期丟掉
-      if (!card || !card.dropping_at || card.status === 'dropped') { stale++; continue; }
+      if (!card || !card.dropping_at || card.status === 'dropped') { stale++; await hookLog(db, e, `過期：卡${card ? `不在待查（${card.status}）` : '不存在'}`); continue; }
       // 比對是哪一次放棄的結果：事件帶回 dropping_at 就必須相同；沒帶但有 target 就必須是現在接手卡的分支
-      if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; continue; }
+      if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; await hookLog(db, e, `過期：dropping_at 對不上（卡上 ${card.dropping_at}）`); continue; }
       if (e.dropping_at == null && card.superseded_by && e.target != null) {
         const sc = await db.prepare('SELECT id,branch FROM cards WHERE id=?').bind(card.superseded_by).first();
         // 接手卡的分支還不存在時排隊器回的 target 是 main（退回只看 main），也算對得上
-        if (!sc || (String(e.target) !== 'main' && String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`))) { stale++; continue; }
+        if (!sc || (String(e.target) !== 'main' && String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`))) { stale++; await hookLog(db, e, `過期：target 對不上（接手卡 ${card.superseded_by}）`); continue; }
       }
       const unmerged = e.unmerged === true, covered = e.covered === true, mc = Number(e.missing_count ?? 0) || 0;
       const missing = Array.isArray(e.missing_files) ? e.missing_files.slice(0, 20).map(String).join('、') : '';
       applied++;
+      await hookLog(db, e, '收下');
       // 帶 superseded_by：沒有不在 main 的改動，或接手的卡全都涵蓋了才放棄；只帶 discard_reason：一律放棄（有漏的另發通知）
       const ok = !card.superseded_by ? true : (!unmerged || covered);
       if (ok) {

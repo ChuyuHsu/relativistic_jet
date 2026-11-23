@@ -535,3 +535,12 @@ test('desired 唯讀：TOKEN 也能讀，壞權杖 401', async () => {
   for (const tk of ['t', 'h', 'rd']) assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, tk)).status, 200);
   assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 'bad')).status, 401);
 });
+
+test('放棄查驗事件的處理結果記進 hook_log（過期與收下都留原文）', async () => {
+  const e = mkenv(); await claim(e, 'c1', 'th1'); await act(e, 'c1', 'submit', { commit: SHA });
+  await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true });   // 不在待查：過期
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: 'x' });
+  await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true });
+  const rows = (await e.DB.prepare('SELECT outcome FROM hook_log ORDER BY n').all()).results.map(r => r.outcome);
+  assert.match(rows[0], /過期/); assert.equal(rows[1], '收下');
+});
