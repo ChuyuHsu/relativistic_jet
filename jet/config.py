@@ -50,6 +50,8 @@ class Config:
     listen: str = "127.0.0.1:8080"
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
+    flaky_retry: bool = True          # 計時類項目（timing_items）新紅：先在同一個提交上只重跑那幾項，第二次綠就當抖動放過（門檻不放寬）
+    timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
     recheck_red: bool = True          # 自測紅時，先把新紅項放在乾淨 main 上單獨重跑；main 也紅就不算這張卡的錯
     order: str = "parallel"           # review_first＝先審後測；parallel＝不分先後
     source: Optional[dict] = None     # 外部來源（選配）：{url, token_file, poll_seconds, max_age_s, timeout_s}
@@ -118,6 +120,8 @@ def parse(d: dict) -> Config:
         write_key_file=api.get("write_key_file"),
         order=pol.get("order", "parallel"),
         recheck_red=pol.get("recheck_red", True),
+        flaky_retry=pol.get("flaky_retry", True),
+        timing_items=tuple(pol.get("timing_items", ("loadtime", "perf", "timeout", "card_touch", "godot_time_"))),
         source=_parse_source(d.get("source")),
     )
     _validate(cfg)
@@ -169,6 +173,14 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.scope not in ("all", "tracked"):
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
+    if not isinstance(c.flaky_retry, bool):
+        raise ConfigError("policy.flaky_retry 必須是 true 或 false")
+    import re as _re
+    for pat in c.timing_items:
+        try:
+            _re.compile(pat)
+        except (TypeError, _re.error):
+            raise ConfigError("policy.timing_items 每個都要是正規式字串：%r" % (pat,))
     if not isinstance(c.recheck_red, bool):
         raise ConfigError("policy.recheck_red 必須是 true 或 false")
     if c.order not in ("parallel", "review_first"):

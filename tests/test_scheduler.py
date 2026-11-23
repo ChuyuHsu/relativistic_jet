@@ -712,6 +712,48 @@ class RecheckAndGuards(Base):
         return bool(store.get_meta(self.con, "docs_direct_paused"))
 
 
+class FlakyRetry(Base):
+    def test_timing_item_red_once_in_selftest_is_cleared_by_isolated_rerun(self):
+        self.mk()
+        self.ex.once["selftest"] = {"godot_loadtime_x"}
+        self.repo.add("a"); self.s.tick(); self.approve_all("a")
+        self.go(until=lambda: self.merged() == {"a"})
+        ev = self.con.execute("SELECT detail FROM events WHERE kind='flaky_retry'").fetchall()
+        self.assertEqual(len(ev), 1)
+        self.assertIn("godot_loadtime_x", ev[0][0])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='rejected'").fetchone()[0], 0)
+
+    def test_timing_item_still_red_on_rerun_is_rejected(self):
+        self.mk()
+        self.repo.add("a", reds={"godot_loadtime_x"})
+        self.go(12)
+        self.assertEqual(self.state("a"), "rejected")
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='flaky_retry'").fetchone()[0], 0)
+
+    def test_non_timing_red_is_not_retried(self):
+        self.mk()
+        self.ex.once["selftest"] = {"u_other"}
+        self.repo.add("a")
+        self.go(10)
+        self.assertEqual(self.state("a"), "rejected")                 # 非計時類：不重跑、照舊退回（只紅一次也一樣）
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='flaky_retry'").fetchone()[0], 0)
+
+    def test_retry_disabled_by_policy(self):
+        self.mk(policy={"flaky_retry": False})
+        self.ex.once["selftest"] = {"godot_loadtime_x"}
+        self.repo.add("a")
+        self.go(10)
+        self.assertEqual(self.state("a"), "rejected")
+
+    def test_timing_item_red_once_in_batch_is_cleared(self):
+        self.mk()
+        self.ex.once["gate"] = {"godot_perf_x"}
+        self.repo.add("a"); self.s.tick(); self.approve_all("a")
+        self.go(60, until=lambda: self.merged() == {"a"})
+        self.assertEqual(self.merged(), {"a"})
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='flaky_retry'").fetchone()[0], 1)
+
+
 class StartedEvents(Base):
     def test_started_events_emitted_with_card_commit_and_slot(self):
         from jet import notify

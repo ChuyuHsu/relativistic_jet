@@ -119,6 +119,7 @@ class FakeExecutor:
         self.flaky, self.flaky_p, self.rng = flaky, flaky_p, rng
         self.started, self.cancelled = [], []
         self.live_cores = []
+        self.once = {}   # 層 → 第一次完整跑會紅一次的項目（之後不再紅）
         self.force = {}  # commit → 強制狀態（"infra"/"timeout"）
 
     def start(self, job):
@@ -142,6 +143,11 @@ class FakeExecutor:
         if st:
             return JobResult(st, None)
         reds = self.repo.reds_of(sha, "gate" if h.job.layer != "selftest" else "selftest")
+        if getattr(h.job, "only", None):
+            reds = set(reds) & set(h.job.only.split(","))            # 單獨重跑只看指定項目
+        elif self.once.get(h.job.layer) and sha != self.repo.main:
+            reds = set(reds) | self.once[h.job.layer]                # 只紅一次的項目（計時類抖動）
+            self.once[h.job.layer] = set()
         if self.flaky and self.rng and self.rng.random() < self.flaky_p:
             reds = set(reds) | {self.flaky}                                # 抖動項：跟程式碼無關，隨機紅
         if reds and getattr(h.job, "log_path", None):                       # 紅的時候留一份像樣的記錄，讓排隊器抽失敗原因

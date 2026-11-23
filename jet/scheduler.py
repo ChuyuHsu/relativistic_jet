@@ -116,6 +116,9 @@ class Scheduler:
         self._drop_sig = None
         self._rc: Dict[str, dict] = {}                     # 複驗中的卡 → 原本的自測結果
         self._rc_wait: Dict[str, dict] = {}                # 複驗還沒排到核
+        self._retried: Set[Tuple[str, str]] = set()        # 已做過計時類重跑的（分支, 提交）：同一版本只重跑一次
+        self._pretry: Dict[int, Tuple[str, int]] = {}      # 批測點的計時類重跑：run id → (kind, size)
+        self._pretried: Set[Tuple[int, str, int]] = set()  # (batch id, kind, size)
         self._entries: Optional[Dict[str, dict]] = None    # 清單最後一次成功的內容（依分支名）
         self._src_err_last: Optional[str] = None
         self._unres_since: Dict[Tuple[str, str], float] = {}
@@ -755,7 +758,7 @@ class Scheduler:
             self._rc_wait.pop(branch, None)
         for rid, j in list(self.jobs.items()):
             if (branch and j.branch == branch and j.kind in ("selftest", "recheck")) or \
-               (batch and j.kind in ("point", "probe")):
+               (batch and j.kind in ("point", "probe", "pretry")):
                 try:
                     self.executor.cancel(j.handle)
                 finally:
@@ -774,6 +777,8 @@ class Scheduler:
                 self._on_selftest(j, res)
             elif j.kind == "recheck":
                 self._on_recheck(j, res)
+            elif j.kind == "pretry":
+                self._on_pretry(j, res)
             elif j.kind == "baseline":
                 self._on_baseline(j, res)
             else:
@@ -875,6 +880,13 @@ class Scheduler:
             r = store.get_branch(self.con, r["parent"]) if r["parent"] else None
         return rows[::-1]
 
+    def _timing_only(self, items) -> bool:
+        """這批新紅項全是計時類（項目名符合 policy.timing_items）：負載下偶發紅，先在同一個提交上單獨重跑。"""
+        import re
+        if not self.cfg.flaky_retry or not items or not self.cfg.timing_items:
+            return False
+        return all(any(re.search(p, i) for p in self.cfg.timing_items) for i in items)
+
     def _board_prio(self, name) -> float:
         """看板清單上這張卡的優先序（數字小的先）。跟手動的 jet priority 共存：手動值（大的先）優先比，同值才看這個；
         沒有來源、清單沒帶就排最後（同為沒帶的照原順序）。"""
@@ -962,6 +974,12 @@ class Scheduler:
             return
         if self._red(res, base):
             new_red = set(res.failed_items) - base
+            if res.status == "fail" and new_red and self._timing_only(new_red) \
+                    and (j.branch, row["head_sha"]) not in self._retried and j.branch not in self._rc:
+                self._retried.add((j.branch, row["head_sha"]))
+                self._rc_wait[j.branch] = {"new_red": new_red, "items": list(res.failed_items), "run_id": j.run_id,
+                                           "approved": (j.approved_sha, j.retest), "mode": "retry"}
+                return                                         # 計時類新紅：先在同一個提交上只重跑那幾項（單獨一個工作），第二次綠就當抖動
             if self.cfg.recheck_red and res.status == "fail" and new_red and j.branch not in self._rc:
                 self._rc_wait[j.branch] = {"new_red": new_red, "items": list(res.failed_items), "run_id": j.run_id,
                                            "approved": (j.approved_sha, j.retest)}
@@ -983,7 +1001,16 @@ class Scheduler:
             if row is None or row["state"] != S.SELFTESTING.value:
                 self._rc_wait.pop(name, None)
                 continue
-            if self._launch("recheck", "selftest", self.main, self.cfg.selftest_cores, self.cfg.selftest_timeout_s,
+            sha = self.main
+            if rec.get("mode") == "retry":
+                chain = self._chain(name)
+                st = self.repo.stack(self.main, [(x["name"], x["head_sha"]) for x in chain])
+                if len(st.kept) != len(chain):
+                    self._rc_wait.pop(name, None)
+                    store.apply_event(self.con, name, Event.RETRY)   # 疊不上了：回待自測，照一般流程處理
+                    continue
+                sha = st.prefixes[-1]
+            if self._launch("recheck", "selftest", sha, self.cfg.selftest_cores, self.cfg.selftest_timeout_s,
                             branch=name, base_sha=self.main, only=",".join(sorted(rec["new_red"]))):
                 self._rc[name] = self._rc_wait.pop(name)
 
@@ -1001,6 +1028,21 @@ class Scheduler:
                 return
             if self.source is not None and tuple(ctx) != (row["approved_sha"], row["retest"]):
                 store.apply_event(c, j.branch, Event.RETRY)        # 照舊放行測的結果：丟掉，照現在的放行重測
+                return
+            if rec.get("mode") == "retry":
+                still = set(res.failed_items) & rec["new_red"] if res.status in ("fail", "pass") else set(rec["new_red"])
+                if res.status == "pass" or not still:
+                    store.add_info_event(c, "flaky_retry", j.branch,
+                                         "計時類項目第一次紅、同一個提交單獨重跑綠，算抖動放過：" + ",".join(sorted(rec["new_red"])))
+                    store.apply_event(c, j.branch, Event.SELFTEST_PASS)
+                else:
+                    rec2 = dict(rec, new_red=still, mode="main")   # 還是紅：接著照原本流程（在乾淨 main 上確認是不是 main 自己紅）
+                    if self.cfg.recheck_red:
+                        self._rc_wait[j.branch] = rec2
+                    else:
+                        why = "自測紅：" + ",".join(sorted(still))
+                        store.apply_event(c, j.branch, Event.SELFTEST_FAIL, reject_reason=why)
+                        store.add_event(c, "rejected", j.branch, why)
                 return
             main_red = (set(res.failed_items) & rec["new_red"]) if res.status in ("fail", "pass") else set()
             if main_red:
@@ -1669,12 +1711,41 @@ class Scheduler:
         self._overload.pop(f"b{j.size}", None)
         self._store_items(j.run_id, res, base)
         red = self._red(res, base)       # 逾時＝這個測點紅，照一般流程找兇手
+        nr = set(res.failed_items) - base
+        if red and res.status == "fail" and self._timing_only(nr) and (b.id, j.kind, j.size) not in self._pretried:
+            self._pretried.add((b.id, j.kind, j.size))        # 計時類新紅：同一個測點只重跑那幾項（單獨一個工作），綠就當抖動
+            if self._launch("pretry", "gate", b.prefixes[j.size - 1], self.cfg.batch_cores, self.cfg.batch_timeout_s,
+                            size=j.size, batch_id=b.id, base_sha=b.base_sha, only=",".join(sorted(nr))):
+                self._pretry[max(self.jobs)] = (j.kind, j.size, nr)
+                return
         target = b.results if j.kind == "point" else b.probes
         target[j.size] = RED if red else GREEN
         if res.status == "timeout":
             b.failed[j.size] = {"逾時"}
         else:
             b.failed[j.size] = set(res.failed_items) - base if red else set(res.failed_items)
+
+    def _on_pretry(self, j, res):
+        b = self.batch
+        kind, size, nr = self._pretry.pop(j.run_id, (None, None, set()))
+        if b is None or b.id != j.batch_id or kind is None:
+            return
+        if res.status in ("infra", "cancelled"):
+            self._infra_retry(f"batch:{kind}:{size}")
+            b.launched.discard((kind, size))              # 重跑沒跑成：整個測點重來（已記過重跑，不會再重跑一次）
+            return
+        base = self._known_red("gate", b.base_sha)
+        still = set(res.failed_items) - base
+        target = b.results if kind == "point" else b.probes
+        if res.status == "pass" or (res.status == "fail" and not (still & nr)):
+            store.add_info_event(self.con, "flaky_retry", None,
+                                 f"批測點 {size} 的計時類項目第一次紅、單獨重跑綠，算抖動放過：" + ",".join(sorted(nr)))
+            target[size] = GREEN
+            b.failed[size] = set()
+        else:
+            self._store_items(j.run_id, res, base)
+            target[size] = RED
+            b.failed[size] = set(still) or {"逾時"}
 
     def _finish_batch(self, v):
         import contextlib
