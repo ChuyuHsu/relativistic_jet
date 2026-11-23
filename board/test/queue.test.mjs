@@ -697,3 +697,20 @@ test('superseded 的現版跟放行版本是同一個提交：不採信，送審
   const r2 = await (await ev(e, 'c1', { kind: 'superseded', commit: SHA2, approved_sha: SHA })).json();   // 真的換了版本：照樣失效
   assert.equal(r2.applied, 1); assert.equal(await stageOf(e, 'c1'), 'developing');
 });
+
+test('信箱：一次領／ack／release 上百筆（D1 一句最多 100 個參數，要分段）', async () => {
+  const e = mkenv();
+  // 把 D1 的參數上限也裝進假的 D1，確保沒分段會炸
+  const real = e.DB; e.DB = { prepare: sql => { if ((sql.match(/\?/g) || []).length > 100) throw new Error('too many SQL variables'); return real.prepare(sql); }, batch: l => real.batch(l) };
+  for (let i = 0; i < 150; i++) await e.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind('th1', 'c1', 'dev/c1', 'tested_red', 'x' + i, 1).run();   // 同串同卡 150 筆：只送最新一則
+  const a = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
+  assert.equal(a.messages.length, 1); assert.equal(a.messages[0].ids.length, 1); assert.match(a.messages[0].text, /x149/);
+  assert.equal((await e.DB.prepare('SELECT count(*) n FROM outbox WHERE sent_at IS NOT NULL').first()).n, 149);   // 舊的都標成已送
+  for (let i = 0; i < 150; i++) await e.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind('th' + i, 'k' + i, null, 'stuck', 'y', 1).run();
+  const b = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
+  assert.equal(b.messages.length, 150);
+  const ids = b.messages.flatMap(m => m.ids);
+  assert.equal((await (await call(e, 'POST', '/api/outbox/release', { actor: '傳令', ids })).json()).released, 150);
+  const c = await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json();
+  assert.equal((await (await call(e, 'POST', '/api/outbox/ack', { actor: '傳令', ids: c.messages.flatMap(m => m.ids) })).json()).acked, 150);
+});

@@ -16,6 +16,12 @@ const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不�
 
 // 一批事件在記憶體裡依序處理（卡片狀態用預載的副本，邊處理邊更新），所有寫入收成語句，最後用 D1 batch 一次送出
 // （每個事件的語句整組同進同出，不跨 batch 切開）：一批 50 筆只有幾次往返，一組失敗不會留下做一半的事件。
+// D1 一句 SQL 最多 100 個參數：id 清單分段更新，回傳總共改了幾列
+async function updateByIds(db, make, pre, ids) {
+  let changes = 0;
+  for (const c of chunk(ids, 80)) changes += (await db.prepare(make(c.map(() => '?').join(','))).bind(...pre, ...c).run()).meta.changes;
+  return changes;
+}
 const chunk = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };
 
 export async function handleHook(req, env, ctx) {
@@ -206,7 +212,7 @@ export async function flush(env) {
     if (!ok) break;   // 失敗：保留，下次重送
     await db.prepare('INSERT INTO fires(at) VALUES(?)').bind(t).run();
     const ids = items.map(i => i.n);
-    await db.prepare(`UPDATE outbox SET sent_at=? WHERE n IN (${ids.map(() => '?').join(',')})`).bind(t, ...ids).run();
+    await updateByIds(db, ph => `UPDATE outbox SET sent_at=? WHERE n IN (${ph})`, [t], ids);
     sent++;
   }
   return { sent };
@@ -276,7 +282,7 @@ export async function outboxClaim(req, env) {
     const k = `${r.owner_thread || fallback}\u0000${r.card_id}`, prev = latest.get(k);
     if (!prev || r.n > prev.n) { if (prev) stale.push(prev.n); latest.set(k, r); } else stale.push(r.n);
   }
-  if (stale.length) await db.prepare(`UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND claim_id=? AND n IN (${stale.map(() => '?').join(',')})`).bind(t, token, ...stale).run();
+  if (stale.length) await updateByIds(db, ph => `UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND claim_id=? AND n IN (${ph})`, [t, token], stale);
   const dropped = new Set(stale);
   const groups = new Map();
   for (const r of rows) { if (dropped.has(r.n)) continue; const to = r.owner_thread || fallback; (groups.get(to) || groups.set(to, []).get(to)).push(r); }
@@ -290,7 +296,7 @@ export async function outboxClaim(req, env) {
   for (const [to, items] of [...groups].sort((a, b) => Math.min(...a[1].map(i => i.at)) - Math.min(...b[1].map(i => i.at)))) {
     if ((lastSent.get(to) != null && t - lastSent.get(to) < minGap) || given >= maxMsg) { groups.delete(to); held.push(...items.map(i => i.n)); } else given++;
   }
-  if (held.length) await db.prepare(`UPDATE outbox SET claimed_at=NULL,claim_id=NULL WHERE sent_at IS NULL AND claim_id=? AND n IN (${held.map(() => '?').join(',')})`).bind(token, ...held).run();
+  if (held.length) await updateByIds(db, ph => `UPDATE outbox SET claimed_at=NULL,claim_id=NULL WHERE sent_at IS NULL AND claim_id=? AND n IN (${ph})`, [token], held);
   const out = [...groups].map(([to, items]) => ({
     to_thread: to || null,
     ids: items.map(i => i.n),
@@ -312,8 +318,8 @@ export async function outboxRelease(req, env) {
   if (!ids.length) return json({ error: 'ids 要是非空的數字陣列（claim 回傳的 ids）' }, 400);
   const hold = Math.min(CLAIM_TTL, Math.max(0, Number(body.hold_s) || 0));
   const claimedAt = hold > 0 ? now() - CLAIM_TTL + hold : null;
-  const r = await env.DB.prepare(`UPDATE outbox SET claimed_at=?,claim_id=NULL WHERE sent_at IS NULL AND n IN (${ids.map(() => '?').join(',')})`).bind(claimedAt, ...ids).run();
-  return json({ released: r.meta.changes });
+  const released = await updateByIds(env.DB, ph => `UPDATE outbox SET claimed_at=?,claim_id=NULL WHERE sent_at IS NULL AND n IN (${ph})`, [claimedAt], ids);
+  return json({ released });
 }
 
 export async function outboxAck(req, env) {
@@ -323,8 +329,8 @@ export async function outboxAck(req, env) {
   if (!actor || actor.toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
   const ids = (Array.isArray(body.ids) ? body.ids : []).map(Number).filter(Number.isInteger).slice(0, 500);
   if (!ids.length) return json({ error: 'ids 要是非空的數字陣列（claim 回傳的 ids）' }, 400);
-  const r = await env.DB.prepare(`UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND n IN (${ids.map(() => '?').join(',')})`).bind(now(), ...ids).run();
-  return json({ acked: r.meta.changes });
+  const acked = await updateByIds(env.DB, ph => `UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND n IN (${ph})`, [now()], ids);
+  return json({ acked });
 }
 
 // 只讀：現在領得到幾筆（沒 ack 且沒被領走，或領走超過 5 分鐘沒 ack）與其中最大的信箱編號。給「有信才叫醒」的哨兵用，不改任何狀態。
