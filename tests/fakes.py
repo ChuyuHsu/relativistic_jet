@@ -97,8 +97,9 @@ class FakeRepo:
 
 class FakeExecutor:
     """start 立刻決定結果，poll 第一次就回（可設 delay 輪數）。"""
-    def __init__(self, repo, delay=0):
+    def __init__(self, repo, delay=0, flaky=None, flaky_p=0.0, rng=None):
         self.repo, self.delay = repo, delay
+        self.flaky, self.flaky_p, self.rng = flaky, flaky_p, rng
         self.started, self.cancelled = [], []
         self.live_cores = []
         self.force = {}  # commit → 強制狀態（"infra"/"timeout"）
@@ -124,6 +125,8 @@ class FakeExecutor:
         if st:
             return JobResult(st, None)
         reds = self.repo.reds_of(sha, "gate" if h.job.layer != "selftest" else "selftest")
+        if self.flaky and self.rng and self.rng.random() < self.flaky_p:
+            reds = set(reds) | {self.flaky}                                # 抖動項：跟程式碼無關，隨機紅
         return JobResult("fail" if reds else "pass", 1 if reds else 0, sorted(reds))
 
     def cancel(self, h):

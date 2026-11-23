@@ -21,7 +21,8 @@ class Base(unittest.TestCase):
         self.addCleanup(self.con.close)
         self.repo = FakeRepo()
         self.ex = FakeExecutor(self.repo, delay)
-        self.s = Scheduler(self.cfg, self.con, self.repo, self.ex, clock=lambda: 1000.0)
+        self.s = Scheduler(self.cfg, self.con, self.repo, self.ex, clock=lambda: 1000.0,
+                           foreign_busy=lambda cores, pgids: set())     # 不受開發機上別人的行程影響
         return self.s
 
     def state(self, n):
@@ -476,3 +477,109 @@ class TrackedScope(Base):
         self.mk(policy={"require_approval": False})
         self.repo.add("a")
         self.go(40, until=lambda: self.state("a") == "merged")
+
+
+class FlakyBaseline(Base):
+    def test_flaky_in_history_not_new_red(self):
+        """最近幾次 main 紅過的項目（抖動項）不算新紅：不會讓無辜分支被退。"""
+        self.mk(policy={"require_approval": False})
+        store.set_baseline(self.con, "old-main", "gate", {"flk"})        # 以前量到 main 紅過
+        self.repo.add("a", gate_reds={"flk"})                              # 這次又抖出 flk
+        self.go(60, until=lambda: self.state("a") in ("merged", "rejected"))
+        self.assertEqual(self.state("a"), "merged")
+
+    def test_new_item_still_blamed(self):
+        self.mk(policy={"require_approval": False})
+        store.set_baseline(self.con, "old-main", "gate", {"flk"})
+        self.repo.add("a", gate_reds={"brand_new"})
+        self.go(60, until=lambda: self.state("a") in ("merged", "rejected"))
+        self.assertEqual(self.state("a"), "rejected")
+
+    def test_history_window(self):
+        self.mk(policy={"require_approval": False}, limits={"baseline_history": 2})
+        store.set_baseline(self.con, "m-1", "gate", {"ancient"})
+        store.set_baseline(self.con, "m-2", "gate", set())
+        store.set_baseline(self.con, "m-3", "gate", set())
+        self.assertEqual(store.known_red(self.con, "gate", 2), set())     # 太舊的不算
+        self.assertEqual(store.known_red(self.con, "gate", 5), {"ancient"})
+
+    def test_flaky_event_once_and_listed(self):
+        self.mk(policy={"require_approval": False})
+        store.set_baseline(self.con, "m-1", "gate", {"flk"})
+        self.repo.add("a")
+        self.go(60, until=lambda: self.state("a") == "merged")          # 合入後記一份新基準（無 flk）→ flk 時紅時綠
+        n = self.con.execute("SELECT count(*) FROM events WHERE kind='flaky'").fetchone()[0]
+        self.assertEqual(n, 1)
+        from jet import ops
+        self.assertEqual(ops.query_status(self.con)["flaky"], ["flk"])
+        self.s._check_flaky()
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='flaky'").fetchone()[0], 1)
+
+    def test_docs_copy_not_counted_in_history(self):
+        self.mk()
+        store.set_baseline(self.con, "m-1", "gate", {"x"})
+        store.set_baseline(self.con, "m-2", "gate", {"x"}, copied=True)
+        store.set_baseline(self.con, "m-3", "gate", set(), copied=True)
+        self.assertEqual(store.flaky_items(self.con, "gate", 5), set())   # 只有一次真量測
+
+
+class Slots(Base):
+    def test_max_selftest_slots_hard_cap(self):
+        self.mk(delay=3, cores={"pool": "0-31", "max_selftest_slots": 3, "reserve_for_selftest": 32})
+        for i in range(10):
+            self.repo.add(f"n{i}")
+        peak = 0
+        for _ in range(12):
+            self.s.tick()
+            peak = max(peak, sum(1 for j in self.s.jobs.values() if j.kind == "selftest"))
+        self.assertEqual(peak, 3)
+
+    def test_physical_unit_config_uses_physical_pool(self):
+        from jet.cores import PhysicalPool
+        self.mk(cores={"pool": "0-31", "unit": "physical", "threads": "one"})
+        self.assertIsInstance(self.s.pool, PhysicalPool)
+
+    def test_auto_pause_reason_visible(self):
+        self.mk(policy={"require_approval": False})
+        self.repo.add("a")
+        orig = self.ex.poll
+        self.ex.poll = lambda h: (lambda r: r and type(r)("infra", None))(orig(h))
+        self.go(30)
+        from jet import ops
+        st = ops.query_status(self.con)
+        self.assertTrue(st["paused"])
+        self.assertIn("連續基礎設施錯誤", st["pause_reason"])
+        self.assertEqual(st["paused_by"], "scheduler")
+
+
+class Overload(Base):
+    def _timeout_overloaded(self, flag):
+        orig = self.ex.poll
+
+        def poll(h):
+            r = orig(h)
+            if r is not None and h.job.layer == "selftest":
+                r.status, r.failed_items, r.overloaded, r.cpu_s = "timeout", [], flag, 12.0
+            return r
+        self.ex.poll = poll
+
+    def test_overloaded_timeout_is_retried_not_rejected(self):
+        self.mk()
+        self.repo.add("a")
+        self._timeout_overloaded(True)
+        self.go(4)
+        self.assertNotEqual(self.state("a"), "rejected")
+        self.assertGreaterEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='overload'").fetchone()[0], 1)
+
+    def test_repeated_overload_timeout_finally_rejected(self):
+        self.mk()
+        self.repo.add("a")
+        self._timeout_overloaded(True)
+        self.go(30, until=lambda: self.state("a") == "rejected")
+        self.assertIn("逾時", store.get_branch(self.con, "a")["reject_reason"])
+
+    def test_plain_timeout_still_rejected(self):
+        self.mk()
+        self.repo.add("a")
+        self._timeout_overloaded(False)
+        self.go(10, until=lambda: self.state("a") == "rejected")

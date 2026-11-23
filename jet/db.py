@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS run_items(
 CREATE TABLE IF NOT EXISTS baseline(   -- main 基準：該層在這個 main 上本來就紅的項目
   main_sha TEXT NOT NULL, layer TEXT NOT NULL,
   failed_items TEXT NOT NULL,        -- JSON 陣列
-  recorded_at REAL NOT NULL, PRIMARY KEY(main_sha, layer)
+  recorded_at REAL NOT NULL,
+  copied INTEGER NOT NULL DEFAULT 0, -- 1＝純文件更動時沿用上一份，不算一次新的 main 量測
+  PRIMARY KEY(main_sha, layer)
 );
 
 CREATE TABLE IF NOT EXISTS events(     -- 待辦／通知事件
@@ -95,6 +97,9 @@ def connect(path: str) -> sqlite3.Connection:
 
 def migrate(con: sqlite3.Connection) -> None:
     con.executescript(SCHEMA)
+    cols = [r[1] for r in con.execute("PRAGMA table_info(baseline)")]
+    if "copied" not in cols:                                    # 舊資料庫補欄位
+        con.execute("ALTER TABLE baseline ADD COLUMN copied INTEGER NOT NULL DEFAULT 0")
     cols = [r[1] for r in con.execute("PRAGMA table_info(events)")]
     if "commit_sha" not in cols:   # 舊資料庫補欄位
         con.execute("ALTER TABLE events ADD COLUMN commit_sha TEXT")

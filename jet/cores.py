@@ -1,7 +1,7 @@
 """核池（DESIGN 第 6 節）：每個工作專屬核，任何時刻不共用。"""
 import os
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Set
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 
 def parse_cores(spec: str) -> List[int]:
@@ -40,6 +40,117 @@ class CorePool:
 
     def free_count(self) -> int:
         return len(self.all) - len(self.busy)
+
+
+def read_topology(root: str = "/sys/devices/system/cpu") -> Dict[int, FrozenSet[int]]:
+    """每顆邏輯核 → 同一個實體核上的兄弟執行緒（含自己）。讀不到的核當作自己一個實體核。"""
+    topo: Dict[int, FrozenSet[int]] = {}
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return topo
+    for n in names:
+        if not (n.startswith("cpu") and n[3:].isdigit()):
+            continue
+        try:
+            with open(f"{root}/{n}/topology/thread_siblings_list", encoding="utf-8") as f:
+                topo[int(n[3:])] = frozenset(parse_cores(f.read().strip().replace(" ", "")))
+        except (OSError, ValueError):
+            continue
+    return topo
+
+
+class PhysicalPool(CorePool):
+    """以實體核為單位配槽：同一個實體核的兄弟執行緒只會給同一個工作，絕不分給兩個槽。
+
+    - 池裡的邏輯核，只有「兄弟全都在池裡」的實體核才算（保留核的兄弟也視為保留，自動排除）。
+    - acquire(n)＝拿 n 個實體核。threads="all"：回傳這 n 個實體核的全部執行緒；
+      threads="one"：每個實體核只回傳一條執行緒，另一條空著不給別人（也不算空核）。
+    - busy 是邏輯核集合；一個實體核只要有一條執行緒忙（含外人佔用），整個實體核就不算空。
+    """
+
+    def __init__(self, cores: Iterable[int], threads: str = "all",
+                 topo: Optional[Dict[int, FrozenSet[int]]] = None):
+        cores = set(cores)
+        topo = read_topology() if topo is None else topo
+        seen: Set[int] = set()
+        self.units: List[Tuple[int, ...]] = []
+        self.excluded: List[int] = []
+        for c in sorted(cores):
+            if c in seen:
+                continue
+            sib = topo.get(c, frozenset([c]))
+            seen |= sib
+            if sib <= cores:
+                self.units.append(tuple(sorted(sib)))
+            else:
+                self.excluded.extend(sorted(sib & cores))
+        self.threads = threads
+        self._unit_of = {c: u for u in self.units for c in u}
+        super().__init__([c for u in self.units for c in u])
+
+    def _free_units(self) -> List[Tuple[int, ...]]:
+        return [u for u in self.units if not (set(u) & self.busy)]
+
+    def acquire(self, n: int) -> List[int]:
+        free = self._free_units()
+        if n < 1 or len(free) < n:
+            return []
+        got: List[int] = []
+        for u in free[:n]:
+            self.busy.update(u)                       # 兄弟執行緒一起占住
+            got.extend(u if self.threads == "all" else u[:1])
+        return got
+
+    def release(self, cores: Iterable[int]) -> None:
+        for c in cores:
+            self.busy.difference_update(self._unit_of.get(c, (c,)))
+
+    def free_count(self) -> int:
+        return len(self._free_units())
+
+
+def proc_cpu_seconds(pid: int, proc_root: str = "/proc") -> float:
+    """行程自己加已回收子行程用掉的 CPU 秒數（utime＋stime＋cutime＋cstime）。"""
+    try:
+        with open(f"{proc_root}/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        rest = text[text.rindex(")") + 2:].split()
+        ticks = sum(int(rest[i]) for i in (11, 12, 13, 14))
+        return ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def group_cpu_seconds(pgid: int, procs: Optional[List["ProcInfo"]] = None) -> float:
+    """整個工作群組到現在用掉的 CPU 秒數：活行程自己的加上它們已回收的子行程。
+    （已結束的行程時間會在其父行程的 cutime 裡，所以不會漏、也不會重複算。）"""
+    return sum(proc_cpu_seconds(p.pid) for p in group_members(pgid, procs))
+
+
+def cpu_pressure(path: str = "/proc/pressure/cpu") -> Optional[float]:
+    """系統 CPU 壓力（PSI some avg10，百分比）；沒有 PSI 就回 None。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("some"):
+                    for kv in line.split():
+                        if kv.startswith("avg10="):
+                            return float(kv[6:])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def system_overloaded(psi_threshold: float = 20.0, load_factor: float = 0.9) -> bool:
+    """系統現在是不是超載：PSI 壓力超過門檻；沒有 PSI 就看 1 分鐘平均負載是否超過上線核數的 load_factor 倍。"""
+    p = cpu_pressure()
+    if p is not None:
+        return p >= psi_threshold
+    try:
+        return os.getloadavg()[0] > load_factor * len(online_cpus())
+    except OSError:
+        return False
 
 
 PF_KTHREAD = 0x00200000   # 核心執行緒（每顆核都有自己的 ksoftirqd 之類，不算外人）

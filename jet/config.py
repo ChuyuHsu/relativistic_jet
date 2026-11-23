@@ -25,11 +25,15 @@ class Config:
     selftest_cores: int = 1
     batch_cores: int = 1
     reserve_for_selftest: int = 0
+    core_unit: str = "logical"        # logical＝以邏輯核計；physical＝以實體核為單位配槽
+    threads: str = "all"             # physical 時：all＝實體核的兄弟執行緒都給同一個槽；one＝只給一條，另一條空著
+    max_selftest_slots: int = 0       # 同時自測槽數上限；0＝不限（只受核數限制）
     selftest_timeout_s: int = 600
     batch_timeout_s: int = 3600
     batch_max: int = 16
     points: List[int] = field(default_factory=lambda: [2, 4, 8, 16])
     double_fail_halt: int = 2
+    baseline_history: int = 5
     min_free_mem_mb: int = 0
     min_free_disk_mb: int = 0
     require_approval: bool = True
@@ -82,11 +86,15 @@ def parse(d: dict) -> Config:
         selftest_cores=cores.get("selftest_cores", 1),
         batch_cores=cores.get("batch_cores", 1),
         reserve_for_selftest=cores.get("reserve_for_selftest", 0),
+        core_unit=cores.get("unit", "logical"),
+        threads=cores.get("threads", "all"),
+        max_selftest_slots=cores.get("max_selftest_slots", 0),
         selftest_timeout_s=lim.get("selftest_timeout_s", 600),
         batch_timeout_s=lim.get("batch_timeout_s", 3600),
         batch_max=lim.get("batch_max", 16),
         points=lim.get("points", [2, 4, 8, 16]),
         double_fail_halt=lim.get("double_fail_halt", 2),
+        baseline_history=lim.get("baseline_history", 5),
         min_free_mem_mb=lim.get("min_free_mem_mb", 0),
         min_free_disk_mb=lim.get("min_free_disk_mb", 0),
         require_approval=pol.get("require_approval", True),
@@ -140,6 +148,12 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.scope not in ("all", "tracked"):
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
+    if c.core_unit not in ("logical", "physical") or c.threads not in ("all", "one"):
+        raise ConfigError('cores.unit 要是 "logical" 或 "physical"，cores.threads 要是 "all" 或 "one"')
+    if c.max_selftest_slots < 0:
+        raise ConfigError("cores.max_selftest_slots 不能是負的")
+    if c.baseline_history < 1:
+        raise ConfigError("limits.baseline_history 必須 ≥ 1")
     if c.batch_max < 1:
         raise ConfigError("limits.batch_max 必須 ≥ 1")
     if sorted(c.points) != c.points or any(p < 1 for p in c.points):

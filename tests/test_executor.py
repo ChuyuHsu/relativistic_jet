@@ -321,14 +321,19 @@ class ForeignBusyTest(unittest.TestCase):
         self.addCleanup(lambda: (self.p.kill(), self.p.wait()))
         self.assertTrue(wait_for(lambda: os.sched_getaffinity(self.p.pid) == {self.core}))
 
+    def only(self, *extra):
+        """只看這個測試自己開的行程，不受開發機上別的行程影響。"""
+        pids = {self.p.pid} | {e.pid for e in extra}
+        return [x for x in cores.scan_procs() if x.pid in pids]
+
     def test_detects_pinned_outsider(self):
-        self.assertEqual(cores.foreign_busy([self.core], set(), baseline=self.base), {self.core})
+        self.assertEqual(cores.foreign_busy([self.core], set(), baseline=self.base, procs=self.only()), {self.core})
 
     def test_other_cores_not_reported(self):
-        self.assertEqual(cores.foreign_busy([ALLOWED[0]], set(), baseline=self.base), set())
+        self.assertEqual(cores.foreign_busy([ALLOWED[0]], set(), baseline=self.base, procs=self.only()), set())
 
     def test_own_group_is_ignored(self):
-        self.assertEqual(cores.foreign_busy([self.core], {self.p.pid}, baseline=self.base), set())
+        self.assertEqual(cores.foreign_busy([self.core], {self.p.pid}, baseline=self.base, procs=self.only()), set())
 
     def test_unpinned_process_is_not_foreign(self):
         # 沒綁核的一般行程能跑在任何核上，不算佔用
@@ -337,7 +342,7 @@ class ForeignBusyTest(unittest.TestCase):
         self.p.kill()
         self.p.wait()
         time.sleep(0.1)
-        self.assertEqual(cores.foreign_busy(ALLOWED, set(), baseline=self.base), set())
+        self.assertEqual(cores.foreign_busy(ALLOWED, set(), baseline=self.base, procs=self.only(q)), set())
 
     def test_empty_cores(self):
         self.assertEqual(cores.foreign_busy([], set()), set())
@@ -480,3 +485,38 @@ class ReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverloadDetectTest(unittest.TestCase):
+    def test_cpu_seconds_of_group(self):
+        p = subprocess.Popen([PY, "-c", "import time\nt=time.time()\nwhile time.time()-t<0.6: pass"],
+                             start_new_session=True)
+        time.sleep(0.8)
+        # 已結束但還沒回收（殭屍）不算活行程，所以這裡只驗「活著的忙行程量得到 CPU 時間」
+        q = subprocess.Popen([PY, "-c", "while True: pass"], start_new_session=True)
+        self.addCleanup(lambda: (q.kill(), q.wait(), p.wait()))
+        time.sleep(0.7)
+        self.assertGreater(cores.group_cpu_seconds(q.pid), 0.3)
+
+    def test_pressure_parse(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".psi", delete=False) as f:
+            f.write("some avg10=42.50 avg60=10.00 avg300=1.00 total=123\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(cores.cpu_pressure(f.name), 42.5)
+        self.assertIsNone(cores.cpu_pressure("/nonexistent/psi"))
+
+    def test_was_overloaded_needs_both_conditions(self):
+        ex = Executor(overload_cpu_ratio=0.6)
+        h = type("H", (), {})()
+        h.started = time.monotonic() - 100
+        h.job = type("J", (), {"cores": [0, 1, 2, 3]})()
+        old = cores.system_overloaded
+        try:
+            cores.system_overloaded = lambda *a, **k: True
+            self.assertTrue(ex._was_overloaded(h, 50.0))       # 4 核×100 秒只拿到 50 秒＝12%
+            self.assertFalse(ex._was_overloaded(h, 390.0))     # 幾乎滿用：是測試自己慢
+            cores.system_overloaded = lambda *a, **k: False
+            self.assertFalse(ex._was_overloaded(h, 50.0))      # 機器不忙：單純卡住，算測試的錯
+        finally:
+            cores.system_overloaded = old

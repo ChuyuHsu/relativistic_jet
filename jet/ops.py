@@ -57,6 +57,9 @@ def _has_approval(con, branch: str, content_id: str) -> bool:
     return row is not None
 
 
+from .store import flaky_items  # noqa: E402
+
+
 def _json_meta(con, key):
     import json
     v = _meta(con, key)
@@ -83,6 +86,8 @@ def query_status(con, now: Optional[float] = None) -> Dict[str, Any]:
     return {
         "now": now,
         "paused": _meta(con, "paused", "0") == "1",
+        "pause_reason": _meta(con, "pause_reason", "") if _meta(con, "paused", "0") == "1" else "",
+        "paused_by": _meta(con, "pause_by", "") if _meta(con, "paused", "0") == "1" else "",
         "counts": counts,
         "queue_len": counts[State.QUEUED.value],
         "running": running,
@@ -91,6 +96,7 @@ def query_status(con, now: Optional[float] = None) -> Dict[str, Any]:
         "main_sha": _meta(con, "main_sha"),
         "open_todo": open_todo,
         "restored_at": _meta(con, "restored_at"),
+        "flaky": sorted(flaky_items(con, "gate", int(_meta(con, "baseline_history", "5") or 5))),
         "scheduler": {k: _json_meta(con, "obs_" + k) for k in ("tick", "scan", "fetch", "last_error")},
     }
 

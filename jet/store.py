@@ -48,9 +48,31 @@ def get_baseline(con, main_sha, layer) -> Optional[set]:
     return set(json.loads(r[0])) if r else None
 
 
-def set_baseline(con, main_sha, layer, failed: Iterable[str]):
-    con.execute("INSERT OR REPLACE INTO baseline VALUES(?,?,?,?)",
-                (main_sha, layer, json.dumps(sorted(failed)), now()))
+def set_baseline(con, main_sha, layer, failed: Iterable[str], copied: bool = False):
+    con.execute("INSERT OR REPLACE INTO baseline(main_sha,layer,failed_items,recorded_at,copied) VALUES(?,?,?,?,?)",
+                (main_sha, layer, json.dumps(sorted(failed)), now(), 1 if copied else 0))
+
+
+def _history(con, layer, n) -> List[set]:
+    rows = con.execute("SELECT failed_items FROM baseline WHERE layer=? AND copied=0 "
+                       "ORDER BY recorded_at DESC, rowid DESC LIMIT ?", (layer, int(n))).fetchall()
+    return [set(json.loads(r[0])) for r in rows]
+
+
+def known_red(con, layer, n=5) -> set:
+    """已知紅：最近 n 次 main 完整結果裡，任何一次紅過的項目（抖動項也算，不計成新紅）。"""
+    out = set()
+    for h in _history(con, layer, n):
+        out |= h
+    return out
+
+
+def flaky_items(con, layer="gate", n=5) -> set:
+    """抖動項：最近 n 次 main 結果裡，有的紅、有的綠的項目（至少要有兩次量測）。"""
+    h = _history(con, layer, n)
+    if len(h) < 2:
+        return set()
+    return set.union(*h) - set.intersection(*h)
 
 
 # ---- 狀態 ----
@@ -166,8 +188,11 @@ def resume_branch(con, name, by="?"):
     audit(con, by, "resume", {"branch": name})
 
 
-def set_paused(con, paused: bool, by="?"):
+def set_paused(con, paused: bool, by="?", reason: Optional[str] = None):
     set_meta(con, "paused", "1" if paused else "0")
+    set_meta(con, "pause_reason", (reason or ("人工暫停（%s）" % by)) if paused else "")
+    if paused:
+        set_meta(con, "pause_by", by)
     audit(con, by, "pause" if paused else "resume_all")
 
 

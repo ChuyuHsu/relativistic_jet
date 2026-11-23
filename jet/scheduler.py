@@ -19,13 +19,14 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from . import store
 from .batch import GREEN, RED, PENDING, ladder, judge
-from .cores import CorePool, foreign_busy as _foreign_busy
+from .cores import CorePool, PhysicalPool, foreign_busy as _foreign_busy
 from .executor import Job
 from .gitops import MainMoved
 from .states import Event, State
 
 log = logging.getLogger("jet")
 S = State
+MAX_OVERLOAD_RETRY = 2        # 超載造成的逾時最多重排幾次，再逾時就當是測試自己慢
 
 
 @dataclass
@@ -39,6 +40,7 @@ class Running:
     head_sha: Optional[str] = None
     size: Optional[int] = None
     batch_id: Optional[int] = None
+    units: int = 0            # 占了幾個核單位（邏輯核或實體核，依設定）
 
 
 @dataclass
@@ -51,6 +53,13 @@ class ActiveBatch:
     probes: Dict[int, str] = field(default_factory=dict)
     failed: Dict[int, Set[str]] = field(default_factory=dict)   # 大小 → 新增的紅項
     launched: Set[Tuple[str, int]] = field(default_factory=set)
+
+
+def make_pool(cfg):
+    """依設定建核池：unit=physical 時以實體核為單位（兄弟執行緒不分給兩個槽）。"""
+    if cfg.core_unit == "physical":
+        return PhysicalPool(cfg.pool, cfg.threads)
+    return CorePool(cfg.pool)
 
 
 def default_resources_ok(cfg) -> bool:
@@ -78,13 +87,14 @@ class Scheduler:
         self.clock = clock
         self.resources_ok = resources_ok or (lambda: default_resources_ok(cfg))
         self.foreign_busy = foreign_busy
-        self.pool = CorePool(cfg.pool)
+        self.pool = make_pool(cfg)
         self.jobs: Dict[int, Running] = {}
         self.batch: Optional[ActiveBatch] = None
         self.main: str = ""
         self._bad: Optional[Set[int]] = None
         self._start_fail = 0
         self._infra_streak = 0
+        self._overload: Dict[str, int] = {}
         self._stop = False
         self.async_fetch = async_fetch      # 正式跑用背景執行緒 fetch，第一次抓一個大 repo 不會卡住主迴圈
         self._fetch_thread: Optional[threading.Thread] = None
@@ -147,10 +157,10 @@ class Scheduler:
 
     def update_config(self, cfg):
         """設定檔熱重載（已檢查過格式）。核池變了就重建，保留還在用的核。"""
-        if cfg.pool != self.cfg.pool:
+        if (cfg.pool, cfg.core_unit, cfg.threads) != (self.cfg.pool, self.cfg.core_unit, self.cfg.threads):
             old = self.pool
-            self.pool = CorePool(cfg.pool)
-            self.pool.busy = {c for c in old.busy if c in set(cfg.pool)}
+            self.pool = make_pool(cfg)
+            self.pool.busy = {c for c in old.busy if c in set(self.pool.all)}
         self.cfg = cfg
         t = getattr(self.executor, "test_cmd", None)
         if t is not None:
@@ -454,7 +464,7 @@ class Scheduler:
             return False
         self._start_fail = 0
         self.con.execute("UPDATE runs SET pgid=? WHERE id=?", (getattr(handle, "pgid", None), rid))
-        self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id)
+        self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id, ncores)
         return True
 
     def _release_job(self, rid, status):
@@ -504,8 +514,9 @@ class Scheduler:
         """基礎設施錯誤（測試根本沒跑起來）：重跑；連續 3 次就暫停整個排隊器並發待辦事件。"""
         self._infra_streak += 1
         if self._infra_streak >= 3 and not store.is_paused(self.con):
-            store.set_paused(self.con, True, "scheduler")
-            store.add_event(self.con, "queue_error", None, f"{key} 連續基礎設施錯誤，排隊器已暫停")
+            why = f"{key} 連續基礎設施錯誤 {self._infra_streak} 次（測試根本沒跑起來），排隊器自己暫停；查完用 jet resume 恢復"
+            store.set_paused(self.con, True, "scheduler", why)
+            store.add_event(self.con, "queue_error", None, why)
         return True
 
     # ---------- 基準 ----------
@@ -529,13 +540,30 @@ class Scheduler:
         for layer in ("gate", "selftest"):
             b = store.get_baseline(self.con, src, layer)
             if b is not None:
-                store.set_baseline(self.con, dst, layer, b)
+                store.set_baseline(self.con, dst, layer, b, copied=True)
         store.set_meta(self.con, "last_main", dst)
 
     def _set_baseline_all(self, sha, failed):
         for layer in ("gate", "selftest"):
             store.set_baseline(self.con, sha, layer, failed)
         store.set_meta(self.con, "last_main", sha)
+        store.set_meta(self.con, "baseline_history", self.cfg.baseline_history)
+        self._check_flaky()
+
+    def _known_red(self, layer, main_sha) -> Set[str]:
+        """判新紅用的「已知紅」：這個 main 的基準加最近 N 次 main 紅過的項目。"""
+        return (store.get_baseline(self.con, main_sha, layer) or set()) | \
+            store.known_red(self.con, layer, self.cfg.baseline_history)
+
+    def _check_flaky(self):
+        """基準裡時紅時綠的項目：發一筆待辦事件（同一組只發一次），讓人去修測試。"""
+        fl = sorted(store.flaky_items(self.con, "gate", self.cfg.baseline_history))
+        key = ",".join(fl)
+        if fl and store.get_meta(self.con, "flaky_notified") != key:
+            store.set_meta(self.con, "flaky_notified", key)
+            store.add_event(self.con, "flaky", None, "main 上時紅時綠：" + key[:400])
+        elif not fl:
+            store.set_meta(self.con, "flaky_notified", "")
 
     def _on_baseline(self, j, res):
         if res.status in ("infra", "timeout", "cancelled"):
@@ -555,9 +583,12 @@ class Scheduler:
         c = self.con
         rows = [r for r in store.list_branches(c, S.PENDING.value) if r["docs_only"] != 1]
         rows.sort(key=lambda r: (-r["prio_override"], r["seen_at"], r["name"]))
-        in_use = sum(len(j.cores) for j in self.jobs.values() if j.kind == "selftest")
+        in_use = sum(j.units for j in self.jobs.values() if j.kind == "selftest")
+        slots = sum(1 for j in self.jobs.values() if j.kind == "selftest")
         wanted = self.batch is not None or bool(store.list_branches(c, S.QUEUED.value))
         for r in rows:
+            if self.cfg.max_selftest_slots and slots >= self.cfg.max_selftest_slots:
+                break                                         # 同時自測槽數上限（硬上限，不論有沒有批測）
             if wanted and in_use + self.cfg.selftest_cores > self.cfg.reserve_for_selftest:
                 break
             if r["parent"]:
@@ -576,6 +607,7 @@ class Scheduler:
                 break
             store.apply_event(c, r["name"], Event.SELFTEST_START)
             in_use += self.cfg.selftest_cores
+            slots += 1
 
     def _on_selftest(self, j, res):
         c = self.con
@@ -586,7 +618,15 @@ class Scheduler:
             self._infra_retry("selftest:" + j.branch)
             store.apply_event(c, j.branch, Event.RETRY)
             return
-        base = store.get_baseline(c, self.main, "selftest") or set()
+        if res.status == "timeout" and getattr(res, "overloaded", False) \
+                and self._overload.get(j.branch, 0) < MAX_OVERLOAD_RETRY:
+            # 機器超載造成的逾時不是分支的錯：重排，不退回（連續幾次還逾時才算它的）
+            self._overload[j.branch] = self._overload.get(j.branch, 0) + 1
+            store.add_info_event(c, "overload", j.branch, f"自測逾時但系統超載（工作只拿到 {res.cpu_s or 0:.0f} 秒 CPU），重排")
+            store.apply_event(c, j.branch, Event.RETRY)
+            return
+        self._overload.pop(j.branch, None)
+        base = self._known_red("selftest", self.main)
         if self._red(res, base):
             why = "自測逾時" if res.status == "timeout" else \
                 "自測紅：" + ",".join(sorted(set(res.failed_items) - base)) 
@@ -787,7 +827,14 @@ class Scheduler:
             self._infra_retry(f"batch:{j.kind}:{j.size}")
             b.launched.discard((j.kind, j.size))
             return
-        base = store.get_baseline(self.con, b.base_sha, "gate") or set()
+        base = self._known_red("gate", b.base_sha)
+        if res.status == "timeout" and getattr(res, "overloaded", False) \
+                and self._overload.get(f"b{j.size}", 0) < MAX_OVERLOAD_RETRY:
+            self._overload[f"b{j.size}"] = self._overload.get(f"b{j.size}", 0) + 1
+            store.add_info_event(self.con, "overload", None, f"批測點 {j.size} 逾時但系統超載，重跑")
+            b.launched.discard((j.kind, j.size))
+            return
+        self._overload.pop(f"b{j.size}", None)
         red = self._red(res, base)       # 逾時＝這個測點紅，照一般流程找兇手
         target = b.results if j.kind == "point" else b.probes
         target[j.size] = RED if red else GREEN

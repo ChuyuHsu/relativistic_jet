@@ -45,6 +45,8 @@ class JobResult:
     exit_code: Optional[int]
     failed_items: List[str] = field(default_factory=list)
     duration_s: float = 0.0
+    cpu_s: Optional[float] = None      # 逾時時：整個工作群組用掉的 CPU 秒數
+    overloaded: bool = False           # 逾時、而且當時系統超載、工作拿到的 CPU 遠低於配給：不是測試的錯
 
 
 class ExecutorError(Exception):
@@ -77,6 +79,8 @@ class Handle:
     deadline: float
     log: Optional[IO] = None
     result: Optional[JobResult] = None
+    cpu_s: Optional[float] = None
+    overloaded: bool = False
 
 
 def mem_available_mb(meminfo: str = "/proc/meminfo") -> Optional[int]:
@@ -146,7 +150,10 @@ class Executor:
 
     def __init__(self, test_cmd: Optional[List[str]] = None, min_free_mem_mb: int = 0,
                  min_free_disk_mb: int = 0, grace_s: float = 3.0,
-                 baseline_cpus: Optional[Set[int]] = None):
+                 baseline_cpus: Optional[Set[int]] = None, overload_cpu_ratio: float = 0.6,
+                 overload_psi: float = 20.0):
+        self.overload_cpu_ratio = overload_cpu_ratio
+        self.overload_psi = overload_psi
         self.test_cmd = list(test_cmd) if test_cmd else None
         self.min_free_mem_mb = min_free_mem_mb
         self.min_free_disk_mb = min_free_disk_mb
@@ -233,9 +240,19 @@ class Executor:
             self._sweep(handle, signal.SIGKILL, wait_s=5.0)   # 領頭的走了，留下的孫行程一律清掉
             return self._finish(handle, None)
         if time.monotonic() >= handle.deadline:
+            cpu = _cores.group_cpu_seconds(handle.pgid)        # 殺之前先量
+            handle.cpu_s = cpu
+            handle.overloaded = self._was_overloaded(handle, cpu)
             self._terminate(handle)
             return self._finish(handle, "timeout")
         return None
+
+    def _was_overloaded(self, h: Handle, cpu_s: float) -> bool:
+        """逾時是不是機器超載造成的：系統超載，而且這個工作實際拿到的 CPU 遠低於「牆鐘×核數」。
+        兩個條件都要成立；單純卡住不動（機器不忙）仍然算測試的錯。"""
+        wall = max(time.monotonic() - h.started, 1e-6)
+        ratio = cpu_s / (wall * max(len(h.job.cores), 1))
+        return ratio < self.overload_cpu_ratio and _cores.system_overloaded(self.overload_psi)
 
     def cancel(self, handle: Handle) -> JobResult:
         """取消：整群殺掉（已經結束的回原結果）。"""
@@ -267,7 +284,8 @@ class Executor:
             status = "fail" if items else "pass"   # 退出碼 0 但報告有紅項：以報告為準
         else:
             status = "fail" if items else "infra"  # 退出碼 1 卻零個紅項：前後矛盾，重跑
-        h.result = JobResult(status=status, exit_code=rc, failed_items=items, duration_s=dur)
+        h.result = JobResult(status=status, exit_code=rc, failed_items=items, duration_s=dur,
+                             cpu_s=h.cpu_s, overloaded=h.overloaded and status == "timeout")
         self._live.discard(h)
         return h.result
 

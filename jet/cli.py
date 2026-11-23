@@ -79,7 +79,7 @@ def _table(rows: List[List[str]], head: List[str]) -> str:
 def cmd_status(args):
     s = _client(args).get("/status")
     c = s["counts"]
-    lines = [f"狀態：{'已暫停' if s['paused'] else '運作中'}　排隊 {s['queue_len']}　待辦 {s['open_todo']}",
+    lines = [f"狀態：{'已暫停（' + (s.get('pause_reason') or '原因不明') + '）' if s['paused'] else '運作中'}　排隊 {s['queue_len']}　待辦 {s['open_todo']}",
              "各狀態：" + "　".join(f"{STATE_LABEL.get(k, k)} {v}" for k, v in c.items() if v)]
     for r in s["running"]:
         lines.append(f"  跑著：#{r['id']} {r['kind']}/{r['layer']} {r.get('branch') or ''} 自 {_ts(r['started_at'])}")
@@ -90,6 +90,7 @@ def cmd_status(args):
         lines.append(f"（資料庫曾在 {_ts(float(s['restored_at']))} 從備份還原）")
     if getattr(args, "verbose", False):
         lines += _verbose_lines(s.get("scheduler") or {}, s.get("now") or time.time())
+        lines.append("抖動項（main 上時紅時綠，已不計成新紅，請修測試）：" + ("、".join(s["flaky"]) if s.get("flaky") else "無"))
     _out(args, s, "\n".join(lines))
 
 

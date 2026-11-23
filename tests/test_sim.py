@@ -23,10 +23,14 @@ class Sim:
             "git": {"remote": "x", "scope": r.choice(["all", "tracked"])}, "paths": {"state_dir": os.path.join(tmp, "st")},
             "cores": {"pool": f"0-{r.choice([5, 11, 31])}", "selftest_cores": 1, "batch_cores": 1,
                       "reserve_for_selftest": r.choice([0, 2, 4])},
-            "limits": {"batch_max": r.choice([2, 4, 8, 16]), "double_fail_halt": r.choice([2, 3])},
+            "limits": {"batch_max": r.choice([2, 4, 8, 16]), "double_fail_halt": r.choice([2, 3]), "baseline_history": 500},
             "policy": {"require_approval": r.random() < 0.7}, "commands": {"test": ["t"]}})
         self.con = db.connect(os.path.join(tmp, "a.sqlite"))
         self.repo = FakeRepo()
+        self.flaky = r.random() < 0.5                       # 抖動項維度：已知在 main 紅過的項目隨機紅
+        if self.flaky:
+            store.set_baseline(self.con, "seed-main", "gate", {"flk"})
+            store.set_baseline(self.con, "seed-main", "selftest", {"flk"})
         self.repo.main_red = {"old"} if r.random() < 0.3 else set()
         self.ff_fail = 0.0
         self.violations = []
@@ -53,9 +57,11 @@ class Sim:
         self.make_sched()
         self.counter = 0
         self.pending_parent = []
+        self.stacked = set()                       # 曾經堆疊過的分支（可能因為父分支紅而被退，不算無辜判斷）
 
     def make_sched(self):
-        self.ex = FakeExecutor(self.repo, self.r.choice([0, 1, 2]))
+        self.ex = FakeExecutor(self.repo, self.r.choice([0, 1, 2]),
+                               flaky="flk" if self.flaky else None, flaky_p=0.3, rng=self.r)
         self.s = Scheduler(self.cfg, self.con, self.repo, self.ex, clock=lambda: 1000.0)
 
     def chaos(self, p=1.0):
@@ -69,6 +75,7 @@ class Sim:
                      conflict_with=({f"b{r.randint(1, self.counter)}"} if r.random() < 0.15 else ()))
             if r.random() < 0.3 and self.counter > 1:
                 self.pending_parent.append((n, f"b{r.randint(1, self.counter - 1)}"))
+                self.stacked.add(n)
         for n, par in list(self.pending_parent):
             if store.get_branch(self.con, n) and store.get_branch(self.con, par):
                 try:
@@ -86,6 +93,8 @@ class Sim:
                     par = r.choice(cand) if cand else None
                 try:
                     store.track(self.con, n, par, "sim")
+                    if par:
+                        self.stacked.add(n)
                 except store.TrackError:
                     pass
             if r.random() < 0.05 * p:
@@ -152,6 +161,14 @@ class SimTest(unittest.TestCase):
                     if stable >= 15 and not sim.s.jobs and sim.s.batch is None:
                         break
                 self.assertEqual(sim.violations, [], f"seed={seed}")
+                if sim.flaky:                                       # 抖動項不能讓無辜分支被退
+                    for x in store.list_branches(sim.con):
+                        b = sim.repo.branches.get(x["name"]) or sim.repo.merged.get(x["name"])
+                        innocent = b and x["name"] not in sim.stacked and not b["reds"] and not b["gate_reds"] and not b["conflict_main"] \
+                            and not b["conflict_with"]
+                        why = x["reject_reason"] or ""
+                        if innocent and x["state"] in ("rejected", "halted") and "紅" in why and "逾時" not in why:
+                            self.fail(f"seed={seed} 無辜分支 {x['name']} 被抖動項退回：{why}")
                 for x in store.list_branches(sim.con):
                     st = x["state"]
                     waiting_parent = x["parent"] and (store.get_branch(sim.con, x["parent"]) or {"state": ""})["state"] in (
