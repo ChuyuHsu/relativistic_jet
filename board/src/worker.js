@@ -1,4 +1,5 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
+import { bearerIs } from './auth.js';
 import { handleRelay } from './relay.js';
 import { handleHook, queueCall, flush, refreshPhase } from './queue.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄。
@@ -19,12 +20,9 @@ export async function handle(req, env, ctx) {
   if (path.startsWith('/relay/')) return handleRelay(req, env);
   if (path === '/hooks/queue') return handleHook(req, env, ctx);
   const write = req.method !== 'GET';
-  if (write) {
-    const auth = req.headers.get('authorization') || '';
-    if (!env.TOKEN || auth !== `Bearer ${env.TOKEN}`) return json({ error: 'unauthorized' }, 401);
-  }
+  // 寫入要 TOKEN；讀取要 TOKEN 或 READ_TOKEN（讀取也會用看板自己的 QUEUE_TOKEN 代查排隊器，不能公開）
+  if (!(write ? bearerIs(req, env.TOKEN) : bearerIs(req, env.TOKEN, env.READ_TOKEN))) return json({ error: 'unauthorized' }, 401);
   let m;
-  // 看板用：讀取不需權杖（卡片內容不含機密；如要鎖，改成也驗權杖）
   if (req.method === 'GET' && path === '/api/cards') {
     const status = url.searchParams.get('status');
     const rows = status

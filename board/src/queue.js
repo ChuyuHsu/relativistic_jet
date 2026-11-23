@@ -1,6 +1,7 @@
 // 排隊器／CI 對接：收事件（/hooks/queue）、代呼叫排隊器的放行（經門牌）、攢批叫醒負責串（routine fire）。
 // 機密：HOOK_TOKEN（排隊器送事件用）、QUEUE_TOKEN（看板呼叫排隊器寫入用）、ROUTINE_KEY（叫醒用）。
 // 設定：QUEUE_RELAY（門牌名，預設 queue）、ROUTINE_ID、WAKE_BATCH_S（預設 300）、WAKE_MAX_PER_HOUR（預設 10）。
+import { bearerIs } from './auth.js';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -12,8 +13,7 @@ const KIND_TEXT = { tested_red: '自測紅', rejected: '被退回', conflict: '�
 
 export async function handleHook(req, env, ctx) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
-  const auth = req.headers.get('authorization') || '';
-  if (!env.HOOK_TOKEN || auth !== `Bearer ${env.HOOK_TOKEN}`) return json({ error: 'unauthorized' }, 401);
+  if (!bearerIs(req, env.HOOK_TOKEN)) return json({ error: 'unauthorized' }, 401);
   const body = await req.json().catch(() => null);
   if (!body || !Array.isArray(body.events)) return json({ error: 'body 要有 events 陣列' }, 400);
   const db = env.DB, source = String(body.source || 'queue');

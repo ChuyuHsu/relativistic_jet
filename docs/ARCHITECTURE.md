@@ -18,6 +18,7 @@ jet/            核心套件（只用標準庫，Python ≥ 3.9）
   api.py        HTTP 路由表
   notify.py     通知（M1）
   cli.py        命令列
+board/          選配的任務看板（Cloudflare Worker＋D1，JavaScript，單獨用 wrangler 部署；核心不依賴它，細節見 board/README.md）
 examples/       合成範例專案（測試指令、分類指令、範例設定）
 tests/          unittest，雲端容器可跑，不需要任何專案
 docs/           DESIGN（設計）、ARCHITECTURE（本檔）

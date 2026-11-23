@@ -24,6 +24,13 @@ function draw(){
   list.innerHTML=l.length?l.map(c=>`<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.phase&&cur==='claimed'?'・'+esc(P[c.phase]||c.phase):''}${c.branch?'・'+esc(c.branch):''}</span></div>`).join(''):'<div class="m">沒有</div>';
 }
 tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
-async function load(){try{cards=await (await fetch('/api/cards?live=1')).json();draw()}catch(e){list.textContent='讀取失敗'}}
+let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}
+async function load(){
+  try{
+    const r=await fetch('/api/cards?live=1',{headers:{authorization:'Bearer '+tok}});
+    if(r.status===401){tok=prompt('輸入讀取權杖')||'';try{localStorage.setItem('rt',tok)}catch(e){}; if(!tok){list.textContent='需要權杖';return} return load()}
+    cards=await r.json();draw()
+  }catch(e){list.textContent='讀取失敗'}
+}
 load();setInterval(load,30000);
 </script></body></html>

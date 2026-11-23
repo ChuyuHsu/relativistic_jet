@@ -8,9 +8,14 @@ const call = (e, method, path, body, token = 't') =>
   handle(new Request('http://x' + path, { method, headers: { authorization: `Bearer ${token}` }, body: body ? JSON.stringify(body) : undefined }), e);
 const mk = (e, id, priority = 100, area = '') => call(e, 'POST', '/api/cards', { id, title: id, priority, area });
 
-test('沒權杖不能寫，能讀', async () => {
-  const e = env();
+test('沒權杖不能寫也不能讀；READ_TOKEN 只能讀', async () => {
+  const e = { ...env(), READ_TOKEN: 'rd' };
   assert.equal((await call(e, 'POST', '/api/cards', { id: 'a', title: 'a' }, 'bad')).status, 401);
+  assert.equal((await call(e, 'GET', '/api/cards', undefined, 'bad')).status, 401);
+  assert.equal((await handle(new Request('http://x/api/cards'), e)).status, 401);
+  assert.equal((await call(e, 'GET', '/api/cards/x/tests', undefined, 'bad')).status, 401);
+  assert.equal((await call(e, 'GET', '/api/cards', undefined, 'rd')).status, 200);
+  assert.equal((await call(e, 'POST', '/api/cards', { id: 'a', title: 'a' }, 'rd')).status, 401);
   assert.equal((await call(e, 'GET', '/api/cards')).status, 200);
 });
 

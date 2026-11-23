@@ -1,5 +1,6 @@
 // 門牌轉送：固定網址 /relay/<名字>/* 反向代理到「目前登記的上游」（例如會變動的臨時隧道網址）。
 // env.REGISTER_TOKEN：登記權杖（Worker 機密）。env.RELAY_SUFFIXES：允許的上游網域後綴，逗號分隔。
+import { bearerIs } from './auth.js';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const DROP = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'cf-connecting-ip', 'cf-ray', 'x-forwarded-for', 'x-real-ip']);
@@ -21,8 +22,7 @@ export async function handleRelay(req, env) {
   const row = await env.DB.prepare('SELECT upstream,updated_at FROM relays WHERE name=?').bind(name).first();
 
   if (!m[2] && req.method === 'PUT') {
-    const auth = req.headers.get('authorization') || '';
-    if (!env.REGISTER_TOKEN || auth !== `Bearer ${env.REGISTER_TOKEN}`) return json({ error: 'unauthorized' }, 401);
+    if (!bearerIs(req, env.REGISTER_TOKEN)) return json({ error: 'unauthorized' }, 401);
     let raw = (await req.text()).trim();
     if (raw.startsWith('{')) { try { raw = String(JSON.parse(raw).url || '').trim(); } catch { raw = ''; } }
     const suffixes = (env.RELAY_SUFFIXES || 'trycloudflare.com').split(',').map(s => s.trim()).filter(Boolean);
