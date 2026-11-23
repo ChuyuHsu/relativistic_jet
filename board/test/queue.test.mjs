@@ -529,3 +529,9 @@ test('放棄防呆：接手分支還不存在時 target 是 main，仍算對得�
   const r = await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, target: 'main' })).json();
   assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'c1'), 'dropped');
 });
+
+test('desired 唯讀：TOKEN 也能讀，壞權杖 401', async () => {
+  const e = mkenv({ READ_TOKEN: 'rd' });
+  for (const tk of ['t', 'h', 'rd']) assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, tk)).status, 200);
+  assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 'bad')).status, 401);
+});

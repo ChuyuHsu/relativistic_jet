@@ -77,7 +77,7 @@ async function log(db, id, actor, note) {
 // 給排隊器定時拉：所有「已認領、有分支、還沒合入」的卡 = 排隊器該管的分支（已放棄、釋放的不在內）。出錯一律回非 200。
 async function desired(req, env) {
   if (req.method !== 'GET') return json({ error: 'GET only' }, 405);
-  if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
+  if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
   try {
     const rows = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' AND branch IS NOT NULL AND (phase IS NULL OR phase!='merged') AND dropping_at IS NULL ORDER BY priority,created_at").all()).results;
     const out = [];
