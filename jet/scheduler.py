@@ -707,6 +707,10 @@ class Scheduler:
             store.add_info_event(c, "overload", j.branch, f"自測逾時但系統超載（工作只拿到 {res.cpu_s or 0:.0f} 秒 CPU），重排")
             store.apply_event(c, j.branch, Event.RETRY)
             return
+        if self.source is not None and (j.approved_sha, j.retest) != (row["approved_sha"], row["retest"]):
+            self._overload.pop(j.branch, None)               # 這是照舊放行（或舊重測計數）測的結果：丟掉，照現在的放行重測
+            store.apply_event(c, j.branch, Event.RETRY)
+            return
         self._overload.pop(j.branch, None)
         base = self._known_red("selftest", self.main)
         if self._red(res, base) and self._ancestor_unproven(j.branch):
@@ -1275,7 +1279,11 @@ class Scheduler:
                 return
             for n, _, _ in b.members[:m]:
                 store.apply_event(c, n, Event.BATCH_MERGED, merged_sha=final)
-        if v.culprit:
+        crow = store.get_branch(c, b.members[v.culprit - 1][0]) if v.culprit else None
+        if crow is not None and self.source is not None and \
+                b.ctx.get(crow["name"], (crow["approved_sha"], crow["retest"])) != (crow["approved_sha"], crow["retest"]):
+            pass                                              # 兇手是照舊放行測出來的：不退回，下面會把它留回隊伍重測
+        elif v.culprit:
             name = b.members[v.culprit - 1][0]
             row = store.get_branch(c, name)
             items = ",".join(sorted(b.failed.get(v.culprit, set())))

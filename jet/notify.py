@@ -95,7 +95,7 @@ def check_destinations(dests: Any) -> List[Dict[str, Any]]:
             kinds = list(ALL_KINDS)
         if not isinstance(kinds, list) or not kinds or not all(k in ALL_KINDS for k in kinds):
             raise NotifyError("kinds 必須是 " + "、".join(ALL_KINDS) + " 的非空陣列，或 \"all\"")
-        bs = d.get("batch_seconds", 180)
+        bs = d.get("batch_seconds", 60)
         if isinstance(bs, bool) or not isinstance(bs, (int, float)) or bs < 0:
             raise NotifyError("batch_seconds 必須是 ≥ 0 的數字")
         out.append({"name": name, "url": url, "token_file": tf, "kinds": list(kinds), "batch_s": bs})
@@ -201,7 +201,7 @@ class Notifier:
     """主行程每輪 tick 呼叫一次 `tick(con)`。可有多個目的地，各自有進度（meta 的 notify_cursor:<名字>）：
     事件依 id 由小到大送，同一目的地同時只有一批在送，成功才前進；失敗保留重送（退避），不丟、不亂序。"""
 
-    def __init__(self, url: Optional[str] = None, batch_s: int = 180, timeout: float = 10.0,
+    def __init__(self, url: Optional[str] = None, batch_s: int = 60, timeout: float = 10.0,
                  poster: Optional[Callable[..., None]] = None,
                  destinations: Optional[List[Dict[str, Any]]] = None):
         self.timeout = timeout
@@ -211,7 +211,7 @@ class Notifier:
             self.dests.append(_Dest("default", check_url(url), None, NOTIFY_KINDS, max(0, int(batch_s)), True))
         for d in destinations or []:
             self.dests.append(_Dest(d["name"], d["url"], d.get("token_file"), d["kinds"],
-                                    d.get("batch_s", 180), False))
+                                    d.get("batch_s", 60), False))
 
     @property
     def url(self):

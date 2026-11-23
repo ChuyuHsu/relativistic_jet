@@ -101,7 +101,7 @@ def parse(d: dict) -> Config:
         test_cmd=_need(cmds, "test", list),
         classify_cmd=cmds.get("classify"),
         notify_url=notify.get("url"),
-        notify_batch_s=notify.get("batch_seconds", 180),
+        notify_batch_s=notify.get("batch_seconds", 60),
         notify_destinations=_parse_destinations(notify.get("destinations")),
         listen=api.get("listen", "127.0.0.1:8080"),
         read_key_file=api.get("read_key_file"),

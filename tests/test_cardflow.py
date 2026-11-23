@@ -597,7 +597,7 @@ class AuditFixes(CF):
         self.tick(1)
         self.go(until=lambda: bool(self.events("rejected", "a")) or self.state("a") == "rejected")
         for e in self.events("tested_red", "a") + self.events("rejected", "a"):
-            self.assertEqual(e["approved_sha"], "a-1")             # 開跑時依據的放行版本，不是現況
+            self.assertEqual(e["approved_sha"], "a-2")             # 舊放行的結果丟掉；留下的事件都是新放行測出來的
 
     def test_m8_repull_must_succeed_before_push(self):
         self.mk(delay=1)
@@ -649,6 +649,52 @@ class AuditFixes(CF):
         self.repo.add("a")
         self.list = [{"branch": "a", "retest": 0, "approved_sha": "a-1"}, {"branch": "a", "retest": 0}]
         self.go(until=lambda: self.merged() == {"a"})
+
+
+class StaleResult(CF):
+    def test_n1_selftest_result_from_old_approval_is_dropped(self):
+        self.mk(delay=3)
+        self.repo.add("a", reds={"t"}); self.appr("a")
+        self.go(until=lambda: self.state("a") == "selftesting")
+        self.repo.push_new("a", reds={"t"})                       # 單純 rebase：內容一樣
+        self.appr("a")                                            # 重新放行新版本
+        old_ap = "a-1"
+        for _ in range(8):
+            self.tick(1)
+            if self.state("a") == "rejected":
+                break
+        self.assertEqual(self.state("a"), "rejected")             # 新放行的版本自己測出紅，才算退回
+        for e in self.events("rejected", "a"):
+            self.assertEqual(e["approved_sha"], "a-2")
+            self.assertNotEqual(e["approved_sha"], old_ap)
+        self.assertEqual(self.selftests(), 2)                     # 舊的丟掉、新的重測一次
+
+    def test_n1_selftest_drop_does_not_reject_when_new_run_green(self):
+        self.mk(delay=3)
+        self.repo.add("a", reds={"t"}); self.appr("a")
+        self.go(until=lambda: self.state("a") == "selftesting")
+        self.repo.push_new("a", reds=())                          # 內容其實變了（紅項沒了）→ superseded，不是這條路徑
+        self.appr("a")
+        self.go(until=lambda: self.merged() == {"a"})
+
+    def test_n1_batch_culprit_from_old_approval_is_not_rejected(self):
+        self.mk(delay=3)
+        self.repo.add("a", gate_reds={"g"}); self.appr("a")
+        self.go(until=lambda: self.state("a") == "batching")
+        self.repo.push_new("a", gate_reds={"g"})
+        self.appr("a")                                            # 換了放行版本、內容相同
+        self.freeze_poll()
+        self.s.source._next = 0
+        rej = []
+        for _ in range(6):
+            self.tick(1)
+            rej += [e["approved_sha"] for e in self.events("rejected", "a")]
+            if rej:
+                break
+        self.assertNotIn("a-1", rej)                              # 舊放行測出來的紅不能當成退回
+        self.go(until=lambda: self.state("a") == "rejected")
+        for e in self.events("rejected", "a"):
+            self.assertEqual(e["approved_sha"], "a-2")
 
 
 class UnknownGrace(CF):
