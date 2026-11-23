@@ -25,6 +25,8 @@ function draw(){
 }
 tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
 let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}
+// 網址帶 ?t=讀取權杖：記進瀏覽器後立刻從網址列拿掉（之後直接開網址就行）
+try{const q=new URLSearchParams(location.search).get('t');if(q){tok=q;localStorage.setItem('rt',q);history.replaceState(null,'',location.pathname)}}catch(e){}
 async function load(){
   try{
     const r=await fetch('/api/cards?live=1',{headers:{authorization:'Bearer '+tok}});
