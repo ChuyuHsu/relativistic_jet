@@ -1,6 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, autoFlush, outboxClaim, outboxAck, outboxPending, resultOf, stuckCheck } from './queue.js';
+import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxPending, resultOf, stuckCheck } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
@@ -30,7 +30,8 @@ const view = c => {
       ? { source: 'review', reason: c.rejected_reason, by: c.rejected_by }
       : { source: 'queue', halted: c.phase === 'halted', reason: result ? result.detail : null, failed_items: result ? result.failed_items : null };
   }
-  return { ...c, last_result: undefined, result, stage, rejected };
+  const dropped = ['dropping', 'dropped'].includes(stage) ? { superseded_by: c.superseded_by ?? null, discard_reason: c.discard_reason ?? null, unmerged: c.drop_unmerged == null ? null : !!c.drop_unmerged, checked_at: c.drop_checked_at ?? null } : null;
+  return { ...c, last_result: undefined, result, stage, rejected, dropped };
 };
 const CLEAR_REVIEW = 'submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL';
 const HEX = /^[0-9a-f]{7,64}$/i;
@@ -78,7 +79,7 @@ async function desired(req, env) {
   if (req.method !== 'GET') return json({ error: 'GET only' }, 405);
   if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
   try {
-    const rows = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' AND branch IS NOT NULL AND (phase IS NULL OR phase!='merged') ORDER BY priority,created_at").all()).results;
+    const rows = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' AND branch IS NOT NULL AND (phase IS NULL OR phase!='merged') AND dropping_at IS NULL ORDER BY priority,created_at").all()).results;
     const out = [];
     for (const c of rows) {
       const e = { branch: c.branch };
@@ -87,6 +88,16 @@ async function desired(req, env) {
       if (c.approved_commit) e.approved_sha = c.approved_commit;
       e.retest = c.retest;
       out.push(e);
+    }
+    if (new URL(req.url).searchParams.get('with') === 'drop_checks') {   // 放棄待查：排隊器要查這些分支有沒有改動漏掉
+      const dc = (await env.DB.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped' AND branch IS NOT NULL ORDER BY dropping_at").all()).results;
+      const drop_checks = [];
+      for (const c of dc) {
+        let sb = null;
+        if (c.superseded_by) { const sc = await env.DB.prepare('SELECT id,branch FROM cards WHERE id=?').bind(c.superseded_by).first(); sb = sc ? (sc.branch || branchFor(env, sc.id)) : null; }
+        drop_checks.push({ card: c.id, branch: c.branch, superseded_by_branch: sb });
+      }
+      return json({ cards: out, drop_checks });
     }
     return json(out);
   } catch { return json({ error: '看板內部錯誤' }, 500); }
@@ -246,7 +257,7 @@ export async function handle(req, env, ctx) {
     }
     if ('priority' in body) { sets.push('priority=?'); vals.push(Number(body.priority)); }
     let note = '修改';
-    let after = null;
+    let after = null, dropKids = false, dropping = false;
     if ('status' in body) {
       const stage = stageOf(c);
       const no = () => json({ error: `現在是「${stage}」，不能改成 ${body.status}`, stage }, 409);
@@ -255,20 +266,31 @@ export async function handle(req, env, ctx) {
         if (!['developing', 'reviewing', 'rejected'].includes(stage)) return no();
         sets.push('status=?', 'owner=NULL', 'owner_thread=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', 'stuck_notified_at=NULL', ...CLEAR_REVIEW.split(','));
         vals.push('open');
-      } else if (body.status === 'dropped') { // 放棄：除已合併外任何階段都可
-        if (stage === 'dropped') return json(view(c));
+      } else if (body.status === 'dropped') { // 放棄：除已合併外任何階段都可；有送審過的卡要先查有沒有改動漏掉（放棄防呆）
+        if (stage === 'dropped' || stage === 'dropping') return json(view(c));
         if (stage === 'merged') return no();
-        sets.push('status=?'); vals.push('dropped');
-        const kids = (await db.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(id).all()).results;   // 父卡被放棄：子卡被擋住，通知管理者改它的父卡
-        for (const k of kids) await notify(db, list(env.ADMIN_THREADS), k, 'parent_blocked', `父卡 ${id} 被放棄，請改接別張卡或直接接 main`);
+        if (!c.branch || !c.submitted_commit) {   // 沒有分支或從沒送審：沒東西可漏，直接放棄
+          sets.push('status=?'); vals.push('dropped');
+          dropKids = true;
+        } else {
+          const sup = body.superseded_by ? String(body.superseded_by) : '', why = String(body.discard_reason ?? '').trim();
+          if (!sup && !why) return json({ error: '這張卡已有送審過的改動，放棄要帶 superseded_by（由哪張未放棄的卡接手）或 discard_reason（真的不要了的原因）', stage }, 400);
+          if (sup) {
+            const sc = sup === id ? null : await db.prepare('SELECT status FROM cards WHERE id=?').bind(sup).first();
+            if (!sc || sc.status === 'dropped') return json({ error: 'superseded_by 必須是另一張存在且未放棄的卡' }, 409);
+          }
+          sets.push('dropping_at=?', 'superseded_by=?', 'discard_reason=?'); vals.push(now(), sup || null, why || null);
+          dropping = true;
+        }
       } else return json({ error: 'status 只能改成 open（還卡）或 dropped（放棄）；認領請用 /api/claim' }, 400);
-      after = `${stage} → ${body.status}` + (body.note ? `：${body.note}` : '');
+      after = (dropping ? `${stage} → 放棄待查` : `${stage} → ${body.status}`) + (body.note ? `：${body.note}` : '');
     }
     if (!sets.length) return json({ error: '沒有要改的欄位' }, 400);
     sets.push('updated_at=?'); vals.push(now());
     // 狀態轉移也帶舊狀態條件，避免兩個人同時改
     await db.prepare(`UPDATE cards SET ${sets.join(',')} WHERE id=? AND status=?`).bind(...vals, id, c.status).run();
     await log(db, id, actor, after || note);
+    if (dropKids) await notifyKids(env, id);
     return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
   }
   return json({ error: 'not found' }, 404);

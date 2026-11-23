@@ -131,6 +131,14 @@
 
 結局。任何動作都拒絕。合併後想改，另開一張卡。
 
+### `dropping` 放棄待查（放棄防呆）
+
+放棄一張**有送審過改動**的卡前，要先確認沒有改動被漏掉：
+- 卡沒有分支，或從沒送審過 → 沒東西可漏，直接 `dropped`。
+- 其餘：放棄請求必須帶 `superseded_by`（由哪張未放棄的另一張卡接手）或 `discard_reason`（真的不要了的原因，非空白），都沒帶回 400。帶了之後卡進 `dropping`（不算已放棄；清單上不再給排隊器測或合，改列在 `drop_checks`）。待查中的卡只能等結果，其他動作一律 409。
+- 排隊器查完回 `drop_checked` 事件（第 7 節）。帶 `superseded_by` 的：沒有不在 main 的改動、或接手的卡全都涵蓋（`covered`）才轉 `dropped`；否則放棄不成立，卡回到原階段，通知負責串與管理者（附缺的檔）。只帶 `discard_reason` 的：一律轉 `dropped`；有不在 main 的改動時另發通知給管理者（卡號、原因、缺的檔數），事後看一眼。
+- 卡片回傳 `dropped:{superseded_by, discard_reason, unmerged, checked_at}`（`dropping`、`dropped` 時才有）。
+
 ## 5. 四條一定要守的規則
 
 1. **放行跟著版本走。** 放行記的是「這個版本」。分支出現內容不同的新版本，放行自動失效，卡片回到開發中。只是重新接到最新主線、內容沒變的，放行繼續有效。內容有沒有變，由排隊器用內容指紋判斷，看板不判斷。
@@ -149,6 +157,8 @@
 | `parent_status` | 父卡不在這份清單上時才有：`open`（父卡還沒人領或被還卡）或 `dropped`（父卡被放棄） |
 | `approved_sha` | 放行的版本（沒放行就省略） |
 | `retest` | 重測計數 |
+
+另有放棄待查的卡：`GET /api/queue/desired?with=drop_checks` 回 `{cards:[…上表…], drop_checks:[{card, branch, superseded_by_branch|null}]}`（不帶 `with` 仍回純陣列，放棄待查的卡不在裡面）。
 
 排隊器只管清單上的分支；只有帶 `approved_sha` 的才會自測。`retest` 比上次看到的大，就把這條分支的退回與暫停清掉，從待自測重來。
 
@@ -173,6 +183,10 @@
 | 合併 | 已合併 | `merged` |
 
 排隊器自己的問題（當機、暫停、機器異常）不是任何一張卡的事件，另外通知管理者，卡片狀態不動。
+
+### `drop_checked`（放棄待查的結果）
+
+`{kind:'drop_checked', card, branch, target, unmerged:true|false, covered:true|false, missing_count, missing_files:[…最多 20]}`。`unmerged` 是這條分支有沒有不在 main 的改動；`covered` 是接手的卡（`superseded_by_branch`）是否涵蓋。只對 `dropping` 的卡有效，其他情況當過期丟掉。
 
 ## 8. 誰會被通知
 

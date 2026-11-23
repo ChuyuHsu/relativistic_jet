@@ -435,3 +435,54 @@ test('信箱 pending：HOOK／READ／TOKEN 都能查，不改狀態；領走後�
   await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' });
   assert.deepEqual(await (await g('h')).json(), { pending: 0, latest_id: 0 });
 });
+
+test('放棄防呆：沒送審直接放棄；送審過要帶 superseded_by 或 discard_reason，否則 400；放棄待查不算已放棄', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await claim(e, 'n1');                                                                    // 沒送審過：直接放棄
+  assert.equal((await (await call(e, 'PATCH', '/api/cards/n1', { status: 'dropped' })).json()).stage, 'dropped');
+  await claim(e, 'c1', 'th1'); await act(e, 'c1', 'submit', { commit: SHA });
+  const r = await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped' });
+  assert.equal(r.status, 400); assert.match((await r.json()).error, /superseded_by|discard_reason/);
+  assert.equal((await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: '  ' })).status, 400);
+  assert.equal((await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'nope' })).status, 409);
+  assert.equal((await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c1' })).status, 409);
+  await claim(e, 'c2', 'th2');
+  const d = await (await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' })).json();
+  assert.equal(d.stage, 'dropping'); assert.equal(d.dropped.superseded_by, 'c2'); assert.notEqual(d.status, 'dropped');
+  assert.equal((await act(e, 'c1', 'submit', { commit: SHA2 })).status, 409);               // 待查中不能動
+  const list = await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json();
+  assert.ok(!list.some(x => x.branch === br('c1')));                                         // 不再被測或合
+  const v2 = await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json();
+  assert.deepEqual(v2.drop_checks, [{ card: 'c1', branch: br('c1'), superseded_by_branch: br('c2') }]);
+  assert.ok(v2.cards.some(x => x.branch === br('c2')));
+});
+
+test('放棄防呆：drop_checked——covered 才放棄，否則回原階段並通知；只帶 discard_reason 一律放棄，有漏的通知總指揮', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await claim(e, 'k', 'thk', { parent: 'c1' }).catch(() => {});
+  await claim(e, 'c1', 'th1'); await claim(e, 'c2', 'th2'); await act(e, 'c1', 'submit', { commit: SHA });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' });
+  const bad = await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: false, missing_count: 2, missing_files: ['a.gd', 'b.gd'] })).json();
+  assert.equal(bad.applied, 1);
+  const c1 = await getCard(e, 'c1');
+  assert.notEqual(c1.stage, 'dropped'); assert.equal(c1.stage, 'reviewing'); assert.equal(c1.dropped, null);   // 回到原階段
+  const box = (await e.DB.prepare("SELECT * FROM outbox WHERE kind='drop_rejected'").all()).results;
+  assert.ok(box.some(b => b.owner_thread === 'th1') && box.some(b => b.owner_thread === 'adm') && /a\.gd、b\.gd/.test(box[0].detail));
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' });
+  await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: true });
+  const ok = await getCard(e, 'c1'); assert.equal(ok.stage, 'dropped'); assert.equal(ok.dropped.unmerged, true);
+  // 過期／重複的查驗結果不動卡
+  assert.equal((await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: false })).json()).stale, 1);
+  assert.equal((await getCard(e, 'c1')).stage, 'dropped');
+  // 只帶 discard_reason：一律放棄；有漏的通知總指揮
+  await claim(e, 'd1', 'thd'); await act(e, 'd1', 'submit', { commit: SHA });
+  await call(e, 'PATCH', '/api/cards/d1', { status: 'dropped', discard_reason: '方向作廢' });
+  await ev(e, 'd1', { kind: 'drop_checked', unmerged: true, covered: false, missing_count: 3, missing_files: ['x'] });
+  assert.equal(await stageOf(e, 'd1'), 'dropped');
+  assert.equal((await e.DB.prepare("SELECT * FROM outbox WHERE kind='drop_discarded'").all()).results.length, 1);
+  // 沒漏：不通知
+  await claim(e, 'd2', 'thd2'); await act(e, 'd2', 'submit', { commit: SHA });
+  await call(e, 'PATCH', '/api/cards/d2', { status: 'dropped', discard_reason: 'x' });
+  await ev(e, 'd2', { kind: 'drop_checked', unmerged: false, covered: true });
+  assert.equal((await e.DB.prepare("SELECT * FROM outbox WHERE kind='drop_discarded'").all()).results.length, 1);
+});

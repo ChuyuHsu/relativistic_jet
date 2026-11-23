@@ -1,11 +1,12 @@
 // 看板對外的階段線（由現有欄位算出，不另存）：
 // new 剛開卡 → developing 開發中 → reviewing 審查中 → selftesting 審查通過自測中 → batching 自測完畢批測中 → merged 已合併；
-// rejected 退回（審查退回，或排隊器 rejected／halted）；dropped 放棄。
-export const STAGES = ['new', 'developing', 'reviewing', 'selftesting', 'batching', 'merged', 'rejected', 'dropped'];
+// rejected 退回（審查退回，或排隊器 rejected／halted）；dropping 放棄待查（已申請放棄、等排隊器查有沒有改動漏掉）；dropped 放棄。
+export const STAGES = ['new', 'developing', 'reviewing', 'selftesting', 'batching', 'merged', 'rejected', 'dropping', 'dropped'];
 
 export function stageOf(c) {
   if (c.status === 'dropped') return 'dropped';
   if (c.phase === 'merged') return 'merged';
+  if (c.dropping_at) return 'dropping';
   if (c.status === 'open') return 'new';
   if (c.rejected_reason) return 'rejected';
   if (!c.submitted_commit) return 'developing';

@@ -12,7 +12,7 @@ const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red
 // 需要人處理、要叫醒負責串的種類
 const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);   // → 領卡的開發者
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者
-const KIND_TEXT = { parent_blocked: '父卡被放棄或不存在，子卡被擋住',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
+const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
 export async function handleHook(req, env, ctx) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
@@ -30,11 +30,36 @@ export async function handleHook(req, env, ctx) {
       const r = await db.prepare('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)').bind(`${source}:${String(e.id)}`).run();
       if (!r.meta.changes) { dup++; continue; }
     }
-    const card = branch ? await db.prepare('SELECT * FROM cards WHERE branch=?').bind(branch).first() : null;
+    let card = branch ? await db.prepare('SELECT * FROM cards WHERE branch=?').bind(branch).first() : null;
+    if (!card && kind === 'drop_checked' && e.card) card = await db.prepare('SELECT * FROM cards WHERE id=?').bind(String(e.card)).first();
     const detail = e.detail ? String(e.detail).slice(0, 500) : '';
     if (!card) {
       unmatched++;
       if (ADMIN_KINDS.has(kind)) await post(admins.length ? admins : [''], null, kind, branch, detail);   // 排隊器自己的問題：通知管理者
+      continue;
+    }
+    if (kind === 'drop_checked') {   // 放棄待查的結果：只對「放棄待查」的卡有效，其他一律當過期丟掉
+      if (!card || !card.dropping_at || card.status === 'dropped') { stale++; continue; }
+      const unmerged = e.unmerged === true, covered = e.covered === true, mc = Number(e.missing_count ?? 0) || 0;
+      const missing = Array.isArray(e.missing_files) ? e.missing_files.slice(0, 20).map(String).join('、') : '';
+      applied++;
+      // 帶 superseded_by：沒有不在 main 的改動，或接手的卡全都涵蓋了才放棄；只帶 discard_reason：一律放棄（有漏的另發通知）
+      const ok = !card.superseded_by ? true : (!unmerged || covered);
+      if (ok) {
+        const r = await db.prepare("UPDATE cards SET status='dropped',drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL AND status!='dropped'").bind(unmerged ? 1 : 0, now(), now(), card.id).run();
+        if (r.meta.changes === 1) {
+          await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(card.id, now(), source, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`).run();
+          await notifyKids(env, card.id);
+          if (unmerged && !card.superseded_by) await post(admins.length ? admins : [''], card, 'drop_discarded', card.branch, `缺 ${mc} 個檔${missing ? `：${missing}` : ''}；放棄原因：${card.discard_reason}`);
+        }
+      } else {   // 放棄不成立：回到原階段，通知負責串與管理者
+        const r = await db.prepare('UPDATE cards SET dropping_at=NULL,superseded_by=NULL,discard_reason=NULL,drop_unmerged=1,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL').bind(now(), now(), card.id).run();
+        if (r.meta.changes === 1) {
+          const why = `這張卡還有改動不在 main，也不在 ${card.superseded_by} 裡${mc ? `（缺 ${mc} 個檔）` : ''}${missing ? `，缺的檔：${missing}` : ''}`;
+          await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(card.id, now(), source, `放棄沒成立：${why}`).run();
+          await post([...new Set([card.owner_thread || '', ...(admins.length ? admins : [])])], card, 'drop_rejected', card.branch, why);
+        }
+      }
       continue;
     }
     // 過期回報不算數：卡片沒在跑（沒放行、已放棄），或事件依據的放行版本／重測計數跟卡片現在的不符，一律丟掉（仍回 200）
@@ -142,6 +167,8 @@ export async function autoFlush(env) { return env.FIRE_ENABLED === '1' ? flush(e
 
 // ---- 收信：傳令串自己來領。每個收件串一則（已合併好），領了標記時間；5 分鐘內沒 ack 會再給一次；ack 過的不再給。 ----
 const NEXT = {
+  drop_rejected: '要放棄請先把內容接過去（接手的卡要包含缺的檔），或跟總指揮說真的不要（帶 discard_reason）。卡已回到原階段。',
+  drop_discarded: '請事後看一眼：卡號、不在 main 的改動筆數與放棄原因都在上面。',
   review_requested: '請看 git diff 審查；通過就在看板對這張卡 approve（帶審過的 commit），要改就 reject 並寫原因。',
   review_rejected: '審查退回：請依原因修改，改好 push 後對這張卡 submit 新版本。',
   tested_red: '自測紅：請看紅項修好，push 後 submit 新版本（若只是環境問題，請審查者 retest）。',
@@ -194,4 +221,11 @@ export async function outboxPending(req, env) {
   if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
   const r = await env.DB.prepare('SELECT count(*) AS n, COALESCE(max(n),0) AS m FROM outbox WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(now() - CLAIM_TTL).first();
   return json({ pending: r.n, latest_id: r.m });
+}
+
+// 卡被放棄後：領了這張卡當父卡的子卡被擋住，通知管理者
+export async function notifyKids(env, id) {
+  const admins = list(env.ADMIN_THREADS);
+  const kids = (await env.DB.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(id).all()).results;
+  for (const k of kids) for (const o of (admins.length ? admins : [k.owner_thread || ''])) await env.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind(o, k.id, k.branch, 'parent_blocked', `父卡 ${id} 被放棄，請改接別張卡或直接接 main`, now()).run();
 }

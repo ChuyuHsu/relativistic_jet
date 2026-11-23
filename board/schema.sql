@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS cards (
   phase TEXT,                              -- 上游排隊器分支狀態的快取
   phase_at INTEGER,
   branch TEXT,
+  dropping_at INTEGER, superseded_by TEXT, discard_reason TEXT, drop_unmerged INTEGER, drop_checked_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
