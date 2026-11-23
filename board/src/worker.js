@@ -1,6 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, autoFlush, outboxClaim, outboxAck, resultOf, stuckCheck } from './queue.js';
+import { handleHook, autoFlush, outboxClaim, outboxAck, outboxPending, resultOf, stuckCheck } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
@@ -100,6 +100,7 @@ export async function handle(req, env, ctx) {
   const write = req.method !== 'GET';
   // 排隊器拉清單：HOOK_TOKEN 或 READ_TOKEN；其餘寫入要 TOKEN，讀取要 TOKEN 或 READ_TOKEN
   if (path === '/api/queue/desired') return desired(req, env);
+  if (path === '/api/outbox/pending') return outboxPending(req, env);
   if (!(write ? bearerIs(req, env.TOKEN) : bearerIs(req, env.TOKEN, env.READ_TOKEN))) return json({ error: 'unauthorized' }, 401);
   if (path === '/api/outbox/claim' || path === '/api/outbox/ack') return (path.endsWith('claim') ? outboxClaim : outboxAck)(req.clone(), env);
   let m;
