@@ -778,6 +778,24 @@ class DropCheckFlowTest(CF):
         self.tick(2)
         self.assertEqual(len(self.events("drop_checked", "x")), 2)
 
+    def test_not_marked_done_when_event_not_written(self):
+        self.repo.drop_res["x"] = self.res()
+        self.drops = [{"card": "C1", "branch": "x"}]
+        store.set_meta(self.con, "emit_machine_events", "0")      # 還沒有目的地要機器事件
+        self.tick(3)
+        self.assertEqual(len(self.events("drop_checked")), 0)
+        store.set_meta(self.con, "emit_machine_events", "1")
+        self.tick(2)
+        self.assertEqual(len(self.events("drop_checked", "x")), 1)  # 補上設定後補發，不會被「已查過」吞掉
+
+    def test_second_drop_round_same_result_reemits(self):
+        self.repo.drop_res["x"] = self.res()
+        self.drops = [{"card": "C1", "branch": "x", "dropping_at": 1}]
+        self.tick(2)
+        self.drops = [{"card": "C1", "branch": "x", "dropping_at": 2, "superseded_by_branch": None}]
+        self.tick(2)
+        self.assertEqual(len(self.events("drop_checked", "x")), 2)
+
     def test_git_error_emits_nothing_and_retries(self):
         self.repo.drop_res["x"] = RuntimeError("boom")
         self.drops = [{"card": "C1", "branch": "x"}]

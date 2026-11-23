@@ -138,11 +138,12 @@ MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "ap
 def emit(con, kind, branch, detail: dict, commit_sha=None):
     """寫一筆給 webhook 的狀態事件；只有設定了要送這類事件時（meta emit_machine_events=1）才寫。"""
     if get_meta(con, "emit_machine_events", "0") != "1":
-        return
+        return False
     t = now()
     _, appr, rt = _ctx(con, branch)
     con.execute("INSERT INTO events(kind,branch,detail,at,resolved_at,commit_sha,approved_sha,retest) VALUES(?,?,?,?,?,?,?,?)",
                 (kind, branch, json.dumps(detail, ensure_ascii=False, sort_keys=True), t, t, commit_sha, appr, rt))
+    return True
 
 
 def add_info_event(con, kind, branch=None, detail=None):

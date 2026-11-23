@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from . import store
 from .batch import GREEN, RED, PENDING, ladder, judge
-from .cores import CorePool, PhysicalPool, foreign_busy as _foreign_busy
+from .cores import CorePool, PhysicalPool, foreign_busy as _foreign_busy, own_leftovers, kill_leftovers
 from .executor import Job
 from .gitops import MainMoved
 from .states import Event, State
@@ -158,6 +158,10 @@ class Scheduler:
                     os.killpg(pg, signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
+        # 領頭已死、子行程（例如遊戲引擎）還活著的群組，上面靠 /proc/<領頭> 認不到：直接用「工作目錄在我們底下」認
+        left = own_leftovers(root)
+        if left:
+            log.warning("殺掉上一代遺留的測試行程 %d 個", kill_leftovers(left))
 
     def _recover_pushing(self, b):
         c = self.con
@@ -915,8 +919,9 @@ class Scheduler:
         self._drop_step()
 
     def _drop_step(self):
-        """放棄防呆：清單帶來的 drop_checks 逐筆查（同一組 提交／目標／main 只算一次），
-        結果變了才發一筆 drop_checked 事件。只讀 git，不動任何登記與測試。"""
+        """放棄防呆：清單帶來的 drop_checks 逐筆查（同一組 提交／目標／main／dropping_at 只算一次），
+        結果變了或換了一輪放棄（dropping_at 變）才發一筆 drop_checked 事件。只讀 git，不動任何登記與測試。
+        事件沒真的寫出去（沒有目的地要機器事件）時不記「已查過」，之後補上設定就會補發。"""
         src = self.source
         if src.drops_ver == 0:
             return
@@ -924,6 +929,7 @@ class Scheduler:
         if sig == self._drop_sig:
             return
         self._drop_sig = sig
+        checked = emitted = failed = 0
         for d in src.drops[:100]:
             card, br, sup = d["card"], d["branch"], d.get("superseded_by_branch")
             try:
@@ -931,20 +937,23 @@ class Scheduler:
             except Exception as e:           # 查不出來就當沒查過，下一輪再試（不發「已包含」）
                 log.warning("放棄查核 %s 失敗：%r", card, e)
                 self._drop_sig = None
+                failed += 1
                 continue
-            key = json.dumps([r.get("branch_sha"), r.get("target_sha"), r.get("main_sha"), sup, d.get("dropping_at")], sort_keys=True)
-            if store.get_meta(self.con, f"dck:{card}", None) == key:
-                continue
-            store.set_meta(self.con, f"dck:{card}", key)
+            checked += 1
             res = {"unmerged": bool(r["unmerged"]), "covered": bool(r["covered"]), "target": r["target"],
                    "missing_count": int(r["missing_count"]), "missing_files": list(r["missing_files"])[:20]}
             if d.get("dropping_at") is not None:
                 res["dropping_at"] = d["dropping_at"]
-            sigr = json.dumps([card, res], sort_keys=True)
+            key = json.dumps([r.get("branch_sha"), r.get("target_sha"), r.get("main_sha"), sup, d.get("dropping_at")],
+                             sort_keys=True)
+            sigr = json.dumps([card, key, res], sort_keys=True)
             if store.get_meta(self.con, f"dcr:{card}", None) == sigr:
-                continue                       # 結論沒變：不重發
-            store.set_meta(self.con, f"dcr:{card}", sigr)
-            store.emit(self.con, "drop_checked", br, dict(res, card=card))
+                continue                       # 同一輪、同樣的內容、結論沒變：不重發
+            if store.emit(self.con, "drop_checked", br, dict(res, card=card)):
+                store.set_meta(self.con, f"dcr:{card}", sigr)
+                emitted += 1
+        self._put("drop", {"at": self.clock(), "requested": len(src.drops), "checked": checked,
+                           "emitted": emitted, "failed": failed})
 
     def _source_error(self, msg: str):
         """拉不到、格式不對：記錄＋一筆 source_error 事件（同樣的錯只發一次），絕不動登記與放行。"""

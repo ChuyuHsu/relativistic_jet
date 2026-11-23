@@ -188,3 +188,8 @@ du -sh $JET_HOME/work/mirror.git; ls -la $JET_HOME/work/mirror.git/objects/pack 
 - `detail` 是給人看的一行（提交前 8 碼、原因、紅項），只讀這幾個欄位的對方就夠用。
 - `from`／`to` 只在狀態變化類事件；`failed_items` 只在 `tested_red`、`rejected`（最近一次紅的測試的紅項）。
 - 對方要查更多：`GET /branches/<名字>`（含 `last_selftest`、`last_batch` 與各自的紅項）；放行 `POST /approve` 要帶 `sha`（審過的提交），撤回 `POST /revoke`。
+
+## 10. 遺留行程與放棄查核的自我檢查
+
+- `jet doctor` 會列出「上一代留下、工作目錄在 work_dir 底下、還活著」的測試行程（引擎子行程在領頭結束後會變孤兒）；`jet reap` 一鍵清掉（`--dry-run` 只列、`--all` 連現在在跑的一起殺）。只認工作目錄在 work_dir 底下的，不是自己開的行程不碰。啟動復原（recover）也會做同樣的清理。
+- `jet status -v` 有一行「放棄查核」：清單帶了幾筆、查了幾筆、發了幾個事件、失敗幾個。清單沒帶 drop_checks 要把 `source.url` 加上 `?with=drop_checks`；notify 目的地的 kinds 要含 `drop_checked`（或 `"all"`）。`jet doctor` 兩項都會警告。

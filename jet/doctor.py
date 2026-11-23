@@ -156,6 +156,31 @@ def run_checks(cfg: config.Config, remote_timeout: float = 60,
         except Exception as e:
             add("fail", f"通知 {d['name']}", f"連不上：{getattr(e, 'reason', e)}")
 
+    if cfg.source is not None:
+        if "with=drop_checks" not in cfg.source["url"]:
+            add("warn", "放棄查核", "source.url 沒帶 ?with=drop_checks：看板不會把放棄待查的卡送來，放棄會一直卡住")
+        kinds = {k for d in (cfg.notify_destinations or []) for k in d.get("kinds", [])}
+        if cfg.notify_destinations and "drop_checked" not in kinds:
+            add("warn", "放棄查核", 'notify 目的地的 kinds 沒有 "drop_checked"（或沒設 "all"）：查完的結果送不回看板')
+    try:
+        from . import ops, maintenance
+        from .cores import own_leftovers
+        keep = set()
+        try:
+            con = ops.open_readonly(maintenance.db_path(cfg.state_dir))
+            keep = {r[0] for r in con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL")}
+            con.close()
+        except Exception:
+            pass
+        left = own_leftovers(cfg.work_dir, keep)
+        if left:
+            pids = "、".join(str(p.pid) for p, _ in left[:8])
+            add("warn", "遺留測試行程", f"有 {len(left)} 個上一代留下的自己人行程還活著（pid {pids}…），占著核；`jet reap` 一鍵清掉")
+        else:
+            add("ok", "遺留測試行程", "沒有")
+    except Exception as e:
+        add("warn", "遺留測試行程", f"檢查失敗：{e!r}")
+
     for label, f in (("讀鑰匙", cfg.read_key_file), ("寫鑰匙", cfg.write_key_file)):
         if not f:
             add("warn", label, "設定檔沒寫 api 鑰匙檔")

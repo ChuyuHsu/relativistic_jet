@@ -204,6 +204,37 @@ def group_members(pgid: int, procs: Optional[List[ProcInfo]] = None) -> List[Pro
     return [p for p in procs if (p.pgrp == pgid or p.sid == pgid) and p.state not in ("Z", "X")]
 
 
+def own_leftovers(root: str, keep_pgids: Iterable[int] = (), proc_root: str = "/proc") -> List[Tuple[ProcInfo, str]]:
+    """上一代留下的自己人：工作目錄在我們的 worktree 底下的活行程（含領頭已死、子行程還在的群組）。
+    只認「目前工作目錄在 root 底下」，不是這個目錄的行程一律不碰。keep_pgids＝現在合法在跑的群組。"""
+    root = os.path.abspath(root).rstrip(os.sep) + os.sep
+    keep = set(keep_pgids)
+    me = os.getpid()
+    out: List[Tuple[ProcInfo, str]] = []
+    for p in scan_procs(proc_root):
+        if p.pid == me or p.state in ("Z", "X") or p.flags & PF_KTHREAD or p.pgrp in keep or p.sid in keep:
+            continue
+        try:
+            cwd = os.readlink(f"{proc_root}/{p.pid}/cwd")
+        except OSError:
+            continue
+        if (cwd.rstrip(os.sep) + os.sep).startswith(root):
+            out.append((p, cwd))
+    return out
+
+
+def kill_leftovers(items: List[Tuple[ProcInfo, str]]) -> int:
+    import signal
+    n = 0
+    for p, _ in items:
+        try:
+            os.kill(p.pid, signal.SIGKILL)
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def online_cpus() -> Set[int]:
     try:
         with open("/sys/devices/system/cpu/online", encoding="utf-8") as f:

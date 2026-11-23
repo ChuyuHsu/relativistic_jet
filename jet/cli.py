@@ -114,6 +114,9 @@ def _verbose_lines(sc: dict, now: float) -> List[str]:
             out.append(f"fetch：失敗 {_ts(f.get('finished_at'))}：{f.get('error')}")
     else:
         out.append("fetch：還沒開始")
+    dr = sc.get("drop")
+    out.append(f"放棄查核：{_ts(dr['at'])} 清單 {dr['requested']} 筆、查了 {dr['checked']}、發事件 {dr['emitted']}、失敗 {dr['failed']}"
+               if dr else "放棄查核：清單沒帶 drop_checks（來源網址要加 ?with=drop_checks）")
     sn = sc.get("scan")
     if sn and sn.get("waiting"):
         out.append(f"掃描：{sn['waiting']}")
@@ -267,6 +270,30 @@ def cmd_restart(args):
     return 0
 
 
+def cmd_reap(args):
+    """清掉上一代留下的測試行程：只殺「工作目錄在我們 work_dir 底下」的，別人的行程不碰。
+    排隊器正在跑的測試群組預設不動（--all 才連它們一起殺，等於整批作廢）。"""
+    from . import maintenance, ops
+    from .cores import own_leftovers, kill_leftovers
+    cfg = config.load(_cfg_path(args))
+    keep = set()
+    if not args.all:
+        try:
+            con = ops.open_readonly(maintenance.db_path(cfg.state_dir))
+            keep = {r[0] for r in con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL")}
+            con.close()
+        except Exception:
+            pass
+    left = own_leftovers(cfg.work_dir, keep)
+    for p, cwd in left:
+        print(f"pid {p.pid}（群組 {p.pgrp}）cwd {cwd}")
+    if args.dry_run:
+        print(f"共 {len(left)} 個（只列出，沒殺）")
+        return 0
+    print(f"已殺 {kill_leftovers(left)} 個")
+    return 0
+
+
 def cmd_start(args):
     if not args.root:
         raise ClientError("要給 --root（或設環境變數 JET_HOME）")
@@ -405,6 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("rollback", cmd_rollback, "退回上一版"); sp.add_argument("--root", required=True)
     sp = add("stop", cmd_stop, "停機（排隊器自己收尾退出、守護跟著停；不需要 kill）"); sp.add_argument("--root", default=os.environ.get("JET_HOME"))
     sp.add_argument("--now", action="store_true", help="立刻停，不等手上的批測"); sp.add_argument("--wait", type=float, default=0, help="等守護完全停掉（秒）")
+    sp = add("reap", cmd_reap, "清掉上一代遺留、還占著核的測試行程（只動工作目錄在 work_dir 底下的）"); sp.add_argument("--all", action="store_true"); sp.add_argument("--dry-run", action="store_true")
     sp = add("restart", cmd_restart, "重啟（換版後用：守護用 current 的新版重新拉起，連守護自己也換）"); sp.add_argument("--now", action="store_true"); sp.add_argument("--root", default=os.environ.get("JET_HOME"), help="跟 stop／start 同一組旗標；restart 用不到，收下不報錯")
     sp = add("start", cmd_start, "把守護叫起來（背景）"); sp.add_argument("--root", default=os.environ.get("JET_HOME"))
     sp = add("supervise", cmd_supervise, "守著主行程：掛了重啟，連續當掉三次自動退版"); sp.add_argument("--root", required=True)
