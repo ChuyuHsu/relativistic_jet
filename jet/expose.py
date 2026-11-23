@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, List, Optional
+from urllib.parse import urlparse
 
 from . import notify
 
@@ -32,6 +33,21 @@ class ExposeError(Exception):
     pass
 
 
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def check_register_url(url: Any) -> None:
+    """權杖會放在標頭送出去，所以只收 https；只有本機位址才放行 http。"""
+    if not isinstance(url, str) or not url:
+        raise ExposeError("expose.register_url 必填")
+    u = urlparse(url)
+    if u.scheme == "https" and u.hostname:
+        return
+    if u.scheme == "http" and u.hostname in LOCAL_HOSTS:
+        return
+    raise ExposeError("expose.register_url 只能是 https 網址（本機位址才可用 http）")
+
+
 def check_settings(command: Any, pattern: Any, register_url: Any, token_file: Any, reregister_s: Any) -> None:
     if not isinstance(command, list) or not command or not all(isinstance(x, str) and x for x in command):
         raise ExposeError("expose.tunnel_command 必須是非空字串陣列")
@@ -41,11 +57,7 @@ def check_settings(command: Any, pattern: Any, register_url: Any, token_file: An
         re.compile(pattern)
     except re.error as e:
         raise ExposeError(f"expose.url_pattern 不是合法正規式：{e}")
-    try:
-        if not notify.check_url(register_url):
-            raise ExposeError("expose.register_url 必填")
-    except notify.NotifyError:
-        raise ExposeError("expose.register_url 只能是 http 或 https 網址")
+    check_register_url(register_url)
     if not isinstance(token_file, str) or not token_file:
         raise ExposeError("expose.register_token_file 必填")
     if isinstance(reregister_s, bool) or not isinstance(reregister_s, (int, float)) or reregister_s < 10:
@@ -65,7 +77,7 @@ def read_token(path: str) -> str:
 
 def put_url(register_url: str, token: str, public_url: str, timeout: float = 10.0) -> None:
     """登記一次；2xx 才算成功，其餘丟 ExposeError（訊息不含權杖）。"""
-    notify.check_url(register_url)
+    check_register_url(register_url)
     req = urllib.request.Request(register_url, method="PUT",
                                  data=json.dumps({"url": public_url}).encode("utf-8"),
                                  headers={"Content-Type": "application/json; charset=utf-8",

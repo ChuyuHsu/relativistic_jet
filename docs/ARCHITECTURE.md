@@ -67,6 +67,7 @@ docs/           DESIGN（設計）、ARCHITECTURE（本檔）
 | commands | test（必要）、classify（選配） |
 | notify | url、batch_seconds |
 | api | listen、read_key_file、write_key_file |
+| expose（選配，預設關；換設定要重啟） | tunnel_command、url_pattern、register_url（只收 https，本機位址才可 http）、register_token_file、reregister_seconds |
 
 載入前先 `config.parse` 檢查；壞的不載、沿用舊的（`safe_reload`）。金鑰只放檔案路徑，不放值。
 

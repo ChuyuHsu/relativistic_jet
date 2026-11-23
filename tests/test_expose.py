@@ -138,13 +138,22 @@ class ExposeTest(unittest.TestCase):
         self.assertIsNotNone(p.poll())
 
     def test_bad_settings_rejected(self):
-        ok = (["x"], r"https://\S+", "http://127.0.0.1:1/x", "/t", 60)
+        ok = (["x"], r"https://\S+", "https://h.example.test/x", "/t", 60)
         expose.check_settings(*ok)
         for i, bad in ((0, []), (1, "("), (2, "file:///x"), (3, ""), (4, 1)):
             args = list(ok)
             args[i] = bad
             with self.assertRaises(expose.ExposeError):
                 expose.check_settings(*args)
+
+    def test_register_url_https_only_except_local(self):
+        for good in ("https://relay.example.test/x", "http://127.0.0.1:9/x", "http://localhost/x", "http://[::1]:9/x"):
+            expose.check_register_url(good)
+        for bad in ("http://relay.example.test/x", "http://127.0.0.1.evil.test/x", "ftp://x/y", "file:///x", "", None):
+            with self.assertRaises(expose.ExposeError, msg=str(bad)):
+                expose.check_register_url(bad)
+        with self.assertRaises(expose.ExposeError):
+            expose.put_url("http://relay.example.test/x", "t", "https://a.test")   # 權杖不明文送
 
     def test_non_http_match_ignored(self):
         ex = expose.Exposer([sys.executable, "-c", "print('ftp://x.example.test',flush=True);import time;time.sleep(5)"],
@@ -165,7 +174,7 @@ class ConfigAndServerTest(unittest.TestCase):
             self.assertIsNone(config.load(env["config"]).expose)
             with open(env["config"], encoding="utf-8") as f:
                 data = json.load(f)
-            data["expose"] = {"tunnel_command": ["x"], "url_pattern": "(", "register_url": "http://h/x",
+            data["expose"] = {"tunnel_command": ["x"], "url_pattern": "(", "register_url": "https://h.example.test/x",
                               "register_token_file": "/t"}
             with open(env["config"], "w", encoding="utf-8") as f:
                 json.dump(data, f)
