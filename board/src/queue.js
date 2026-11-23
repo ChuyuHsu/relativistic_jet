@@ -51,7 +51,7 @@ export async function handleHook(req, env, ctx) {
     if (to) await db.prepare('UPDATE cards SET phase=?,phase_at=?,updated_at=? WHERE id=?').bind(to, now(), now(), card.id).run();
     if (!['approved', 'revoked', 'superseded', 'parent_blocked'].includes(kind)) {   // 放行是看板自己的欄位；父卡擋住只是註記，都不覆蓋「最新結果」
       let fi = Array.isArray(e.failed_items) && e.failed_items.length ? e.failed_items.slice(0, 50) : null;
-      if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && prev.commit === (e.commit ?? null)) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的
+      if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && e.commit && prev.commit === e.commit) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的
       const res = { kind, at: e.at ?? now(), commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: fi };
       await db.prepare('UPDATE cards SET last_result=? WHERE id=?').bind(JSON.stringify(res), card.id).run();
     }
