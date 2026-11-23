@@ -107,7 +107,7 @@ def post_json(url: str, payload: Dict[str, Any], timeout: float = 10.0,
     """打一次；2xx 才算成功，其餘丟 NotifyError（訊息不含權杖）。"""
     check_url(url)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    hdrs = {"Content-Type": "application/json; charset=utf-8"}
+    hdrs = {"Content-Type": "application/json; charset=utf-8", "User-Agent": "relativistic-jet"}
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=data, method="POST", headers=hdrs)
     try:

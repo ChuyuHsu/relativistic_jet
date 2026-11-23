@@ -51,7 +51,8 @@ def parse_list(data) -> List[dict]:
 
 
 def http_fetch(url: str, token_file: Optional[str], timeout: float) -> List[dict]:
-    headers = {"Accept": "application/json"}
+    # 有些代管平台會擋 urllib 預設的 User-Agent（回 403），所以自己報名字
+    headers = {"Accept": "application/json", "User-Agent": "relativistic-jet"}
     if token_file:
         try:
             headers["Authorization"] = "Bearer " + read_token(token_file)
