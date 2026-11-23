@@ -34,6 +34,19 @@ async function notify(db, owners, c, kind, detail) {
 }
 const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 
+// 附上父卡資訊：parent_stage（父卡現在的階段，不存在回 missing）、waiting_parent（父卡還沒合併，子卡就算放行也要等）
+async function withParent(db, cards) {
+  const need = cards.filter(c => c.parent);
+  if (!need.length) return cards;
+  const rows = (await db.prepare('SELECT * FROM cards').all()).results;
+  const by = new Map(rows.map(r => [r.id, r]));
+  return cards.map(c => {
+    if (!c.parent) return c;
+    const p = by.get(c.parent), ps = p ? stageOf(p) : 'missing';
+    return { ...c, parent_stage: ps, waiting_parent: ps !== 'merged', parent_blocked: ps === 'dropped' || ps === 'missing' };
+  });
+}
+
 // 設父卡：不能是自己、不存在、已放棄，也不能成環（沿父鏈走回自己）。回錯誤訊息或 null。
 async function badParent(db, id, parent) {
   if (parent == null || parent === '') return null;
@@ -88,7 +101,7 @@ export async function handle(req, env, ctx) {
     const rows = status
       ? await db.prepare('SELECT * FROM cards WHERE status=? ORDER BY priority,created_at').bind(status).all()
       : await db.prepare('SELECT * FROM cards ORDER BY priority,created_at').all();
-    let out = rows.results.map(view);
+    let out = (await withParent(db, rows.results.map(view)));
     const sf = url.searchParams.get('stage');
     if (sf) { const want = new Set(sf.split(',')); out = out.filter(c => want.has(c.stage)); }
     return json(out);
@@ -102,7 +115,7 @@ export async function handle(req, env, ctx) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c) return json({ error: 'not found' }, 404);
     const ev = await db.prepare('SELECT at,actor,note FROM events WHERE card_id=? ORDER BY n').bind(m[1]).all();
-    return json({ ...view(c), events: ev.results });
+    return json({ ...(await withParent(db, [view(c)]))[0], events: ev.results });
   }
   const body = write ? await req.json().catch(() => ({})) : {};
   const actor = String(body.actor || 'unknown');
@@ -229,6 +242,8 @@ export async function handle(req, env, ctx) {
         if (stage === 'dropped') return json(view(c));
         if (stage === 'merged') return no();
         sets.push('status=?'); vals.push('dropped');
+        const kids = (await db.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(id).all()).results;   // 父卡被放棄：子卡被擋住，通知管理者改它的父卡
+        for (const k of kids) await notify(db, list(env.ADMIN_THREADS), k, 'parent_blocked', `父卡 ${id} 被放棄，請改接別張卡或直接接 main`);
       } else return json({ error: 'status 只能改成 open（還卡）或 dropped（放棄）；認領請用 /api/claim' }, 400);
       after = `${stage} → ${body.status}` + (body.note ? `：${body.note}` : '');
     }

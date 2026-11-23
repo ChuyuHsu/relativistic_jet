@@ -22,7 +22,7 @@ function draw(){
   list.innerHTML=l.length?l.map(c=>{
     const r=c.rejected;
     const why=r?`<span class="m">${r.source==='review'?'審查退回':(r.halted?'排隊器暫停':'排隊器退回')}：${esc(r.reason||'')}${(r.failed_items||[]).length?'（紅項 '+(r.failed_items||[]).map(f=>esc(f.item_id)).join('、')+'）':''}</span>`:'';
-    return `<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.branch?'・'+esc(c.branch):''}</span>${why}</div>`}).join(''):'<div class="m">沒有</div>';
+    return `<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.branch?'・'+esc(c.branch):''}</span>${c.parent?`<span class="m">父卡 ${esc(c.parent)}（${esc(S[c.parent_stage]||c.parent_stage)}）${c.parent_blocked?'・父卡被放棄或不存在，需改接':(c.waiting_parent?'・等父卡合併':'')}</span>`:''}${why}</div>`}).join(''):'<div class="m">沒有</div>';
 }
 tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
 let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}

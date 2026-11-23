@@ -253,7 +253,8 @@ test('卡住提醒：開發中、審查中、退回超過時數才通知管理�
   await claim(e, 'c1'); await claim(e, 'c2'); await act(e, 'c2', 'submit', { commit: SHA }); await approved(e, 'c3');
   assert.deepEqual(await stuckCheck(e), { notified: 0 });
   await e.DB.prepare('UPDATE cards SET updated_at=updated_at-7*3600').run();
-  assert.deepEqual(await stuckCheck(e), { notified: 2 });      // c1 開發中、c2 審查中；c3 自測中不算
+  await act(e, 'c3', 'reject', { reason: 'x', actor: 'rev' }); await e.DB.prepare('UPDATE cards SET updated_at=updated_at-7*3600').run();   // c3 退回
+  assert.deepEqual(await stuckCheck(e), { notified: 3 });      // c1 開發中、c2 審查中、c3 退回
   assert.deepEqual(await stuckCheck(e), { notified: 0 });
   assert.deepEqual(await stuckCheck(mkenv()), { skipped: true });
 });
@@ -272,4 +273,46 @@ test('設父卡：可改可清空且放行保留；拒絕自己、不存在、�
   const r = await (await patch('A', null)).json();            // 清空；放行保留
   assert.deepEqual([r.parent, r.stage, r.approved_commit], [null, 'selftesting', SHA]);
   assert.equal((await getCard(e, 'B')).parent, 'C');
+});
+
+test('對照文檔第 6 節「自己的事」補測：審查中改審新版本、還卡三種來源、批測紅、沒輪到不變、結局後拒絕', async () => {
+  const e = mkenv();
+  await claim(e, 'c1'); await act(e, 'c1', 'submit', { commit: SHA }); await act(e, 'c1', 'submit', { commit: SHA2 });
+  const c = await getCard(e, 'c1');
+  assert.deepEqual([c.stage, c.submitted_commit], ['reviewing', SHA2]);                    // 審查中：改審新版本
+  await act(e, 'c1', 'approve', { commit: SHA2, actor: 'rev' });
+  await ev(e, 'c1', { kind: 'tested_green', approved_sha: SHA2 });
+  await ev(e, 'c1', { kind: 'deferred', approved_sha: SHA2, detail: '這批沒輪到' });          // 沒輪到、同批別人紅：不變
+  assert.equal(await stageOf(e, 'c1'), 'batching');
+  await ev(e, 'c1', { kind: 'rejected', approved_sha: SHA2, detail: '批測是它紅', failed_items: [{ item_id: 'x' }] });
+  const r = await getCard(e, 'c1');
+  assert.deepEqual([r.stage, r.rejected.source], ['rejected', 'queue']);                    // 批測找出是它紅
+  assert.equal((await call(e, 'PATCH', '/api/cards/c1', { status: 'open' })).status, 200);   // 退回也能還卡
+  await claim(e, 'c2'); assert.equal((await call(e, 'PATCH', '/api/cards/c2', { status: 'open' })).status, 200);   // 開發中還卡
+  await claim(e, 'c3'); await call(e, 'PATCH', '/api/cards/c3', { status: 'dropped' });
+  for (const a of ['submit', 'approve', 'reject', 'revoke', 'retest']) assert.equal((await act(e, 'c3', a, { commit: SHA, reason: 'x' })).status, 409, a);   // 放棄後任何動作拒絕
+});
+
+test('對照文檔第 6 節「父卡的事」：等父卡、父卡進 main、父卡被還卡、父卡被放棄', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'boss', ROUTINE_ID: 'i', ROUTINE_KEY: 'k', WAKE_BATCH_S: 0 });
+  await claim(e, 'P'); await approved(e, 'K', 'kt', { parent: 'P' });
+  let k = await getCard(e, 'K');
+  assert.deepEqual([k.stage, k.parent, k.parent_stage, k.waiting_parent], ['selftesting', 'P', 'developing', true]);   // 父卡還沒放行：子卡放行後停在自測中等，且看得到在等父卡
+  const d = await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json();
+  assert.equal(d.find(x => x.branch === 'dev/k').parent, 'dev/p');                                                    // 排隊器靠 parent 排順序
+  await call(e, 'PATCH', '/api/cards/P', { status: 'open' });                                                         // 父卡被還卡：子卡照樣等，不動
+  k = await getCard(e, 'K');
+  assert.deepEqual([k.stage, k.parent_stage, k.waiting_parent, k.approved_commit], ['selftesting', 'new', true, SHA]);
+  await call(e, 'POST', '/api/claim', { id: 'P', owner: 'w2', owner_thread: 'pt' });
+  await act(e, 'P', 'submit', { commit: SHA }); await act(e, 'P', 'approve', { commit: SHA, actor: 'rev' });
+  await ev(e, 'P', { kind: 'merged', approved_sha: SHA });                                                            // 父卡進 main：子卡變普通卡，放行有效
+  k = await getCard(e, 'K');
+  assert.deepEqual([k.stage, k.waiting_parent, k.approved_commit], ['selftesting', false, SHA]);
+  // 父卡被放棄：子卡被擋住，通知管理者改父卡
+  await claim(e, 'Q'); await claim(e, 'R', 'rt', { parent: 'Q' });
+  await call(e, 'PATCH', '/api/cards/Q', { status: 'dropped' });
+  const r = await getCard(e, 'R');
+  assert.deepEqual([r.parent_stage, r.parent_blocked], ['dropped', true]);
+  const texts = []; await withFetch(() => flush(e), async (u, init) => { texts.push(JSON.parse(init.body).text); return new Response('{}'); });
+  assert.match(texts.join('\n'), /boss[\s\S]*R[\s\S]*父卡 Q 被放棄/);
 });
