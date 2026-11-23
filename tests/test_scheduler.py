@@ -292,3 +292,79 @@ class Stacked(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Recovery(Base):
+    def test_killed_after_push_before_bookkeeping(self):
+        """推 main 成功、狀態還沒記就被砍：重啟後補記合入，不誤退、不留分支。"""
+        self.mk(policy={"require_approval": False})
+        self.repo.add("a"); self.repo.add("b")
+        orig = self.repo.fast_forward_main
+
+        class Killed(Exception):
+            pass
+
+        def ff(sha, expect):
+            orig(sha, expect)
+            raise Killed()
+        self.repo.fast_forward_main = ff
+        with self.assertRaises(Killed):
+            self.go(60)
+        self.repo.fast_forward_main = orig
+        self.assertEqual(self.state("a"), "batching")
+        Scheduler(self.cfg, self.con, self.repo, FakeExecutor(self.repo), clock=lambda: 1.0)
+        self.assertEqual(self.merged(), {"a", "b"})
+        self.assertEqual(sorted(self.repo.deleted), ["a", "b"])
+
+    def test_killed_before_push_requeues(self):
+        self.mk(delay=2, policy={"require_approval": False})
+        self.repo.add("a")
+        self.go(60, until=lambda: self.state("a") == "batching")
+        Scheduler(self.cfg, self.con, self.repo, FakeExecutor(self.repo), clock=lambda: 1.0)
+        self.assertEqual(self.state("a"), "queued")
+        self.assertEqual(self.repo.ff_log, [])
+
+    def test_push_refused_requeues_without_merge(self):
+        self.mk(policy={"require_approval": False})
+        self.repo.add("a")
+        from jet.gitops import MainMoved
+        orig = self.repo.fast_forward_main
+        fails = [1]
+
+        def ff(sha, expect):
+            if fails:
+                fails.pop()
+                raise MainMoved()
+            orig(sha, expect)
+        self.repo.fast_forward_main = ff
+        self.go(60, until=lambda: self.state("a") == "merged")
+        self.assertEqual(len(self.repo.ff_log), 1)
+
+
+class StackConflict(Base):
+    def test_rejected_parent_takes_children_out_of_batch(self):
+        self.mk(policy={"require_approval": False})
+        self.repo.add("p", conflict_main=True); self.repo.add("c")
+        self.s.tick()
+        store.set_parent(self.con, "c", "p")
+        self.go(30, until=lambda: self.state("p") == "rejected")
+        self.go(5)
+        self.assertEqual(self.merged(), set())
+        self.assertNotIn("m0>p", self.repo.main)
+        self.assertEqual(self.state("c"), "pending")
+
+
+class ManyCulprits(Base):
+    def test_three_culprits_and_all_red(self):
+        self.mk(policy={"require_approval": False}, limits={"batch_max": 16})
+        for i in range(1, 13):
+            self.repo.add(f"b{i}", gate_reds={"r"} if i in (2, 5, 9) else ())
+        self.go(150, until=lambda: len(self.merged()) == 9)
+        self.assertEqual({n for n in ("b2", "b5", "b9") if self.state(n) == "rejected"}, {"b2", "b5", "b9"})
+
+    def test_all_red_batch(self):
+        self.mk(policy={"require_approval": False}, limits={"batch_max": 4})
+        for i in range(1, 5):
+            self.repo.add(f"b{i}", gate_reds={"r"})
+        self.go(120, until=lambda: all(self.state(f"b{i}") == "rejected" for i in range(1, 5)))
+        self.assertEqual(self.repo.ff_log, [])

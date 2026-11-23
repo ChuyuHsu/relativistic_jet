@@ -64,6 +64,8 @@ class Repo(Protocol):
         """在 work_dir 檢出 sha 的唯讀副本，離開時清掉。"""
     def fast_forward_main(self, sha: str, expect_main: str) -> None:
         """推 main：遠端 main 必須仍是 expect_main，否則丟 MainMoved。絕不 force。"""
+    def is_ancestor(self, a: str, b: str) -> bool:
+        """a 是不是 b 的祖先（含相同）。復原時用來看批測的終點有沒有已經進了 main。"""
     def delete_branch(self, name: str, expect_sha: str) -> None:
         """刪已合入的分支；sha 對不上就不刪。"""
 
@@ -124,6 +126,10 @@ class GitRepo:
 
     def _is_ancestor(self, a: str, b: str) -> bool:
         return self._git("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
+
+    def is_ancestor(self, a: str, b: str) -> bool:
+        """a 是不是 b 的祖先（含相同）。找不到提交回 False。"""
+        return self._has(a) and self._has(b) and self._is_ancestor(a, b)
 
     # ---- 讀 ----
     def fetch(self) -> None:

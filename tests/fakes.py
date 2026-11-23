@@ -65,6 +65,9 @@ class FakeRepo:
     def worktree(self, sha):
         yield sha
 
+    def is_ancestor(self, a, b):
+        return b == a or b.startswith(a + ">")
+
     def fast_forward_main(self, sha, expect_main):
         if self.main != expect_main:
             raise MainMoved()

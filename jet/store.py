@@ -109,7 +109,9 @@ def set_parent(con, name, parent: Optional[str], by="?"):
     """登記父分支（None＝取消）。擋自己、擋成環。"""
     _must(con, name)
     if parent is not None:
-        _must(con, parent)
+        if _must(con, parent)["state"] == State.MERGED.value:
+            parent = None          # 父已合入＝普通分支
+    if parent is not None:
         p = parent
         while p is not None:
             if p == name:

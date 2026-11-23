@@ -89,16 +89,54 @@ class Scheduler:
 
     # ---------- 啟動復原 ----------
     def recover(self):
-        """上次中斷留下的半成品：工作作廢、批作廢、狀態退回上一步。"""
+        """上次中斷留下的半成品：殺掉遺留測試行程、工作作廢、批作廢、狀態退回上一步。
+        例外：已經推進 main 的批（status=pushing 而且終點已是 main 的祖先）照合入收尾。"""
         c = self.con
+        self._kill_leftovers()
+        cl = getattr(self.repo, "cleanup_worktrees", None)
+        if cl:
+            cl()
         c.execute("UPDATE runs SET status='cancelled', finished_at=? WHERE status IN ('running','queued')",
                   (self.clock(),))
-        c.execute("UPDATE batches SET status='aborted', finished_at=? WHERE status IN ('testing','probing')",
+        for b in c.execute("SELECT * FROM batches WHERE status='pushing'").fetchall():
+            self._recover_pushing(b)
+        c.execute("UPDATE batches SET status='aborted', finished_at=? WHERE status IN ('testing','probing','pushing')",
                   (self.clock(),))
         for r in store.list_branches(c, S.SELFTESTING.value):
             store.apply_event(c, r["name"], Event.RETRY)
         for r in store.list_branches(c, S.BATCHING.value):
             store.apply_event(c, r["name"], Event.BATCH_DEFERRED)
+
+    def _kill_leftovers(self):
+        import signal
+        root = os.path.abspath(self.cfg.work_dir)
+        for r in self.con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL"):
+            pg = r[0]
+            try:
+                # 保險：只殺工作目錄在我們 worktree 底下的群組（避免重開機後行程號被別人用走）
+                if pg > 1 and os.readlink(f"/proc/{pg}/cwd").startswith(root):
+                    os.killpg(pg, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+
+    def _recover_pushing(self, b):
+        c = self.con
+        final, m = b["merged_sha"], b["merged_count"] or 0
+        main = self.repo.main_sha()
+        if not final or m <= 0 or not self.repo.is_ancestor(final, main):
+            return
+        names = [r["branch"] for r in c.execute(
+            "SELECT branch FROM batch_members WHERE batch_id=? ORDER BY pos", (b["id"],))][:m]
+        done = []
+        for n in names:
+            row = store.get_branch(c, n)
+            if row is not None and row["state"] == S.BATCHING.value:
+                store.apply_event(c, n, Event.BATCH_MERGED, merged_sha=final)
+                done.append(n)
+        c.execute("UPDATE batches SET status='merged', finished_at=? WHERE id=?", (self.clock(), b["id"]))
+        self.main = main
+        if done:
+            self._after_merge(done, final, None, b["base_sha"])
 
     # ---------- 一輪 ----------
     def tick(self) -> None:
@@ -108,6 +146,7 @@ class Scheduler:
         self._scan()
         self._sweep_parents()
         self._collect()
+        self._reap_orphans()
         self._promote()
         if store.is_paused(self.con) or not self.resources_ok():
             return
@@ -277,6 +316,7 @@ class Scheduler:
                 store.add_event(self.con, "queue_error", branch, f"工作開不起來：{e!r}")
             return False
         self._start_fail = 0
+        self.con.execute("UPDATE runs SET pgid=? WHERE id=?", (getattr(handle, "pgid", None), rid))
         self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id)
         return True
 
@@ -366,7 +406,7 @@ class Scheduler:
     # ---------- 自測 ----------
     def _chain(self, name) -> List:
         rows, r = [], store.get_branch(self.con, name)
-        while r is not None:
+        while r is not None and (not rows or r["state"] != S.MERGED.value):
             rows.append(r)
             r = store.get_branch(self.con, r["parent"]) if r["parent"] else None
         return rows[::-1]
@@ -400,7 +440,7 @@ class Scheduler:
     def _on_selftest(self, j, res):
         c = self.con
         row = store.get_branch(c, j.branch)
-        if row is None or row["state"] != S.SELFTESTING.value or row["head_sha"] != j.head_sha:
+        if row is None or row["state"] != S.SELFTESTING.value:
             return
         if res.status in ("infra", "cancelled"):
             self._infra_retry("selftest:" + j.branch)
@@ -414,6 +454,17 @@ class Scheduler:
             store.add_event(c, "rejected", j.branch, why)
         else:
             store.apply_event(c, j.branch, Event.SELFTEST_PASS)
+
+    def _reap_orphans(self):
+        """保險：狀態說在跑、其實沒有對應工作的，退回上一步（不讓分支卡死）。"""
+        live = {j.branch for j in self.jobs.values() if j.kind == "selftest"}
+        for r in store.list_branches(self.con, S.SELFTESTING.value):
+            if r["name"] not in live:
+                store.apply_event(self.con, r["name"], Event.RETRY)
+        members = {n for n, _, _ in self.batch.members} if self.batch else set()
+        for r in store.list_branches(self.con, S.BATCHING.value):
+            if r["name"] not in members:
+                store.apply_event(self.con, r["name"], Event.BATCH_DEFERRED)
 
     # ---------- 放行→排隊 ----------
     def _approved(self, r) -> bool:
@@ -526,7 +577,16 @@ class Scheduler:
                 store.add_event(c, "conflict", r["name"], "組批時跟 main 撞檔")
             else:
                 ok.append(r)
-        cand = ok
+        # 被退回的父分支，子孫一起留下（否則父的改動會經由子分支進 main）
+        gone = {r["name"] for r in cand if r not in ok}
+        grow = True
+        while grow:
+            grow = False
+            for r in ok:
+                if r["name"] not in gone and r["parent"] in gone:
+                    gone.add(r["name"])
+                    grow = True
+        cand = [r for r in ok if r["name"] not in gone]
         res = None
         while cand:
             res = self.repo.stack(main, [(r["name"], r["head_sha"]) for r in cand])
@@ -614,9 +674,14 @@ class Scheduler:
                     self._abort_batch("純文件更動後重疊失敗")
                     return
                 final, expect = res.prefixes[-1], cur
+            # 先記「要推了」再推：中途被砍時，復原能靠它判斷有沒有已經進 main
+            c.execute("UPDATE batches SET status='pushing', merged_sha=?, merged_count=? WHERE id=?",
+                      (final, m, b.id))
             try:
                 self.repo.fast_forward_main(final, expect)
             except MainMoved:
+                c.execute("UPDATE batches SET status='testing', merged_sha=NULL, merged_count=NULL WHERE id=?",
+                          (b.id,))
                 self._abort_batch("推 main 時 main 已動")
                 return
             for n, _, _ in b.members[:m]:
