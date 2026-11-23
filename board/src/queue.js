@@ -40,6 +40,12 @@ export async function handleHook(req, env, ctx) {
     }
     if (kind === 'drop_checked') {   // 放棄待查的結果：只對「放棄待查」的卡有效，其他一律當過期丟掉
       if (!card || !card.dropping_at || card.status === 'dropped') { stale++; continue; }
+      // 比對是哪一次放棄的結果：事件帶回 dropping_at 就必須相同；沒帶但有 target 就必須是現在接手卡的分支
+      if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; continue; }
+      if (e.dropping_at == null && card.superseded_by && e.target != null) {
+        const sc = await db.prepare('SELECT id,branch FROM cards WHERE id=?').bind(card.superseded_by).first();
+        if (!sc || String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`)) { stale++; continue; }
+      }
       const unmerged = e.unmerged === true, covered = e.covered === true, mc = Number(e.missing_count ?? 0) || 0;
       const missing = Array.isArray(e.missing_files) ? e.missing_files.slice(0, 20).map(String).join('、') : '';
       applied++;
