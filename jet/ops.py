@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from . import states
+from . import states, store
 from .states import Event, State
 
 # 分支名：保守的白名單，擋掉空白、控制字元與路徑跳脫
@@ -196,6 +196,16 @@ def _set_state(con, row, event: Event, now: float, reason: Optional[str] = None)
     return new
 
 
+def _wrap(fn, *a, **k):
+    """呼叫 store 的共用規則；store 的錯誤轉成 OpError。"""
+    try:
+        return fn(*a, **k)
+    except store.NoSuchBranch:
+        raise OpError("沒有這條分支", 404)
+    except ValueError as e:
+        raise OpError(str(e))
+
+
 def op_approve(con, now, actor, args):
     row = _need_branch(con, args.get("branch"))
     if row["state"] == State.MERGED.value:
@@ -204,14 +214,12 @@ def op_approve(con, now, actor, args):
     sha = args.get("sha")
     if not isinstance(sha, str) or len(sha) < 7:
         raise OpError("放行要帶審過的版本（sha 或 content_id）", 400)
-    content_id = row["content_id"]
-    if not content_id or not (sha == content_id or row["head_sha"].startswith(sha) or sha.startswith(row["head_sha"])):
+    content_id, head = row["content_id"], row["head_sha"] or ""
+    if not content_id or not (sha == content_id or (len(head) >= 7 and (head.startswith(sha) or sha.startswith(head)))):
         raise OpError("分支的版本已經變了，請重新審過再放行", 409)
-    if _has_approval(con, row["name"], content_id):
+    if store.is_approved(con, row["name"], content_id):
         return {"branch": row["name"], "state": row["state"], "already": True}
-    by = str(args.get("by") or actor)[:100]
-    con.execute("INSERT INTO approvals(branch, content_id, by, at) VALUES(?,?,?,?)",
-                (row["name"], content_id, by, now))
+    _wrap(store.approve, con, row["name"], str(args.get("by") or actor)[:100])
     # 放行只是記號，排隊由主迴圈在「自測綠且放行」時發 READY；這裡不改狀態
     return {"branch": row["name"], "state": row["state"], "approved": True}
 
@@ -220,10 +228,10 @@ def op_revoke(con, now, actor, args, pre_commit=None):
     row = _need_branch(con, args.get("branch"))
     if pre_commit is not None:
         pre_commit("revoke", args, now)   # 先寫只增不改的撤回紀錄；寫失敗整個撤回失敗
-    cur = con.execute("UPDATE approvals SET revoked_at=? WHERE branch=? AND revoked_at IS NULL",
-                      (now, row["name"]))
+    n = con.execute("SELECT count(*) FROM approvals WHERE branch=? AND revoked_at IS NULL", (row["name"],)).fetchone()[0]
+    _wrap(store.revoke, con, row["name"], actor)
     state = _set_state(con, row, Event.REVOKE, now)
-    return {"branch": row["name"], "state": state, "revoked": cur.rowcount}
+    return {"branch": row["name"], "state": state, "revoked": n}
 
 
 def op_priority(con, now, actor, args):
@@ -231,8 +239,7 @@ def op_priority(con, now, actor, args):
     value = args.get("value")
     if isinstance(value, bool) or not isinstance(value, int) or not -1000 <= value <= 1000:
         raise OpError("優先序要是 -1000 到 1000 的整數")
-    con.execute("UPDATE branches SET prio_override=?, updated_at=? WHERE name=?",
-                (value, now, row["name"]))
+    _wrap(store.set_priority, con, row["name"], value, actor)
     return {"branch": row["name"], "priority": value}
 
 
@@ -242,25 +249,14 @@ def op_set_parent(con, now, actor, args):
     if parent in (None, ""):
         parent = None
     else:
-        prow = _need_branch(con, parent)
-        if prow["name"] == row["name"]:
+        _need_branch(con, parent)
+        if parent == row["name"]:
             raise OpError("不能把自己登記成父分支")
-        seen, cur = {row["name"]}, prow
-        while cur is not None:   # 往上走，不能繞回自己
-            if cur["name"] in seen:
-                raise OpError("父分支串成了圈")
-            seen.add(cur["name"])
-            cur = (con.execute("SELECT * FROM branches WHERE name=?", (cur["parent"],)).fetchone()
-                   if cur["parent"] else None)
     if parent == row["parent"]:
         return {"branch": row["name"], "parent": parent, "unchanged": True}
-    con.execute("UPDATE branches SET parent=?, updated_at=? WHERE name=?", (parent, now, row["name"]))
-    state = row["state"]
-    try:   # 測試底變了：已測過的要重測（第 3 節「堆疊分支」）
-        state = _set_state(con, row, Event.PARENT_CHANGED, now)
-    except states.IllegalTransition:
-        pass
-    return {"branch": row["name"], "parent": parent, "state": state}
+    _wrap(store.set_parent, con, row["name"], parent, actor)
+    cur = store.get_branch(con, row["name"])
+    return {"branch": row["name"], "parent": cur["parent"], "state": cur["state"]}
 
 
 def op_adhoc_run(con, now, actor, args):
@@ -285,7 +281,7 @@ def op_adhoc_run(con, now, actor, args):
 
 
 def op_pause(con, now, actor, args):
-    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('paused','1')")
+    store.set_paused(con, True, actor)
     return {"paused": True}
 
 
@@ -295,10 +291,9 @@ def op_resume(con, now, actor, args):
         row = _need_branch(con, branch)
         if row["state"] != State.HALTED.value:
             raise OpError("這條分支不是暫停狀態")
-        state = _set_state(con, row, Event.RESUME, now)
-        con.execute("UPDATE branches SET fail_count=0 WHERE name=?", (row["name"],))
-        return {"branch": row["name"], "state": state}
-    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('paused','0')")
+        _wrap(store.resume_branch, con, row["name"], actor)
+        return {"branch": row["name"], "state": store.get_branch(con, row["name"])["state"]}
+    store.set_paused(con, False, actor)
     return {"paused": False}
 
 
@@ -319,6 +314,9 @@ ACTIONS: Dict[str, Callable] = {
 }
 
 
+STORE_AUDITED = {"approve", "revoke", "priority", "set-parent", "pause", "resume"}   # store 內已寫 audit
+
+
 def apply(con, action: str, args: Dict[str, Any], actor: str, now: Optional[float] = None, pre_commit=None):
     """在主行程執行一個寫入命令；成功才寫 audit（失敗的也留一筆，方便追查）。"""
     now = time.time() if now is None else now
@@ -330,7 +328,8 @@ def apply(con, action: str, args: Dict[str, Any], actor: str, now: Optional[floa
     con.execute("BEGIN IMMEDIATE")
     try:
         result = fn(con, now, actor, args, pre_commit) if action == "revoke" else fn(con, now, actor, args)
-        _audit(con, now, actor, action, args)
+        if action not in STORE_AUDITED:
+            _audit(con, now, actor, action, args)
         con.execute("COMMIT")
         return result
     except BaseException as e:

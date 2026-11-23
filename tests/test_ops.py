@@ -162,3 +162,13 @@ class RevokeLogTest(unittest.TestCase):
             ops.apply(con, "revoke", {"branch": "feat-a"}, "t", pre_commit=lambda a, b, n: seen.append(a))
             self.assertEqual(seen, ["revoke"])
             self.assertEqual(con.execute("SELECT count(*) FROM approvals WHERE branch='feat-a' AND revoked_at IS NULL").fetchone()[0], 0)
+
+
+class ShortHeadTest(unittest.TestCase):
+    def test_empty_head_sha_never_matches(self):
+        with tempfile.TemporaryDirectory() as t:
+            con = fresh(t)
+            con.execute("UPDATE branches SET head_sha='' WHERE name='feat-b'")
+            with self.assertRaises(ops.OpError) as cm:
+                ops.apply(con, "approve", {"branch": "feat-b", "sha": "deadbeefdead"}, "t")
+            self.assertEqual(cm.exception.code, 409)
