@@ -201,7 +201,7 @@ test('排隊器拉清單：已領、未合併、未放棄；帶父卡分支（�
   await approved(e, 'M'); await ev(e, 'M', { kind: 'merged', approved_sha: SHA });              // 已合併：不在
   await claim(e, 'N');                                                                          // 開發中（沒放行）：在，但不帶 approved_sha
   assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 'bad')).status, 401);
-  assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 't')).status, 401);       // 寫入權杖不能拉
+  assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 't')).status, 200);       // 寫入權杖也能讀（只讀端點）
   const a = await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json();
   assert.deepEqual(a, [{ branch: 'dev/p', approved_sha: SHA, retest: 0 }, { branch: 'dev/k', parent: 'dev/p', approved_sha: SHA, retest: 0 }, { branch: 'dev/n', retest: 0 }]);
   assert.deepEqual(await (await call(e, 'GET', '/api/queue/desired', undefined, 'rd')).json(), a);
@@ -528,4 +528,10 @@ test('放棄防呆：接手分支還不存在時 target 是 main，仍算對得�
   await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c9' });
   const r = await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, target: 'main' })).json();
   assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'c1'), 'dropped');
+});
+
+test('desired 唯讀：TOKEN 也能讀，壞權杖 401', async () => {
+  const e = mkenv({ READ_TOKEN: 'rd' });
+  for (const tk of ['t', 'h', 'rd']) assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, tk)).status, 200);
+  assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 'bad')).status, 401);
 });
