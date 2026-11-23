@@ -5,7 +5,7 @@ import { handle } from '../src/worker.js';
 import { fakeD1 } from './faked1.mjs';
 const env = () => ({ DB: fakeD1(), TOKEN: 't' });
 const call = (e, method, path, body, token = 't') =>
-  handle(new Request('http://x' + path, { method, headers: { authorization: `Bearer ${token}` }, body: body ? JSON.stringify(body) : undefined }), e);
+  handle(new Request('http://x' + path, { method, headers: { authorization: `Bearer ${token}` }, body: body ? JSON.stringify(method === 'GET' ? body : { actor: 'tester', ...body }) : undefined }), e);
 const mk = (e, id, priority = 100, area = '') => call(e, 'POST', '/api/cards', { id, title: id, priority, area });
 
 test('沒權杖不能寫也不能讀；READ_TOKEN 只能讀', async () => {

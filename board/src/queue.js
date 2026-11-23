@@ -1,6 +1,6 @@
 // 看板不連排隊器：排隊器自己來拉清單與放行（/api/queue/desired），結果事件存在卡片上；攢批叫醒負責串（routine fire）。
 // 機密：HOOK_TOKEN（排隊器送事件、拉清單用）、ROUTINE_KEY（叫醒用）。
-// 設定：ROUTINE_ID、WAKE_BATCH_S（預設 300）、WAKE_MAX_PER_HOUR（預設 10）。
+// 設定：ROUTINE_ID、WAKE_BATCH_S（預設 120）、WAKE_MAX_PER_HOUR（預設 10）。
 import { bearerIs } from './auth.js';
 import { stageOf, sameCommit } from './stage.js';
 const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
@@ -26,8 +26,8 @@ export async function handleHook(req, env, ctx) {
     .bind(o, card?.id ?? null, branch, kind, detail, now()).run()));
   for (const e of body.events.slice(0, 200)) {
     const kind = String(e.kind || ''), branch = e.branch ? String(e.branch) : null;
-    if (e.id != null) {
-      const r = await db.prepare('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)').bind(`${source}:${e.id}`).run();
+    if (e.id != null && e.id !== '') {
+      const r = await db.prepare('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)').bind(`${source}:${String(e.id)}`).run();
       if (!r.meta.changes) { dup++; continue; }
     }
     const card = branch ? await db.prepare('SELECT * FROM cards WHERE branch=?').bind(branch).first() : null;
@@ -41,7 +41,7 @@ export async function handleHook(req, env, ctx) {
     const claimedAndApproved = card.status === 'claimed' && card.approved_commit;
     const sameApproval = e.approved_sha == null || sameCommit(String(e.approved_sha), card.approved_commit);
     const sameRetest = e.retest == null || Number(e.retest) === card.retest;
-    if (!claimedAndApproved || !sameApproval || !sameRetest) { stale++; continue; }
+    if (kind !== 'merged' && (!claimedAndApproved || !sameApproval || !sameRetest)) { stale++; continue; }   // 已合併事實一律接受（main 已經有了）
     applied++;
     if (kind === 'superseded') {   // 內容變了：送審、放行、舊結果作廢，回到開發中
       await db.prepare('UPDATE cards SET submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,phase=NULL,phase_at=NULL,last_result=NULL,updated_at=? WHERE id=?').bind(now(), card.id).run();
@@ -81,7 +81,7 @@ export async function flush(env) {
   const db = env.DB, t = now();
   const rows = (await db.prepare('SELECT * FROM outbox WHERE sent_at IS NULL ORDER BY n LIMIT 200').all()).results;
   if (!rows.length) return { sent: 0 };
-  if (t - Math.min(...rows.map(r => r.at)) < Number(env.WAKE_BATCH_S ?? 300)) return { waiting: true };
+  if (t - Math.min(...rows.map(r => r.at)) < Number(env.WAKE_BATCH_S ?? 120)) return { waiting: true };
   const groups = new Map();
   for (const r of rows) (groups.get(r.owner_thread) || groups.set(r.owner_thread, []).get(r.owner_thread)).push(r);
   const cap = Number(env.WAKE_MAX_PER_HOUR ?? 10);

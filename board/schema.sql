@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS events (
   actor TEXT NOT NULL,
   note TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS cards_branch ON cards(branch);
+CREATE UNIQUE INDEX IF NOT EXISTS cards_branch ON cards(branch) WHERE branch IS NOT NULL;
 -- 排隊器事件去重（至少送一次，對方可能重送）
 CREATE TABLE IF NOT EXISTS hook_seen (key TEXT PRIMARY KEY);
 -- 要叫醒負責串的事件，攢批後送出

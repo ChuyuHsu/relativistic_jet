@@ -18,7 +18,7 @@
 - **排隊器該管哪些分支與放行，由它定時來拉** `GET /api/queue/desired`（`Authorization: Bearer $HOOK_TOKEN` 或 `$READ_TOKEN`）：回所有「已領、未合併、未放棄」的卡 `[{"branch","parent"?,"approved_sha"?,"retest"}]`；`parent` 是父卡的分支（父卡已合併就省略），`approved_sha` 只在已放行時有。出錯一律回非 200，不會回空清單。
 - **結果由排隊器推回來** `POST /hooks/queue`（`Authorization: Bearer $HOOK_TOKEN`），body `{"events":[{"id","kind","branch","commit","approved_sha","retest","detail","from","to","failed_items"}]}`。依 branch 對到卡後：**過期回報不算數**——卡片沒放行或已放棄，或事件的 `approved_sha`／`retest` 跟卡片現在的不符，一律丟掉（回 200，`stale` 計數，不改卡）；以事件編號去重。有效事件更新 `phase`（取 `state`／`to`，沒有就依 kind：`pushed→pending`、`tested_green→selftest_green`、`tested_red／rejected／conflict→rejected`、`queued`、`merged`、`halted→halted`）與 `last_result`（kind、commit、detail、from、to、failed_items；`GET /api/cards/<id>` 與 `/tests` 回它）。`superseded`（內容變了）清掉送審、放行與結果，回 `developing`。`parent_blocked`（父卡擋住）只註記。
 - **父卡資訊**：`GET /api/cards` 與單卡讀取，有父卡的卡多帶 `parent_stage`（父卡現在的階段，不存在回 `missing`）、`waiting_parent`（父卡還沒合併＝子卡就算放行也要等）、`parent_blocked`（父卡被放棄或不存在，需改接）。父卡被放棄時，已領的子卡會通知管理者改它的父卡；改父卡用 `PATCH parent`（可改成別張卡或清空，放行保留；拒絕自己、不存在、已放棄、循環）。網頁看板的子卡會顯示父卡是誰、是否在等父卡。
-- **通知**（攢 `WAKE_BATCH_S`，預設 300 秒，同一對象合成一則，每小時最多 `WAKE_MAX_PER_HOUR` 次，失敗保留重送；沒設 `ROUTINE_ID`／`ROUTINE_KEY` 就靜默略過）：送審→`REVIEW_THREADS`；審查退回、被排隊器退回（測試紅、撞檔）、內容變了→領卡的串；暫停、父卡擋住、排隊器自己出問題、卡住太久（開發中／審查中／退回超過 `STUCK_HOURS`，預設 6 小時，有新動靜前不重複）→`ADMIN_THREADS`。合併不通知。cron 每 2 分鐘檢查一次。
+- **通知**（攢 `WAKE_BATCH_S`，預設 120 秒，同一對象合成一則，每小時最多 `WAKE_MAX_PER_HOUR` 次，失敗保留重送；沒設 `ROUTINE_ID`／`ROUTINE_KEY` 就靜默略過）：送審→`REVIEW_THREADS`；審查退回、被排隊器退回（測試紅、撞檔）、內容變了→領卡的串；暫停、父卡擋住、排隊器自己出問題、卡住太久（開發中／審查中／退回超過 `STUCK_HOURS`，預設 6 小時，有新動靜前不重複）→`ADMIN_THREADS`。合併不通知。cron 每分鐘檢查一次。
 
 ## API
 **角色不驗證**：所有串共用 `TOKEN`，`actor` 是自報的，「放行的人不能是領卡的人」只比對字串；要真正防冒用得每個角色一把權杖，目前不做。

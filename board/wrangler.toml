@@ -12,4 +12,4 @@ database_id = "REPLACE_AFTER_d1_create"
 # 權杖用 `wrangler secret put TOKEN`，不進 repo
 
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["* * * * *"]

@@ -6,7 +6,7 @@ import { fakeD1 } from './faked1.mjs';
 
 const mkenv = (extra = {}) => ({ DB: fakeD1(), TOKEN: 't', HOOK_TOKEN: 'h', ...extra });
 const call = (e, method, path, body, token = 't') =>
-  handle(new Request('http://x' + path, { method, headers: { authorization: `Bearer ${token}` }, body: body ? JSON.stringify(body) : undefined }), e, {});
+  handle(new Request('http://x' + path, { method, headers: { authorization: `Bearer ${token}` }, body: body ? JSON.stringify(method === 'GET' ? body : { actor: 'tester', ...body }) : undefined }), e, {});
 const hook = (e, events, token = 'h') => call(e, 'POST', '/hooks/queue', { events }, token);
 const act = (e, id, a, body = {}) => call(e, 'POST', `/api/cards/${id}/${a}`, body);
 const getCard = async (e, id) => (await call(e, 'GET', `/api/cards/${id}`)).json();
@@ -115,7 +115,7 @@ test('過期回報不算數：放行版本不符、沒放行、已放棄的卡�
   assert.equal((await ev(e, 'c3', { kind: 'tested_red', approved_sha: 'fffffff' })).status, 200);
   assert.equal(await stageOf(e, 'c3'), 'selftesting');                                    // 舊放行版本晚到的退回不算
   await call(e, 'PATCH', '/api/cards/c2', { status: 'dropped' });
-  assert.equal((await (await ev(e, 'c2', { kind: 'merged' })).json()).stale, 1);
+  assert.equal((await (await ev(e, 'c2', { kind: 'tested_red' })).json()).stale, 1);
   assert.equal(await stageOf(e, 'c2'), 'dropped');
   const dup = await (await hook(e, [{ id: 777, kind: 'tested_green', branch: br('c3'), approved_sha: SHA }, { id: 777, kind: 'tested_red', branch: br('c3'), approved_sha: SHA }])).json();
   assert.deepEqual([dup.applied, dup.duplicate], [1, 1]);                                 // 以事件編號去重
@@ -222,7 +222,7 @@ test('結果帶紅項、提交、to：存在卡片上，/tests 回存下來的�
 });
 
 test('叫醒：沒設定靜默略過；沒滿批次不送；依負責串各一則；失敗保留；已送不重送；每小時上限', async () => {
-  const e = mkenv(); await approved(e, 'c1', 'cmsg_a'); await approved(e, 'c2', 'cmsg_b');
+  const e = mkenv(); await approved(e, 'c1', 'thread-a'); await approved(e, 'c2', 'thread-b');
   await ev(e, 'c1', { kind: 'tested_red', approved_sha: SHA, detail: '紅項 x' }); await ev(e, 'c2', { kind: 'conflict', approved_sha: SHA });
   assert.deepEqual(await flush(e), { skipped: 'not configured' });
   Object.assign(e, { ROUTINE_ID: 'routine-x', ROUTINE_KEY: 'k', WAKE_BATCH_S: 300 });
@@ -233,7 +233,7 @@ test('叫醒：沒設定靜默略過；沒滿批次不送；依負責串各一�
   assert.equal((await withFetch(() => flush(e), async (u, init) => { calls.push({ u, init, b: JSON.parse(init.body) }); return new Response('{}'); })).sent, 2);
   assert.equal(calls[0].u, 'https://api.anthropic.com/v1/claude_code/routines/routine-x/fire');
   assert.equal(calls[0].init.headers['anthropic-beta'], 'experimental-cc-routine-2026-04-01');
-  assert.match(calls.map(c => c.b.text).join('\n'), /cmsg_a[\s\S]*c1[\s\S]*dev\/c1[\s\S]*自測紅[\s\S]*紅項 x/);
+  assert.match(calls.map(c => c.b.text).join('\n'), /thread-a[\s\S]*c1[\s\S]*dev\/c1[\s\S]*自測紅[\s\S]*紅項 x/);
   assert.equal((await withFetch(() => flush(e), async () => new Response('{}'))).sent ?? 0, 0);
   const e2 = mkenv({ ROUTINE_ID: 'i', ROUTINE_KEY: 'k', WAKE_BATCH_S: 0, WAKE_MAX_PER_HOUR: 1 });
   await approved(e2, 'c1', 'a'); await approved(e2, 'c2', 'b');
@@ -315,4 +315,89 @@ test('對照文檔第 6 節「父卡的事」：等父卡、父卡進 main、父
   assert.deepEqual([r.parent_stage, r.parent_blocked], ['dropped', true]);
   const texts = []; await withFetch(() => flush(e), async (u, init) => { texts.push(JSON.parse(init.body).text); return new Response('{}'); });
   assert.match(texts.join('\n'), /boss[\s\S]*R[\s\S]*父卡 Q 被放棄/);
+});
+
+const raw = (e, method, path, body) => handle(new Request('http://x' + path, { method, headers: { authorization: 'Bearer t' }, body: JSON.stringify(body) }), e, {});
+
+test('審計①：父卡不在清單上（沒領、已釋放、已放棄）→ desired 帶 parent 與 parent_status；已合併省略', async () => {
+  const e = mkenv();
+  await call(e, 'POST', '/api/cards', { id: 'P', title: 'P' });
+  await claim(e, 'K', 'tk', { parent: 'P' });
+  const get = async () => (await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json()).find(x => x.branch === br('K'));
+  assert.deepEqual([(await get()).parent, (await get()).parent_status], [br('P'), 'open']);   // 父卡沒領過
+  await call(e, 'POST', '/api/claim', { id: 'P', owner: 'p', owner_thread: 'tp' });
+  assert.equal((await get()).parent_status, undefined);                                        // 父卡在清單上：只有 parent
+  await call(e, 'PATCH', '/api/cards/P', { status: 'open' });
+  assert.equal((await get()).parent_status, 'open');                                           // 已釋放
+  await call(e, 'PATCH', '/api/cards/P', { status: 'dropped' });
+  assert.equal((await get()).parent_status, 'dropped');
+  await e.DB.prepare("UPDATE cards SET phase='merged' WHERE id='P'").run();
+  assert.equal((await get()).parent, undefined);                                               // 已合併：省略
+});
+
+test('審計②：merged 事件一律接受（不看放行版本與重測計數）', async () => {
+  const e = mkenv(); await approved(e, 'c1');
+  const r = await (await ev(e, 'c1', { kind: 'merged', approved_sha: 'fffffff', retest: 9 })).json();
+  assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'c1'), 'merged');
+});
+
+test('審計③：併發送審／放行，輸家 409，放行版本永遠等於送審版本', async () => {
+  const e = mkenv(); await claim(e, 'c1'); await act(e, 'c1', 'submit', { commit: SHA, actor: 'w' });
+  const [a, b] = await Promise.all([act(e, 'c1', 'approve', { commit: SHA, actor: 'rev' }), act(e, 'c1', 'submit', { commit: SHA2, actor: 'w' })]);
+  const c = await getCard(e, 'c1');
+  if (c.approved_commit) assert.equal(c.approved_commit, c.submitted_commit);
+  assert.ok([a.status, b.status].includes(200));
+  // 讀到舊狀態後卡被別人改掉：寫入落空回 409
+  await claim(e, 'c2'); await act(e, 'c2', 'submit', { commit: SHA, actor: 'w' });
+  const real = e.DB.prepare.bind(e.DB);
+  await real("UPDATE cards SET submitted_commit='eeeeeee' WHERE id='c2'").run();   // 模擬輸掉競態：讀完之後版本被換
+  const r = await act(e, 'c2', 'approve', { commit: SHA, actor: 'rev' });
+  assert.equal(r.status, 409);
+  assert.equal((await getCard(e, 'c2')).approved_commit, null);
+});
+
+test('審計④：actor 必填，空白或 unknown 回 400', async () => {
+  const e = mkenv(); await claim(e, 'c1');
+  for (const actor of [undefined, '', '  ', 'unknown', 'Unknown']) assert.equal((await raw(e, 'POST', '/api/cards/c1/submit', { commit: SHA, actor })).status, 400);
+  assert.equal((await raw(e, 'POST', '/api/cards', { id: 'z', title: 'z' })).status, 400);
+  assert.equal((await raw(e, 'PATCH', '/api/cards/c1', { title: 'x' })).status, 400);
+  assert.equal((await raw(e, 'POST', '/api/cards/c1/submit', { commit: SHA, actor: 'w' })).status, 200);
+});
+
+test('審計⑤：攢批預設 120 秒', async () => {
+  const e = mkenv({ ROUTINE_ID: 'r', ROUTINE_KEY: 'k' }); let n = 0;
+  await claim(e, 'c1', 'tc'); await approved(e, 'c9', 'tc9');
+  await ev(e, 'c9', { kind: 'tested_red' });
+  await withFetch(async () => {
+    await e.DB.prepare('UPDATE outbox SET at=at-100').run();
+    assert.equal((await flush(e)).waiting, true);
+    await e.DB.prepare('UPDATE outbox SET at=at-30').run();
+    assert.notEqual((await flush(e)).waiting, true);
+  }, async () => { n++; return new Response('{}', { status: 200 }); });
+  assert.equal(n, 1);
+});
+
+test('審計⑥：去重鍵用完整事件編號字串（"12" 與 "123" 不互相吃）', async () => {
+  const e = mkenv(); await approved(e, 'c1');
+  const r = await (await hook(e, [{ id: 'q:12', kind: 'tested_green', branch: br('c1') }, { id: 'q:123', kind: 'tested_green', branch: br('c1') }, { id: 'q:12', kind: 'tested_green', branch: br('c1') }])).json();
+  assert.deepEqual([r.applied, r.duplicate], [2, 1]);
+});
+
+test('審計⑦：父卡釋放不通知管理者，放棄才通知', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' }); await claim(e, 'P', 'tp'); await claim(e, 'K', 'tk', { parent: 'P' });
+  await call(e, 'PATCH', '/api/cards/P', { status: 'open' });
+  assert.equal((await e.DB.prepare('SELECT * FROM outbox').all()).results.length, 0);
+  await call(e, 'POST', '/api/claim', { id: 'P', owner: 'p', owner_thread: 'tp' });
+  await call(e, 'PATCH', '/api/cards/P', { status: 'dropped' });
+  assert.equal((await e.DB.prepare("SELECT * FROM outbox WHERE kind='parent_blocked'").all()).results.length, 1);
+});
+
+test('審計 L4／L6：已合併、已放棄的卡不能再改欄位；匯入重複分支被略過', async () => {
+  const e = mkenv(); await claim(e, 'c1'); await claim(e, 'c2');
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped' });
+  assert.equal((await call(e, 'PATCH', '/api/cards/c1', { title: 'x' })).status, 409);
+  await e.DB.prepare("UPDATE cards SET phase='merged' WHERE id='c2'").run();
+  assert.equal((await call(e, 'PATCH', '/api/cards/c2', { priority: 1 })).status, 409);
+  const r = await (await call(e, 'POST', '/api/import', { cards: [{ id: 'z', title: 'z', branch: br('c2') }] })).json();
+  assert.equal(r.added, 0);
 });
