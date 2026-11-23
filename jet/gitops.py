@@ -151,7 +151,8 @@ class GitRepo:
         """patch-id：只看加減的行，不看行號與上下文，所以重疊到新 main 不變。
         先把分支套到 base 上（三方合併），再取「base → 結果」的差：這樣父分支壓合進 main 之後，
         子分支相對 main 重算，父分支那段已在 main 裡、不會算進去，指紋與當初相對父分支時相同。
-        套不上去（撞檔）時退回直接看 merge-base..分支 的差。"""
+        套不上去（撞檔）時退回直接看 merge-base..分支 的差；這和不撞時的算法不同，同一份內容可能算出
+        不同指紋，結果是放行失效、要重新確認——偏安全的方向。"""
         mb = self._merge_base(branch_sha, base_sha)
         tree = self._merge_tree(base_sha, branch_sha, mb)
         if tree is not None:
@@ -184,6 +185,8 @@ class GitRepo:
         return self._merge_tree(base_sha, branch_sha, mb) is None
 
     def stack(self, base_sha: str, items: List[Tuple[str, str]]) -> StackResult:
+        """前提（呼叫端負責）：堆疊分支的父分支要排在子之前、也在 items 裡，或已合入 base。
+        父不在 items 裡又還沒合入時，子會連父的改動一起壓進來。"""
         tip = base_sha
         kept: List[int] = []
         prefixes: List[str] = []
