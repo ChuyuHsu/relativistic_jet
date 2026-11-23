@@ -50,7 +50,9 @@ export async function handleHook(req, env, ctx) {
     const to = kind === 'superseded' ? null : e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
     if (to) await db.prepare('UPDATE cards SET phase=?,phase_at=?,updated_at=? WHERE id=?').bind(to, now(), now(), card.id).run();
     if (!['approved', 'revoked', 'superseded', 'parent_blocked'].includes(kind)) {   // 放行是看板自己的欄位；父卡擋住只是註記，都不覆蓋「最新結果」
-      const res = { kind, at: e.at ?? now(), commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: Array.isArray(e.failed_items) ? e.failed_items.slice(0, 50) : null };
+      let fi = Array.isArray(e.failed_items) && e.failed_items.length ? e.failed_items.slice(0, 50) : null;
+      if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && prev.commit === (e.commit ?? null)) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的
+      const res = { kind, at: e.at ?? now(), commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: fi };
       await db.prepare('UPDATE cards SET last_result=? WHERE id=?').bind(JSON.stringify(res), card.id).run();
     }
     await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)')
@@ -76,6 +78,14 @@ export function buildWakeText(owner, items) {
 }
 
 // 攢批叫醒：最舊的待送事件滿 WAKE_BATCH_S 才送；同負責串合成一則；每小時最多 WAKE_MAX_PER_HOUR 次；失敗保留下次重送。
+// 叫醒失敗的原因記一筆（只留最近 50 筆），查問題用
+async function fireLog(db, t, status, body) {
+  try {
+    await db.prepare('INSERT INTO fire_log(at,status,body) VALUES(?,?,?)').bind(t, status, String(body).slice(0, 300)).run();
+    await db.prepare('DELETE FROM fire_log WHERE n NOT IN (SELECT n FROM fire_log ORDER BY n DESC LIMIT 50)').run();
+  } catch {}
+}
+
 export async function flush(env) {
   if (!env.ROUTINE_ID || !env.ROUTINE_KEY) return { skipped: 'not configured' };
   const db = env.DB, t = now();
@@ -97,7 +107,8 @@ export async function flush(env) {
         body: JSON.stringify({ text: buildWakeText(owner, items) }),
       });
       ok = res.ok;
-    } catch { ok = false; }
+      if (!ok) await fireLog(db, t, res.status, await res.text().catch(() => ''));
+    } catch (e) { ok = false; await fireLog(db, t, 0, String(e && e.message || e)); }
     if (!ok) break;   // 失敗：保留，下次重送
     await db.prepare('INSERT INTO fires(at) VALUES(?)').bind(t).run();
     const ids = items.map(i => i.n);
