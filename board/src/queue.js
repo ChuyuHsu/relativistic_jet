@@ -45,17 +45,22 @@ export async function handleHook(req, env, ctx) {
   let cur = [];
   const q = (sql, ...args) => cur.push(db.prepare(sql).bind(...args));
   const patch = (card, cols) => { const ks = Object.keys(cols); q(`UPDATE cards SET ${ks.map(k => `${k}=?`).join(',')} WHERE id=?`, ...ks.map(k => cols[k]), card.id); Object.assign(card, cols); };
-  const post = (owners, card, kind, branch, detail) => owners.forEach(o => q('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)', o, card?.id ?? null, branch, kind, detail, T));
-  const logEv = (id, note) => q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', id, T, source, note);
+  // guard：[條件 SQL, ...參數]；有帶時只在條件成立才寫（同一個 batch 內前面的 UPDATE 已生效）
+  const post = (owners, card, kind, branch, detail, guard) => owners.forEach(o => guard
+    ? q(`INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) SELECT ?,?,?,?,?,? WHERE EXISTS(${guard[0]})`, o, card?.id ?? null, branch, kind, detail, T, ...guard.slice(1))
+    : q('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)', o, card?.id ?? null, branch, kind, detail, T));
+  const logEv = (id, note, guard) => guard
+    ? q(`INSERT INTO events(card_id,at,actor,note) SELECT ?,?,?,? WHERE EXISTS(${guard[0]})`, id, T, source, note, ...guard.slice(1))
+    : q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', id, T, source, note);
   const hl = (e, outcome) => { logged = true; q('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)', T, JSON.stringify(e).slice(0, 600), outcome); };
   const groups = [];
   for (const e of events) {
-    cur = [];
+    cur = []; const a0 = applied;
     await (async () => {
       const kind = String(e.kind || ''), branch = e.branch ? String(e.branch) : null;
       if (hasId(e)) {
         if (seen.has(keyOf(e))) { dup++; return; }
-        seen.add(keyOf(e)); q('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)', keyOf(e));
+        seen.add(keyOf(e)); q('INSERT INTO hook_seen(key) VALUES(?)', keyOf(e));   // 不帶 OR IGNORE：兩個併發相同請求撞 UNIQUE，後者整組回滾，去重保持原子
       }
       let card = branch ? byBranch.get(branch) : null;
       if (!card && kind === 'drop_checked' && e.card) card = byId.get(String(e.card));
@@ -83,17 +88,22 @@ export async function handleHook(req, env, ctx) {
         // 帶 superseded_by：沒有不在 main 的改動，或接手的卡全都涵蓋了才放棄；只帶 discard_reason：一律放棄（有漏的另發通知）
         const ok = !card.superseded_by ? true : (!unmerged || covered);
         if (ok) {
-          patch(card, { status: 'dropped', drop_unmerged: unmerged ? 1 : 0, drop_checked_at: T, updated_at: T });
-          logEv(card.id, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`);
+          // 預載到送出之間若有人取消放棄或改掉，條件不成立就整組不寫（UPDATE 帶條件；events／outbox 用同條件的 EXISTS）
+          q("UPDATE cards SET status='dropped',drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL AND status!='dropped'", unmerged ? 1 : 0, T, T, card.id);
+          Object.assign(card, { status: 'dropped', drop_unmerged: unmerged ? 1 : 0, drop_checked_at: T, updated_at: T });
+          logEv(card.id, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND drop_checked_at=?`, card.id, T]);
+          const dg = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND drop_checked_at=?`, card.id, T];
           const kids = (await db.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(card.id).all()).results;   // 子卡被擋住，通知管理者
-          for (const k of kids) post(admins.length ? admins : [k.owner_thread || ''], k, 'parent_blocked', k.branch, `父卡 ${card.id} 被放棄，請改接別張卡或直接接 main`);
-          if (unmerged && !card.superseded_by) post(admins.length ? admins : [''], card, 'drop_discarded', card.branch, `缺 ${mc} 個檔${missing ? `：${missing}` : ''}；放棄原因：${card.discard_reason}`);
+          for (const k of kids) post(admins.length ? admins : [k.owner_thread || ''], k, 'parent_blocked', k.branch, `父卡 ${card.id} 被放棄，請改接別張卡或直接接 main`, dg);
+          if (unmerged && !card.superseded_by) post(admins.length ? admins : [''], card, 'drop_discarded', card.branch, `缺 ${mc} 個檔${missing ? `：${missing}` : ''}；放棄原因：${card.discard_reason}`, dg);
         } else {   // 放棄不成立：回到原階段，通知負責串與管理者
           const why = `這張卡還有改動不在 main，也不在 ${card.superseded_by} 裡${mc ? `（缺 ${mc} 個檔）` : ''}${missing ? `，缺的檔：${missing}` : ''}`;
           const owner = card.owner_thread || '';
-          patch(card, { dropping_at: null, superseded_by: null, discard_reason: null, drop_unmerged: 1, drop_checked_at: T, updated_at: T });
-          logEv(card.id, `放棄沒成立：${why}`);
-          post([...new Set([owner, ...(admins.length ? admins : [])])], card, 'drop_rejected', card.branch, why);
+          q('UPDATE cards SET dropping_at=NULL,superseded_by=NULL,discard_reason=NULL,drop_unmerged=1,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL', T, T, card.id);
+          Object.assign(card, { dropping_at: null, superseded_by: null, discard_reason: null, drop_unmerged: 1, drop_checked_at: T, updated_at: T });
+          const rg = ['SELECT 1 FROM cards WHERE id=? AND dropping_at IS NULL AND drop_checked_at=?', card.id, T];
+          logEv(card.id, `放棄沒成立：${why}`, rg);
+          post([...new Set([owner, ...(admins.length ? admins : [])])], card, 'drop_rejected', card.branch, why, rg);
         }
         return;
       }
@@ -120,13 +130,20 @@ export async function handleHook(req, env, ctx) {
       if (ADMIN_KINDS.has(kind)) post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
       else if (ATTENTION.has(kind)) post([card.owner_thread || ''], card, kind, branch, detail);
     })();
-    if (cur.length) groups.push(cur);
+    if (cur.length) groups.push({ s: cur, applied: applied > a0 });
   }
-  if (logged) groups.push([db.prepare('DELETE FROM hook_log WHERE n NOT IN (SELECT n FROM hook_log ORDER BY n DESC LIMIT 100)')]);
+  if (logged) groups.push({ s: [db.prepare('DELETE FROM hook_log WHERE n NOT IN (SELECT n FROM hook_log ORDER BY n DESC LIMIT 100)')], applied: false });
   // ---- 一次送出：每個 batch 最多 80 句，事件的語句整組不拆開 ----
+  // 整個 batch 失敗（例如併發的相同請求撞 hook_seen 的 UNIQUE）：改成每組單獨送；單組撞 UNIQUE 就記為重複跳過，其他錯誤照丟
   let batch = [];
-  const flushBatch = async () => { if (batch.length) { const b = batch; batch = []; await db.batch(b); } };
-  for (const g of groups) { if (batch.length && batch.length + g.length > 80) await flushBatch(); batch.push(...g); }
+  const sendOne = async g => { try { await db.batch(g.s); } catch (err) { if (!/UNIQUE|constraint/i.test(String(err && err.message || err))) throw err; dup++; if (g.applied) applied--; } };
+  const flushBatch = async () => {
+    if (!batch.length) return;
+    const b = batch; batch = [];
+    try { await db.batch(b.flatMap(g => g.s)); } catch { for (const g of b) await sendOne(g); }
+  };
+  let n = 0;
+  for (const g of groups) { if (batch.length && n + g.s.length > 80) { await flushBatch(); n = 0; } batch.push(g); n += g.s.length; }
   await flushBatch();
   if (ctx && ctx.waitUntil) ctx.waitUntil(autoFlush(env));
   return json({ ok: true, applied, unmatched, duplicate: dup, stale, processed: events.length, remaining });

@@ -564,3 +564,24 @@ test('hook 一批 50 筆：D1 往返只有個位數、同批多事件依序生�
   const over = await (await hook(e, Array.from({ length: 205 }, (_, i) => ({ id: `ov:${i}`, kind: 'queue_error' })))).json();
   assert.deepEqual([over.processed, over.remaining], [200, 5]);                                  // 超過 200 筆回報還剩幾筆讓對方續傳
 });
+
+test('hook 併發：同一批事件同時送兩次，通知與紀錄只寫一份，後到的判重複', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await approved(e, 'p1', 'th1'); await approved(e, 'p2', 'th2');
+  const events = [{ id: 'cc:1', branch: br('p1'), kind: 'tested_red', approved_sha: SHA, commit: SHA }, { id: 'cc:2', branch: br('p2'), kind: 'conflict', approved_sha: SHA, commit: SHA }];
+  const [a, b] = await Promise.all([hook(e, events).then(r => r.json()), hook(e, events).then(r => r.json())]);
+  assert.equal(a.applied + b.applied, 2); assert.equal(a.duplicate + b.duplicate, 2);
+  assert.equal((await e.DB.prepare("SELECT count(*) n FROM outbox WHERE kind IN ('tested_red','conflict')").first()).n, 2);
+  assert.equal((await e.DB.prepare("SELECT count(*) n FROM events WHERE note LIKE 'tested_red%'").first()).n, 1);
+});
+
+test('放棄查驗：送出前卡被人取消放棄，結果不覆蓋、不發通知', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' }); await claim(e, 'c1', 'th1'); await claim(e, 'k', 'thk', { parent: 'c1' });
+  await act(e, 'c1', 'submit', { commit: SHA });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: 'x' });
+  const real = e.DB.batch.bind(e.DB);
+  e.DB.batch = async l => { await e.DB.prepare("UPDATE cards SET dropping_at=NULL,discard_reason=NULL WHERE id='c1'").run(); return real(l); };   // 預載之後、送出之前，有人把放棄取消了
+  await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true });
+  assert.notEqual(await stageOf(e, 'c1'), 'dropped');
+  assert.equal((await e.DB.prepare("SELECT count(*) n FROM outbox WHERE kind='parent_blocked'").first()).n, 0);
+});
