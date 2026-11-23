@@ -923,7 +923,9 @@ class Scheduler:
         if self.source is None:
             return True
         age = self.source.age()
-        if age is None or age > self.cfg.source["max_age_s"]:
+        if age is None:
+            return False                              # 重啟後第一次拉取還沒完成：先不開批、不推，但不算「過期」，不發事件
+        if age > self.cfg.source["max_age_s"]:
             self._note_error("外部來源", f"清單超過 {int(self.cfg.source['max_age_s'])} 秒沒更新成功，只測不合（來源恢復後自動繼續）")
             return False
         if self._last_err_msg and self._last_err_msg.startswith("外部來源："):

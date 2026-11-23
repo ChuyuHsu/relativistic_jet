@@ -697,6 +697,19 @@ class StaleResult(CF):
             self.assertEqual(e["approved_sha"], "a-2")
 
 
+class FirstPull(CF):
+    def test_no_stale_error_before_first_successful_pull(self):
+        self.mk()
+        self.repo.add("a")
+        self.src_err = "還沒好"                                   # 重啟後第一次拉取還沒成功
+        self.tick(10)
+        self.assertEqual(self.events("queue_error"), [])         # 不算過期，不發事件
+        self.assertEqual(self.repo.ff_log, [])
+        self.src_err = None
+        self.appr("a")
+        self.go(until=lambda: self.merged() == {"a"})
+
+
 class UnknownGrace(CF):
     def test_unresolvable_approved_sha_becomes_superseded_after_grace(self):
         self.mk()

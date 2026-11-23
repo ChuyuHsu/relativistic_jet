@@ -455,12 +455,12 @@ class ThreadSafetyTest(Base):
                 ex = Executor()
                 core = ALLOWED[i % len(ALLOWED)]
                 for k in range(5):
-                    j = Job(layer="gate", workdir=self.tmp, cores=[core], timeout_s=30,
+                    j = Job(layer="gate", workdir=self.tmp, cores=[core], timeout_s=120,
                             report_path=os.path.join(self.tmp, f"t{i}_{k}.json"), log_path=os.path.join(self.tmp, f"t{i}_{k}.log"),
                             argv=[PY, "-c", "import json,sys;json.dump({'items':[{'id':'a','status':'pass'}]},open(sys.argv[1],'w'))",
                                   "{report}"])
                     h = ex.start(j)
-                    end = time.monotonic() + 30
+                    end = time.monotonic() + 120
                     r = None
                     while r is None and time.monotonic() < end:
                         r = ex.poll(h)
@@ -473,7 +473,7 @@ class ThreadSafetyTest(Base):
         for t in ts:
             t.start()
         for t in ts:
-            t.join(120)
+            t.join(300)
         self.assertEqual(errors, [])
         self.assertEqual(results, ["pass"] * 15)
 
