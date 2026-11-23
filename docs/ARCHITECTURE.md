@@ -61,7 +61,7 @@ docs/           DESIGN（設計）、ARCHITECTURE（本檔）
 | --- | --- |
 | git | remote、main、branch_patterns |
 | paths | state_dir、work_dir |
-| cores | pool（如 `"8-87"`）、selftest_cores、batch_cores、reserve_for_selftest |
+| cores | pool（如 `"0-7"`）、selftest_cores、batch_cores、reserve_for_selftest |
 | limits | selftest_timeout_s、batch_timeout_s、batch_max、points、double_fail_halt、min_free_mem_mb、min_free_disk_mb |
 | policy | require_approval |
 | commands | test（必要）、classify（選配） |

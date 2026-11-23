@@ -60,6 +60,12 @@ class Base(unittest.TestCase):
                 only=only, argv=argv or [PY, "-c", code])
         return j
 
+    def ok_job(self, code, **kw):
+        """跑完會寫一份全綠報告的工作（沒報告的 rc=0 會被判 infra）。"""
+        j = self.job("", **kw)
+        j.argv = [PY, "-c", code + ";import json;json.dump({'items':[{'id':'a','status':'pass'}]},open(%r,'w'))" % j.report_path]
+        return j
+
     def run_job(self, j, secs=20.0):
         h = self.ex.start(j)
         self.handles.append(h)
@@ -78,7 +84,8 @@ REPORT = ("import json,sys;json.dump({{'schema':1,'duration_s':0.1,'total':3,'it
 
 class ResultTest(Base):
     def test_pass(self):
-        j = self.job("print('hello')")
+        j = self.job("")
+        j.argv = [PY, "-c", "import json;print('hello');json.dump({'items':[{'id':'a','status':'pass'}]},open(%r,'w'))" % j.report_path]
         h, r = self.run_job(j)
         self.assertEqual((r.status, r.exit_code, r.failed_items), ("pass", 0, []))
         self.assertGreater(r.duration_s, 0)
@@ -102,15 +109,36 @@ class ResultTest(Base):
         _, r = self.run_job(j)
         self.assertEqual((r.status, r.failed_items), ("fail", ["x"]))
 
-    def test_fail_without_report(self):
-        _, r = self.run_job(self.job("raise SystemExit(1)"))
-        self.assertEqual((r.status, r.failed_items), ("fail", []))
+    def test_no_report_is_infra_never_green_never_empty_red(self):
+        for rc in (0, 1):
+            _, r = self.run_job(self.job("raise SystemExit(%d)" % rc))
+            self.assertEqual((r.status, r.failed_items), ("infra", []), rc)
 
     def test_corrupt_report(self):
         j = self.job("")
         j.argv = [PY, "-c", "open(%r,'w').write('{oops');raise SystemExit(1)" % j.report_path]
         _, r = self.run_job(j)
-        self.assertEqual((r.status, r.failed_items), ("fail", []))
+        self.assertEqual((r.status, r.failed_items), ("infra", []))
+
+    def test_report_without_items_or_empty_items_is_infra(self):
+        for body in ({"schema": 1}, {"items": []}, {"items": "x"}, [1, 2]):
+            for rc in (0, 1):
+                j = self.job("")
+                j.argv = [PY, "-c", "import json;json.dump(%r,open(%r,'w'));raise SystemExit(%d)" % (body, j.report_path, rc)]
+                _, r = self.run_job(j)
+                self.assertEqual((r.status, r.failed_items), ("infra", []), (body, rc))
+
+    def test_exit_one_but_no_red_item_is_infra(self):
+        j = self.job("")
+        j.argv = [PY, "-c", "import json;json.dump({'items':[{'id':'a','status':'pass'}]},open(%r,'w'));raise SystemExit(1)" % j.report_path]
+        _, r = self.run_job(j)
+        self.assertEqual((r.status, r.failed_items), ("infra", []))
+
+    def test_exit_zero_all_pass_report(self):
+        j = self.job("")
+        j.argv = [PY, "-c", "import json;json.dump({'items':[{'id':'a','status':'pass'},{'id':'b','status':'skip'}]},open(%r,'w'))" % j.report_path]
+        _, r = self.run_job(j)
+        self.assertEqual((r.status, r.failed_items), ("pass", []))
 
     def test_exit_two_is_infra(self):
         _, r = self.run_job(self.job("raise SystemExit(2)"))
@@ -133,7 +161,7 @@ class ResultTest(Base):
         with open(j.report_path, "w") as f:
             json.dump({"items": [{"id": "old", "status": "fail"}]}, f)
         _, r = self.run_job(j)
-        self.assertEqual(r.failed_items, [])
+        self.assertEqual((r.status, r.failed_items), ("infra", []))   # 舊報告被清掉，不會被誤讀
 
 
 class PlaceholderTest(Base):
@@ -165,14 +193,14 @@ class PlaceholderTest(Base):
 
 class AffinityTest(Base):
     def test_child_is_pinned_to_job_cores(self):
-        j = self.job("import os;print(sorted(os.sched_getaffinity(0)))", cores_=[ALLOWED[-1]])
+        j = self.ok_job("import os;print(sorted(os.sched_getaffinity(0)))", cores_=[ALLOWED[-1]])
         _, r = self.run_job(j)
         self.assertEqual(r.status, "pass")
         self.assertEqual(rd(j.log_path).strip(), str([ALLOWED[-1]]))
 
     def test_own_process_is_not_pinned(self):
         before = os.sched_getaffinity(0)
-        self.run_job(self.job("pass"))
+        self.run_job(self.ok_job("pass"))
         self.assertEqual(os.sched_getaffinity(0), before)
 
     def test_bad_core_raises(self):
@@ -228,7 +256,7 @@ class KillTest(Base):
 
     def test_leftover_after_normal_exit_is_swept(self):
         # 領頭的行程正常結束，但背景還留著一個孫行程：不准留孤兒
-        j = self.job(self.GRANDCHILD % (self._pidfile(), 0.3))
+        j = self.ok_job(self.GRANDCHILD % (self._pidfile(), 0.3))
         _, r = self.run_job(j)
         self.assertEqual(r.status, "pass")
         gc = int(rd(self._pidfile()))
@@ -341,7 +369,7 @@ class ResourceTest(Base):
 
 class ReportTest(unittest.TestCase):
     def test_read_report_missing(self):
-        self.assertEqual(read_report("/nonexistent/x.json"), [])
+        self.assertIsNone(read_report("/nonexistent/x.json"))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,10 @@
 退出碼：0 全過；1 有測試失敗（逐項看報告）；其他（含 2、被訊號殺掉、找不到指令）都算
 infra（不算紅，重跑）。退出碼 0 但報告裡有紅項時以報告為準，判成 fail（紅的絕不放行）。
 
-只用標準庫、Linux。本模組不寫資料庫、不碰 Git；呼叫它的是排隊器主行程（單執行緒）。
+報告（{report}）缺、壞、沒有項目，或退出碼 1 卻沒有任何紅項：一律判 infra 重跑（寧可重跑，不可誤合）。
+
+只用標準庫、Linux。前提：呼叫者是單執行緒（排隊器主行程）——start 用 preexec_fn 在子行程裡綁核，
+preexec_fn 只在單執行緒下安全；之後若同一行程要開 HTTP 執行緒，這裡要改成先 fork 一個單執行緒的啟動器。本模組不寫資料庫、不碰 Git；呼叫它的是排隊器主行程（單執行緒）。
 """
 import json
 import os
@@ -112,14 +115,18 @@ def fill_argv(template: List[str], job: Job) -> List[str]:
     return out
 
 
-def read_report(path: str) -> List[str]:
-    """報告（JSON）裡 fail／timeout 的項目 id；沒有或壞掉回空清單。"""
+def read_report(path: str) -> Optional[List[str]]:
+    """報告（JSON）裡 fail／timeout 的項目 id。報告不存在、JSON 壞、沒有 items、或 items 是空的
+    （等於沒測任何東西）回 None＝報告不可信；呼叫者不可把它當成「沒有紅項」。"""
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
-        return [str(it["id"]) for it in d.get("items", []) if it.get("status") in RED]
+        items = d["items"]
+        if not isinstance(items, list) or not items:
+            return None
+        return [str(it["id"]) for it in items if it.get("status") in RED]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return []
+        return None
 
 
 class Executor:
@@ -227,17 +234,22 @@ class Executor:
         if h.log is not None:
             h.log.close()
             h.log = None
-        items = read_report(h.job.report_path) if forced != "cancelled" else []
+        rep = read_report(h.job.report_path) if forced != "cancelled" else None
+        items = rep or []
         if forced == "cancelled":
             status = "cancelled"
         elif forced == "timeout":
             status = "timeout"
-        elif rc == 0:
-            status = "fail" if items else "pass"
-        elif rc == 1:
-            status = "fail"
-        else:
+        elif rc not in (0, 1):
             status = "infra"   # 2、被訊號殺掉、找不到指令…都不算紅
+        elif rep is None:
+            # 報告缺、壞、或沒有項目：沒有可信的逐項結果。判綠會讓沒測完的提交進 main，
+            # 判紅則空清單會被批測當成「沒有新紅項」；一律當 infra 重跑（寧可重跑，不可誤合）
+            status = "infra"
+        elif rc == 0:
+            status = "fail" if items else "pass"   # 退出碼 0 但報告有紅項：以報告為準
+        else:
+            status = "fail" if items else "infra"  # 退出碼 1 卻零個紅項：前後矛盾，重跑
         h.result = JobResult(status=status, exit_code=rc, failed_items=items, duration_s=dur)
         self._live.discard(h)
         return h.result
