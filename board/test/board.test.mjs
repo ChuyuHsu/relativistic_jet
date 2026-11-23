@@ -68,13 +68,15 @@ test('釋放回 open 會清掉負責人與分支', async () => {
   assert.deepEqual([c.owner, c.branch, c.phase], [null, null, null]);
 });
 
-test('退回後換新分支重做：phase 清掉', async () => {
+test('退回後換新分支重做：看板給新分支名、phase 清掉、不能自己改分支名', async () => {
   const e = env();
-  await mk(e, 'c'); await call(e, 'POST', '/api/claim', { id: 'c', owner: 'A', branch: 'dev/c1' });
-  await e.DB.prepare("UPDATE cards SET phase='rejected' WHERE id='c'").run();
-  await call(e, 'PATCH', '/api/cards/c', { branch: 'dev/c2' });
-  const c = await (await call(e, 'GET', '/api/cards/c')).json();
-  assert.deepEqual([c.branch, c.phase, c.status], ['dev/c2', null, 'claimed']);
+  await mk(e, 'C'); const c1 = await (await call(e, 'POST', '/api/claim', { id: 'C', owner: 'A' })).json();
+  assert.equal(c1.branch, 'dev/c');   // 前綴＋卡號小寫，由看板給
+  await e.DB.prepare("UPDATE cards SET phase='rejected' WHERE id='C'").run();
+  assert.equal((await call(e, 'PATCH', '/api/cards/C', { branch: 'x' })).status, 400);
+  const c2 = await (await call(e, 'POST', '/api/cards/C/rebranch', {})).json();
+  assert.deepEqual([c2.branch, c2.phase, c2.status, c2.attempt], ['dev/c-r2', null, 'claimed', 2]);
+  assert.equal((await (await call(e, 'POST', '/api/cards/C/rebranch', {})).json()).branch, 'dev/c-r3');
 });
 
 test('通用匯入：略過重複與不合法', async () => {

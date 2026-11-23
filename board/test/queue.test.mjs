@@ -92,21 +92,78 @@ test('合入不叫醒', async () => {
   assert.equal((await e.DB.prepare('SELECT count(*) AS n FROM outbox').first()).n, 0);
 });
 
+const regQueue = e => handle(new Request('http://x/relay/queue', { method: 'PUT', headers: { authorization: 'Bearer r' }, body: 'https://q.trycloudflare.com' }), e, {});
+
 test('放行／撤回／查測試：經門牌打排隊器，帶看板自己的權杖', async () => {
-  const e = mkenv(); await card(e, 'c1', 'dev/c1', 'a');
-  assert.equal((await call(e, 'POST', '/api/cards/c1/approve', { commit: 'abc1234' })).status, 503);   // 還沒登記門牌
-  await handle(new Request('http://x/relay/queue', { method: 'PUT', headers: { authorization: 'Bearer r' }, body: 'https://q.trycloudflare.com' }), e, {});
+  const e = mkenv(); await card(e, 'c1', 'dev/c1', 'a'); await regQueue(e);
   const seen = [];
   await withFetch(async () => {
     assert.equal((await call(e, 'POST', '/api/cards/c1/approve', { actor: 'w' })).status, 400);   // 沒帶 commit
     const r = await call(e, 'POST', '/api/cards/c1/approve', { commit: 'abc1234', actor: 'w' });
-    assert.equal(r.status, 200);
+    assert.equal(r.status, 200); assert.equal((await r.json()).delivered, true);
     assert.equal((await call(e, 'POST', '/api/cards/c1/revoke', {})).status, 200);
     assert.equal((await call(e, 'GET', '/api/cards/c1/tests')).status, 200);
   }, async (u, init) => { seen.push({ u, init }); return new Response('{"ok":true}'); });
-  assert.equal(seen[0].u, 'https://q.trycloudflare.com/approve');
-  assert.deepEqual(JSON.parse(seen[0].init.body), { branch: 'dev/c1', sha: 'abc1234', by: 'w' });
-  assert.equal(seen[0].init.headers.authorization, 'Bearer q');
-  assert.equal(seen[1].u, 'https://q.trycloudflare.com/revoke');
-  assert.equal(seen[2].u, 'https://q.trycloudflare.com/branches/dev%2Fc1');
+  const posts = seen.filter(s => s.init.method === 'POST');
+  assert.equal(posts[0].u, 'https://q.trycloudflare.com/track');   // 認領時登記
+  const ap = posts.find(s => s.u.endsWith('/approve'));
+  assert.deepEqual(JSON.parse(ap.init.body), { branch: 'dev/c1', sha: 'abc1234', by: 'w' });
+  assert.equal(ap.init.headers.authorization, 'Bearer q');
+  assert.ok(seen.some(s => s.u === 'https://q.trycloudflare.com/branches/dev%2Fc1'));
 });
+
+const getCard = async (e, id) => (await (await call(e, 'GET', `/api/cards/${id}`)).json());
+
+test('登記制：認領即登記（帶父卡的分支）；連不上先記著，補送到成功；順序不亂', async () => {
+  const e = mkenv(); await regQueue(e);
+  await call(e, 'POST', '/api/cards', { id: 'P', title: 'p' });
+  await call(e, 'POST', '/api/cards', { id: 'K', title: 'k', parent: 'P' });
+  const sent = []; let up = false;
+  const impl = async (u, init) => { if (!up) throw new Error('down'); if (init.method === 'POST') sent.push([u.replace('https://q.trycloudflare.com', ''), init.body && JSON.parse(init.body)]); return new Response('{}'); };
+  await withFetch(async () => {
+    await call(e, 'POST', '/api/claim', { id: 'P', owner: 'a' });          // 連不上
+    assert.equal((await getCard(e, 'P')).sync_pending, 1);
+    await call(e, 'POST', '/api/claim', { id: 'K', owner: 'a' });
+    up = true;
+    await flushSync(e);                                                       // cron 補送
+    assert.equal((await getCard(e, 'P')).sync_pending, 0);
+  }, impl);
+  assert.deepEqual(sent.map(x => x[0]), ['/track', '/track']);
+  assert.deepEqual(sent[0][1], { branch: 'dev/p' });
+  // K 的父卡 P 在 K 認領時已有分支，所以帶 parent
+  assert.deepEqual(sent[1][1], { branch: 'dev/k', parent: 'dev/p' });
+});
+
+test('換分支：先取消舊的再登記新的；釋放／放棄：取消登記', async () => {
+  const e = mkenv(); await regQueue(e); await card(e, 'c1', 'dev/c1', 'a');
+  const sent = [];
+  await withFetch(async () => {
+    await call(e, 'POST', '/api/cards/c1/rebranch', {});
+    await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped' });
+    await call(e, 'PATCH', '/api/cards/c1', { status: 'open' });
+  }, async (u, init) => { sent.push(u.replace('https://q.trycloudflare.com', '') + ' ' + init.body); return new Response('{}'); });
+  const tail = sent.slice(-4);
+  assert.deepEqual(tail, ['/untrack {"branch":"dev/c1"}', '/track {"branch":"dev/c1-r2"}', '/untrack {"branch":"dev/c1-r2"}', '/untrack {"branch":"dev/c1-r2"}']);
+});
+
+test('上游明確拒絕（4xx）：標失敗不重送；5xx 保留重送；放行連不上回 202', async () => {
+  const e = mkenv(); await regQueue(e);
+  await call(e, 'POST', '/api/cards', { id: 'c1', title: 'c1' });
+  await withFetch(() => call(e, 'POST', '/api/claim', { id: 'c1', owner: 'a' }), async () => new Response('{}'));
+  let n = 0;
+  await withFetch(async () => {
+    const r = await call(e, 'POST', '/api/cards/c1/approve', { commit: 'abc1234' });
+    assert.equal(r.status, 202); assert.equal((await r.json()).sync_pending, 1);
+  }, async () => { n++; return new Response('boom', { status: 502 }); });
+  assert.equal((await getCard(e, 'c1')).sync_pending, 1);   // 5xx：還在，等補送
+  await withFetch(() => flushSync(e), async () => new Response('{"error":"分支的版本已經變了"}', { status: 409 }));
+  const c = await getCard(e, 'c1');
+  assert.deepEqual([c.sync_pending, c.sync_failed], [0, 1]);
+  assert.match(c.sync_error.last_error, /409/);
+  const before = n;
+  await withFetch(() => flushSync(e), async () => { n++; return new Response('{}'); });
+  assert.equal(n, before);   // 失敗的不再重送
+});
+
+import { runSync } from '../src/queue.js';
+const flushSync = e => runSync(e);

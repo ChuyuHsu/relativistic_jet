@@ -51,7 +51,7 @@ export async function queueCall(env, method, path, payload) {
   if (!env.QUEUE_TOKEN) return json({ error: '看板還沒設定 QUEUE_TOKEN' }, 503);
   try {
     const res = await fetch(row.upstream + path, {
-      method, signal: AbortSignal.timeout(25000),
+      method, signal: AbortSignal.timeout(10000),
       headers: { authorization: `Bearer ${env.QUEUE_TOKEN}`, 'content-type': 'application/json' },
       body: method === 'GET' ? undefined : JSON.stringify(payload || {}),
     });
@@ -108,4 +108,49 @@ export async function refreshPhase(env, card) {
     await env.DB.prepare('UPDATE cards SET phase=?,phase_at=? WHERE id=?').bind(b.state, t, card.id).run();
     return { ...card, phase: b.state, phase_at: t, approved: !!b.approved, phase_live: true };
   } catch { return { ...card, phase_live: false }; }
+}
+
+// ---- 對排隊器的寫入（登記、取消登記、放行、撤回）：先記下來再送，連不上就留著，cron 補送到成功為止 ----
+const PATH_OF = { track: '/track', untrack: '/untrack', approve: '/approve', revoke: '/revoke' };
+
+export async function enqueueSync(db, cardId, op, payload) {
+  const r = await db.prepare('INSERT INTO sync_jobs(card_id,op,payload,created_at) VALUES(?,?,?,?)')
+    .bind(cardId, op, JSON.stringify(payload), now()).run();
+  return r;
+}
+
+// 依序送出待送的呼叫。同一張卡前一筆沒送成，後面的不越過它（順序不能亂：取消舊的才登記新的）。
+// 上游 2xx → done；4xx（408／429 除外）→ failed 不再重送、留下原因；其餘（連不上、5xx）保留重送。
+export async function runSync(env, cardId) {
+  const db = env.DB;
+  const jobs = (cardId
+    ? await db.prepare("SELECT * FROM sync_jobs WHERE state='pending' AND card_id=? ORDER BY n LIMIT 50").bind(cardId).all()
+    : await db.prepare("SELECT * FROM sync_jobs WHERE state='pending' ORDER BY n LIMIT 50").all()).results;
+  const blocked = new Set();
+  let done = 0;
+  for (const j of jobs) {
+    if (blocked.has(j.card_id)) continue;
+    const res = await queueCall(env, 'POST', PATH_OF[j.op], JSON.parse(j.payload));
+    let msg = '';
+    if (!res.ok) { try { msg = (await res.text()).slice(0, 300); } catch { msg = ''; } }
+    if (res.ok) {
+      await db.prepare("UPDATE sync_jobs SET state='done',tries=tries+1,done_at=?,last_error=NULL WHERE n=?").bind(now(), j.n).run();
+      done++;
+    } else if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+      await db.prepare("UPDATE sync_jobs SET state='failed',tries=tries+1,last_error=? WHERE n=?").bind(`${res.status} ${msg}`, j.n).run();
+    } else {
+      await db.prepare('UPDATE sync_jobs SET tries=tries+1,last_error=? WHERE n=?').bind(`${res.status} ${msg}`, j.n).run();
+      blocked.add(j.card_id);
+    }
+  }
+  return { done };
+}
+
+// 卡片回傳要附的同步狀態：還沒送達幾筆、被上游拒絕幾筆（與最近一筆原因）
+export async function withSync(db, card) {
+  const r = await db.prepare("SELECT state, count(*) AS n FROM sync_jobs WHERE card_id=? AND state IN ('pending','failed') GROUP BY state").bind(card.id).all();
+  const by = Object.fromEntries(r.results.map(x => [x.state, x.n]));
+  const out = { ...card, sync_pending: by.pending || 0, sync_failed: by.failed || 0 };
+  if (out.sync_failed) out.sync_error = (await db.prepare("SELECT op,last_error FROM sync_jobs WHERE card_id=? AND state='failed' ORDER BY n DESC LIMIT 1").bind(card.id).first()) || null;
+  return out;
 }

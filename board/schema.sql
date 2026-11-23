@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS cards (
   owner TEXT,
   owner_thread TEXT,
   parent TEXT,
+  attempt INTEGER NOT NULL DEFAULT 1,       -- 第幾次分支（退回後換新分支重做 +1）
   phase TEXT,                              -- 上游排隊器分支狀態的快取
   phase_at INTEGER,
   branch TEXT,
@@ -38,3 +39,15 @@ CREATE TABLE IF NOT EXISTS outbox (
   at INTEGER NOT NULL, sent_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS fires (at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_jobs (
+  n INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id TEXT NOT NULL,
+  op TEXT NOT NULL,                       -- track / untrack / approve / revoke
+  payload TEXT NOT NULL,                  -- 要送給上游排隊器的 JSON
+  state TEXT NOT NULL DEFAULT 'pending',  -- pending / done / failed（上游明確拒絕，不再重送）
+  tries INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  done_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS sync_pending ON sync_jobs(state, n);

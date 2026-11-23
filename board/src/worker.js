@@ -1,13 +1,25 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
 import { handleRelay } from './relay.js';
-import { handleHook, queueCall, flush, refreshPhase } from './queue.js';
+import { handleHook, queueCall, flush, refreshPhase, enqueueSync, runSync, withSync } from './queue.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄。
 // 中段（待自測、自測綠、排隊、合入、退回…）以上游排隊器的分支狀態為準，存在 phase 欄位只是快取。
 const STATUSES = ['open', 'claimed', 'dropped'];
 function canMove(from, to) { return from !== to && (from !== 'dropped' || to === 'open'); }
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const now = () => Math.floor(Date.now() / 1000);
+// 分支名由看板給定：<前綴><卡號小寫>，第二次起加 -r<次數>。前綴可用 BRANCH_PREFIX 設定（預設 dev/）。
+const branchFor = (env, id, attempt = 1) =>
+  `${env.BRANCH_PREFIX ?? 'dev/'}${String(id).toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}${attempt > 1 ? `-r${attempt}` : ''}`;
+async function parentBranch(db, c) {
+  if (!c.parent) return undefined;
+  const p = await db.prepare('SELECT branch FROM cards WHERE id=?').bind(c.parent).first();
+  return p && p.branch ? p.branch : undefined;
+}
+async function trackPayload(db, c, branch) {
+  const parent = await parentBranch(db, c);
+  return parent ? { branch, parent } : { branch };
+}
 
 async function log(db, id, actor, note) {
   await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(id, now(), actor, note).run();
@@ -34,7 +46,7 @@ export async function handle(req, env, ctx) {
       const fresh = new Map(await Promise.all(todo.map(async c => [c.id, await refreshPhase(env, c)])));
       out = out.map(c => (fresh.has(c.id) ? fresh.get(c.id) : c));
     }
-    return json(out);
+    return json(await Promise.all(out.map(c => withSync(db, c))));
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/cards\/([^/]+)\/tests$/))) {
     const c = await db.prepare('SELECT branch FROM cards WHERE id=?').bind(m[1]).first();
@@ -46,7 +58,7 @@ export async function handle(req, env, ctx) {
     if (!c) return json({ error: 'not found' }, 404);
     if (c.status === 'claimed' && c.branch) c = await refreshPhase(env, c);
     const ev = await db.prepare('SELECT at,actor,note FROM events WHERE card_id=? ORDER BY n').bind(m[1]).all();
-    return json({ ...c, events: ev.results });
+    return json({ ...(await withSync(db, c)), events: ev.results });
   }
   const body = write ? await req.json().catch(() => ({})) : {};
   const actor = String(body.actor || 'unknown');
@@ -54,9 +66,26 @@ export async function handle(req, env, ctx) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c || !c.branch) return json({ error: '卡不存在或還沒有分支' }, 404);
     if (m[2] === 'approve' && !body.commit) return json({ error: '放行要帶審過的提交 hash（commit）' }, 400);
-    const r = await queueCall(env, 'POST', '/' + m[2], m[2] === 'approve' ? { branch: c.branch, sha: String(body.commit), by: actor } : { branch: c.branch });
-    if (r.ok) await log(db, c.id, actor, m[2] === 'approve' ? `放行 ${String(body.commit).slice(0, 12)}` : '撤回放行');
-    return r;
+    const payload = m[2] === 'approve' ? { branch: c.branch, sha: String(body.commit), by: actor } : { branch: c.branch };
+    await enqueueSync(db, c.id, m[2], payload);
+    await runSync(env, c.id);   // 先試一次；連不上就留著由 cron 補送
+    const card = await withSync(db, c);
+    await log(db, c.id, actor, m[2] === 'approve' ? `放行 ${String(body.commit).slice(0, 12)}` : '撤回放行');
+    return json({ ok: true, delivered: card.sync_pending === 0 && card.sync_failed === 0, sync_pending: card.sync_pending, sync_failed: card.sync_failed, sync_error: card.sync_error }, card.sync_pending ? 202 : 200);
+  }
+  // 退回後換新分支重做：取消登記舊分支、登記新分支（<卡號>-r2、-r3…），phase 清空
+  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/rebranch$/))) {
+    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
+    if (!c) return json({ error: 'not found' }, 404);
+    if (c.status !== 'claimed' || !c.branch) return json({ error: '只有已認領的卡能換分支' }, 409);
+    const attempt = c.attempt + 1, branch = branchFor(env, c.id, attempt);
+    const r = await db.prepare("UPDATE cards SET branch=?,attempt=?,phase=NULL,phase_at=NULL,updated_at=? WHERE id=? AND branch=?").bind(branch, attempt, now(), c.id, c.branch).run();
+    if (r.meta.changes !== 1) return json({ error: '同時有人在改，請重試' }, 409);
+    await enqueueSync(db, c.id, 'untrack', { branch: c.branch });
+    await enqueueSync(db, c.id, 'track', await trackPayload(db, c, branch));
+    await log(db, c.id, actor, `換分支 ${c.branch} → ${branch}`);
+    await runSync(env, c.id);
+    return json(await withSync(db, await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
   }
   if (req.method === 'POST' && path === '/api/cards') {
     if (!body.id || !body.title) return json({ error: 'id 與 title 必填' }, 400);
@@ -92,11 +121,15 @@ export async function handle(req, env, ctx) {
         if (!r) return json({ error: '沒有可認領的卡' }, 404);
         id = r.id;
       }
-      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=?,owner_thread=?,updated_at=? WHERE id=? AND status='open'")
-        .bind(String(body.owner), body.branch ? String(body.branch) : null, body.owner_thread ? String(body.owner_thread) : null, now(), id).run();
+      const branch = branchFor(env, id);
+      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=?,attempt=1,owner_thread=?,updated_at=? WHERE id=? AND status='open'")
+        .bind(String(body.owner), branch, body.owner_thread ? String(body.owner_thread) : null, now(), id).run();
       if (res.meta.changes === 1) {
-        await log(db, id, actor === 'unknown' ? body.owner : actor, `認領 ${body.owner}`);
-        return json(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first());
+        await log(db, id, actor === 'unknown' ? body.owner : actor, `認領 ${body.owner}，分支 ${branch}`);
+        const card = await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first();
+        await enqueueSync(db, id, 'track', await trackPayload(db, card, branch));
+        await runSync(env, id);
+        return json(await withSync(db, card));
       }
       if (body.id) return json({ error: '這張卡已被別人拿走或不存在' }, 409);
     }
@@ -107,14 +140,15 @@ export async function handle(req, env, ctx) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first();
     if (!c) return json({ error: 'not found' }, 404);
     const sets = [], vals = [];
-    for (const k of ['title', 'body', 'area', 'branch', 'parent', 'owner_thread']) if (k in body) { sets.push(`${k}=?`); vals.push(String(body[k])); }
-    if ('branch' in body && body.branch !== c.branch) sets.push('phase=NULL', 'phase_at=NULL');   // 換新分支重做
+    if ('branch' in body) return json({ error: '分支名由看板給定；退回後重做請用 POST /api/cards/<id>/rebranch' }, 400);
+    for (const k of ['title', 'body', 'area', 'parent', 'owner_thread']) if (k in body) { sets.push(`${k}=?`); vals.push(String(body[k])); }
     if ('priority' in body) { sets.push('priority=?'); vals.push(Number(body.priority)); }
     let note = '修改';
     if ('status' in body) {
       if (!STATUSES.includes(body.status)) return json({ error: '狀態不合法' }, 400);
       if (!canMove(c.status, body.status)) return json({ error: `不能從 ${c.status} 到 ${body.status}` }, 409);
       sets.push('status=?'); vals.push(body.status);
+      if (c.branch && (body.status === 'open' || body.status === 'dropped')) await enqueueSync(db, id, 'untrack', { branch: c.branch });
       if (body.status === 'open') sets.push('owner=NULL', 'owner_thread=NULL', 'branch=NULL', 'phase=NULL', 'phase_at=NULL');
       note = `${c.status} → ${body.status}` + (body.note ? `：${body.note}` : '');
     }
@@ -123,12 +157,13 @@ export async function handle(req, env, ctx) {
     // 狀態轉移也帶舊狀態條件，避免兩個人同時改
     await db.prepare(`UPDATE cards SET ${sets.join(',')} WHERE id=? AND status=?`).bind(...vals, id, c.status).run();
     await log(db, id, actor, note);
-    return json(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first());
+    await runSync(env, id);
+    return json(await withSync(db, await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
   }
   return json({ error: 'not found' }, 404);
 }
 
 export default {
   fetch: (req, env, ctx) => handle(req, env, ctx),
-  scheduled: (_ev, env, ctx) => ctx.waitUntil(flush(env)),
+  scheduled: (_ev, env, ctx) => ctx.waitUntil(Promise.all([flush(env), runSync(env)])),
 };
