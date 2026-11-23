@@ -129,6 +129,27 @@ def run_checks(cfg: config.Config, remote_timeout: float = 60,
     except (OSError, AttributeError) as e:
         add("warn", "核池", f"無法檢查：{e}")
 
+    if cfg.source:
+        from .source import SourceError, http_fetch
+        sc = cfg.source
+        try:
+            ents = http_fetch(sc["url"], sc["token_file"], min(float(sc["timeout_s"]), remote_timeout))
+            add("ok", "外部來源", f"拉到清單，{len(ents)} 條分支")
+        except SourceError as e:
+            add("fail", "外部來源", f"拉不到清單：{e}")
+    dests = list(cfg.notify_destinations) + ([{"name": "default", "url": cfg.notify_url}] if cfg.notify_url else [])
+    for d in dests:                                   # 只確認連得到（不送事件）：任何 HTTP 回應都算通
+        import urllib.error, urllib.request
+        try:
+            req = urllib.request.Request(d["url"], headers={"User-Agent": "relativistic-jet"})
+            urllib.request.urlopen(req, timeout=10).close()
+            add("ok", f"通知 {d['name']}", "連得到")
+        except urllib.error.HTTPError as e:
+            add("ok", f"通知 {d['name']}", f"連得到（GET 回 {e.code}，正常，送事件用 POST）" if e.code in (404, 405) else
+                f"連得到，但 GET 回 {e.code}")
+        except Exception as e:
+            add("fail", f"通知 {d['name']}", f"連不上：{getattr(e, 'reason', e)}")
+
     for label, f in (("讀鑰匙", cfg.read_key_file), ("寫鑰匙", cfg.write_key_file)):
         if not f:
             add("warn", label, "設定檔沒寫 api 鑰匙檔")
