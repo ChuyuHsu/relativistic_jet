@@ -49,34 +49,22 @@ test('依區域認領', async () => {
   assert.equal(r.id, 'u1');
 });
 
-test('卡片只有 open／claimed／dropped，中段狀態不能手改', async () => {
+test('PATCH status 只能是還卡 open 或放棄 dropped；放棄是結局；還卡保留分支名', async () => {
   const e = env();
   await mk(e, 'c');
   assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'merged' })).status, 400);
-  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'rejected' })).status, 400);
-  await call(e, 'POST', '/api/claim', { id: 'c', owner: 'A', branch: 'dev/c' });
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'claimed' })).status, 400);
+  const c1 = await (await call(e, 'POST', '/api/claim', { id: 'c', owner: 'A', branch: 'ignored' })).json();
+  assert.equal(c1.branch, 'dev/c');                                          // 分支名由看板給，不收呼叫端的
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { branch: 'x' })).status, 400);
+  const o = await (await call(e, 'PATCH', '/api/cards/c', { status: 'open' })).json();
+  assert.deepEqual([o.stage, o.owner, o.branch], ['new', null, 'dev/c']);    // 還卡：清負責人，分支名保留
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'open' })).status, 200);   // 重送：結果一樣
+  const c2 = await (await call(e, 'POST', '/api/claim', { id: 'c', owner: 'B' })).json();
+  assert.equal(c2.branch, 'dev/c');                                          // 重領拿到同一條
   assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'dropped' })).status, 200);
-  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'claimed' })).status, 409);
-  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'open' })).status, 200);
-});
-
-test('釋放回 open 會清掉負責人與分支', async () => {
-  const e = env();
-  await mk(e, 'c'); await call(e, 'POST', '/api/claim', { id: 'c', owner: 'A', branch: 'dev/c' });
-  await call(e, 'PATCH', '/api/cards/c', { status: 'open' });
-  const c = await (await call(e, 'GET', '/api/cards/c')).json();
-  assert.deepEqual([c.owner, c.branch, c.phase], [null, null, null]);
-});
-
-test('退回後換新分支重做：看板給新分支名、phase 清掉、不能自己改分支名', async () => {
-  const e = env();
-  await mk(e, 'C'); const c1 = await (await call(e, 'POST', '/api/claim', { id: 'C', owner: 'A' })).json();
-  assert.equal(c1.branch, 'dev/c');   // 前綴＋卡號小寫，由看板給
-  await e.DB.prepare("UPDATE cards SET phase='rejected',last_result='{}' WHERE id='C'").run();
-  assert.equal((await call(e, 'PATCH', '/api/cards/C', { branch: 'x' })).status, 400);
-  const c2 = await (await call(e, 'POST', '/api/cards/C/rebranch', {})).json();
-  assert.deepEqual([c2.branch, c2.phase, c2.status, c2.attempt], ['dev/c-r2', null, 'claimed', 2]);
-  assert.equal((await (await call(e, 'POST', '/api/cards/C/rebranch', {})).json()).branch, 'dev/c-r3');
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'dropped' })).status, 200);
+  assert.equal((await call(e, 'PATCH', '/api/cards/c', { status: 'open' })).status, 409);   // 放棄後任何動作都拒絕
 });
 
 test('通用匯入：略過重複與不合法', async () => {

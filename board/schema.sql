@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS cards (
   rejected_reason TEXT,                     -- 審查退回的原因（重新送審清掉）
   rejected_by TEXT,
   rejected_at INTEGER,
+  retest INTEGER NOT NULL DEFAULT 0,        -- 重測計數（被排隊器退回的卡，審查者或管理者按重測 +1）
   stuck_notified_at INTEGER,                -- 卡住提醒最後發的時間（有新動靜才會再提醒）
   last_result TEXT,                         -- 排隊器最新結果（事件整理成 JSON：kind、commit、detail、failed_items、to…）
   phase TEXT,                              -- 上游排隊器分支狀態的快取

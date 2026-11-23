@@ -6,16 +6,15 @@ import { stageOf, sameCommit, STAGES } from './stage.js';
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
 // 排隊器自己定時來拉 /api/queue/desired 取得該管哪些分支與放行；看板不主動連排隊器。
 const STATUSES = ['open', 'claimed', 'dropped'];
-function canMove(from, to) { return from !== to && (from !== 'dropped' || to === 'open'); }
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const now = () => Math.floor(Date.now() / 1000);
 // 分支名由看板給定：<前綴><卡號小寫>，第二次起加 -r<次數>。前綴可用 BRANCH_PREFIX 設定（預設 dev/）。
 const branchFor = (env, id, attempt = 1) =>
   `${env.BRANCH_PREFIX ?? 'dev/'}${String(id).toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}${attempt > 1 ? `-r${attempt}` : ''}`;
-async function parentBranch(db, c) {
+async function parentBranch(db, c) {   // 父卡已合併就省略
   if (!c.parent) return undefined;
-  const p = await db.prepare('SELECT branch FROM cards WHERE id=?').bind(c.parent).first();
-  return p && p.branch ? p.branch : undefined;
+  const p = await db.prepare('SELECT branch,phase FROM cards WHERE id=?').bind(c.parent).first();
+  return p && p.branch && p.phase !== 'merged' ? p.branch : undefined;
 }
 const view = c => {
   const result = resultOf(c), stage = stageOf(c);
@@ -51,6 +50,7 @@ async function desired(req, env) {
       const p = await parentBranch(env.DB, c);
       if (p) e.parent = p;
       if (c.approved_commit) e.approved_sha = c.approved_commit;
+      e.retest = c.retest;
       out.push(e);
     }
     return json(out);
@@ -90,54 +90,55 @@ export async function handle(req, env, ctx) {
   }
   const body = write ? await req.json().catch(() => ({})) : {};
   const actor = String(body.actor || 'unknown');
-  // 送審：記下送審的版本，進「審查中」；退回後改好再送審，會清掉上一次的退回與放行與舊結果。
-  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/submit$/))) {
-    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
-    if (!c || c.status !== 'claimed' || !c.branch) return json({ error: '只有已認領的卡能送審' }, 409);
-    if (!HEX.test(String(body.commit || ''))) return json({ error: '送審要帶提交 hash（commit，7 到 64 碼十六進位）' }, 400);
-    await db.prepare(`UPDATE cards SET rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,phase=NULL,phase_at=NULL,last_result=NULL,submitted_commit=?,submitted_at=?,updated_at=? WHERE id=?`).bind(String(body.commit), now(), now(), c.id).run();
-    await log(db, c.id, actor, `送審 ${String(body.commit).slice(0, 12)}`);
-    await notify(db, list(env.REVIEW_THREADS), c, 'review_requested', String(body.commit).slice(0, 12));
-    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
-  }
-  // 審查退回：進「退回」，原因存卡片並叫醒負責串；放行一併清掉。
-  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/reject$/))) {
-    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
-    if (!c || c.status !== 'claimed' || !c.submitted_commit) return json({ error: '只有已送審的卡能退回' }, 409);
-    if (!body.reason) return json({ error: '退回要寫原因（reason）' }, 400);
-    const reason = String(body.reason).slice(0, 1000);
-    await db.prepare('UPDATE cards SET rejected_reason=?,rejected_by=?,rejected_at=?,approved_commit=NULL,approved_by=NULL,approved_at=NULL,updated_at=? WHERE id=?').bind(reason, actor, now(), now(), c.id).run();
-    await log(db, c.id, actor, `審查退回：${reason}`);
-    if (c.owner_thread) await notify(db, [c.owner_thread], c, 'review_rejected', reason);
-    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
-  }
-  // 放行就是卡片上的欄位：approved_commit／by／at；撤回清空。放行的 commit 必須等於送審的 commit。排隊器自己來拉（/api/queue/desired）。
-  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/(approve|revoke)$/))) {
-    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
-    if (!c || !c.branch) return json({ error: '卡不存在或還沒有分支' }, 404);
-    if (m[2] === 'approve') {
-      if (!HEX.test(String(body.commit || ''))) return json({ error: '放行要帶審過的提交 hash（commit，7 到 64 碼十六進位）' }, 400);
-      if (!c.submitted_commit) return json({ error: '還沒送審' }, 409);
-      if (c.rejected_reason) return json({ error: '已被審查退回，要先重新送審' }, 409);
-      if (!sameCommit(String(body.commit), c.submitted_commit)) return json({ error: `放行的版本與送審的版本不同（送審 ${c.submitted_commit.slice(0, 12)}），送審後可能又有新版本` }, 409);
-      await db.prepare('UPDATE cards SET approved_commit=?,approved_by=?,approved_at=?,updated_at=? WHERE id=?').bind(String(body.commit), actor, now(), now(), c.id).run();
-      await log(db, c.id, actor, `放行 ${String(body.commit).slice(0, 12)}`);
-    } else {
-      await db.prepare('UPDATE cards SET approved_commit=NULL,approved_by=NULL,approved_at=NULL,updated_at=? WHERE id=?').bind(now(), c.id).run();
-      await log(db, c.id, actor, '撤回放行');
-    }
-    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
-  }
-  // 退回後換新分支重做：取消登記舊分支、登記新分支（<卡號>-r2、-r3…），phase 清空
-  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/rebranch$/))) {
+  // ---- 卡片動作（轉移表見 docs/CARD_FLOW.md）。表外的動作一律 409 並回現在的 stage；同一動作重送結果一樣。----
+  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/(submit|reject|approve|revoke|retest)$/))) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c) return json({ error: 'not found' }, 404);
-    if (c.status !== 'claimed' || !c.branch) return json({ error: '只有已認領的卡能換分支' }, 409);
-    const attempt = c.attempt + 1, branch = branchFor(env, c.id, attempt);
-    const r = await db.prepare(`UPDATE cards SET branch=?,attempt=?,phase=NULL,phase_at=NULL,last_result=NULL,${CLEAR_REVIEW},updated_at=? WHERE id=? AND branch=?`).bind(branch, attempt, now(), c.id, c.branch).run();
-    if (r.meta.changes !== 1) return json({ error: '同時有人在改，請重試' }, 409);
-    await log(db, c.id, actor, `換分支 ${c.branch} → ${branch}`);
-    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
+    const stage = stageOf(c), act = m[2];
+    const no = msg => json({ error: msg || `現在是「${stage}」，不能${act}`, stage }, 409);
+    const done = async note => { await log(db, c.id, actor, note); return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first())); };
+    const upd = (set, ...vals) => db.prepare(`UPDATE cards SET ${set},updated_at=? WHERE id=?`).bind(...vals, now(), c.id).run();
+    const QUEUE_CLEAR = 'phase=NULL,phase_at=NULL,last_result=NULL';
+    const APPROVAL_CLEAR = 'approved_commit=NULL,approved_by=NULL,approved_at=NULL';
+    if (act === 'submit') {
+      if (!HEX.test(String(body.commit || ''))) return json({ error: '送審要帶提交 hash（commit，7 到 64 碼十六進位）' }, 400);
+      if (!['developing', 'reviewing', 'selftesting', 'batching', 'rejected'].includes(stage)) return no();
+      if (c.submitted_commit && sameCommit(String(body.commit), c.submitted_commit)) {
+        if (stage !== 'rejected') return json(view(c));   // 同一版本重送：結果一樣
+        return no('版本沒變。被排隊器退回要重測請用 retest；被審查退回請改好再送審新版本');
+      }
+      await upd(`submitted_commit=?,submitted_at=?,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,${APPROVAL_CLEAR},${QUEUE_CLEAR}`, String(body.commit), now());
+      await notify(db, list(env.REVIEW_THREADS), c, 'review_requested', String(body.commit).slice(0, 12));
+      return done(`送審 ${String(body.commit).slice(0, 12)}`);
+    }
+    if (act === 'reject') {
+      if (!body.reason) return json({ error: '退回要寫原因（reason）' }, 400);
+      const reason = String(body.reason).slice(0, 1000);
+      if (stage === 'rejected' && c.rejected_reason === reason) return json(view(c));
+      if (!['reviewing', 'selftesting', 'batching'].includes(stage)) return no();
+      await upd(`rejected_reason=?,rejected_by=?,rejected_at=?,${APPROVAL_CLEAR},${QUEUE_CLEAR}`, reason, actor, now());
+      if (c.owner_thread) await notify(db, [c.owner_thread], c, 'review_rejected', reason);
+      return done(`審查退回：${reason}`);
+    }
+    if (act === 'approve') {
+      if (!HEX.test(String(body.commit || ''))) return json({ error: '放行要帶審過的提交 hash（commit，7 到 64 碼十六進位）' }, 400);
+      if (['selftesting', 'batching'].includes(stage) && sameCommit(String(body.commit), c.approved_commit)) return json(view(c));   // 重送：結果一樣
+      if (stage !== 'reviewing') return no();
+      if (!sameCommit(String(body.commit), c.submitted_commit)) return no(`放行的版本與送審的版本不同（送審 ${c.submitted_commit.slice(0, 12)}），送審後可能又有新版本`);
+      if (c.owner && actor === c.owner) return no('放行的人不能是領卡的人');
+      await upd(`approved_commit=?,approved_by=?,approved_at=?,${QUEUE_CLEAR}`, String(body.commit), actor, now());
+      return done(`放行 ${String(body.commit).slice(0, 12)}`);
+    }
+    if (act === 'revoke') {
+      if (stage === 'reviewing') return json(view(c));
+      if (!['selftesting', 'batching'].includes(stage)) return no();
+      await upd(`${APPROVAL_CLEAR},${QUEUE_CLEAR}`);
+      return done('撤回放行');
+    }
+    // retest：只有被排隊器退回（含暫停）的卡；放行保留、重測計數加一、清排隊器結果，回到審查通過自測中
+    if (stage !== 'rejected' || c.rejected_reason) return no(c.rejected_reason ? '被審查退回的卡不能重測，要改好再送審' : undefined);
+    await upd(`retest=retest+1,${QUEUE_CLEAR}`);
+    return done(`重測（第 ${c.retest + 1} 次）`);
   }
   if (req.method === 'POST' && path === '/api/cards') {
     if (!body.id || !body.title) return json({ error: 'id 與 title 必填' }, 400);
@@ -174,10 +175,10 @@ export async function handle(req, env, ctx) {
         id = r.id;
       }
       const branch = branchFor(env, id);
-      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=?,attempt=1,owner_thread=?,updated_at=? WHERE id=? AND status='open'")
+      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=COALESCE(branch,?),owner_thread=?,updated_at=? WHERE id=? AND status='open'")
         .bind(String(body.owner), branch, body.owner_thread ? String(body.owner_thread) : null, now(), id).run();
       if (res.meta.changes === 1) {
-        await log(db, id, actor === 'unknown' ? body.owner : actor, `認領 ${body.owner}，分支 ${branch}`);
+        await log(db, id, actor === 'unknown' ? body.owner : actor, `認領 ${body.owner}`);
         return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
       }
       if (body.id) return json({ error: '這張卡已被別人拿走或不存在' }, 409);
@@ -189,23 +190,31 @@ export async function handle(req, env, ctx) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first();
     if (!c) return json({ error: 'not found' }, 404);
     const sets = [], vals = [];
-    if ('branch' in body) return json({ error: '分支名由看板給定；退回後重做請用 POST /api/cards/<id>/rebranch' }, 400);
+    if ('branch' in body) return json({ error: '分支名由看板給定，領卡後不會變' }, 400);
     for (const k of ['title', 'body', 'area', 'parent', 'owner_thread']) if (k in body) { sets.push(`${k}=?`); vals.push(String(body[k])); }
     if ('priority' in body) { sets.push('priority=?'); vals.push(Number(body.priority)); }
     let note = '修改';
+    let after = null;
     if ('status' in body) {
-      if (!STATUSES.includes(body.status)) return json({ error: '狀態不合法' }, 400);
-      if (c.phase === 'merged') return json({ error: '已合併，不能再改狀態' }, 409);
-      if (!canMove(c.status, body.status)) return json({ error: `不能從 ${c.status} 到 ${body.status}` }, 409);
-      sets.push('status=?'); vals.push(body.status);
-      if (body.status === 'open') sets.push('owner=NULL', 'owner_thread=NULL', 'branch=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', ...CLEAR_REVIEW.split(','), 'stuck_notified_at=NULL');
-      note = `${c.status} → ${body.status}` + (body.note ? `：${body.note}` : '');
+      const stage = stageOf(c);
+      const no = () => json({ error: `現在是「${stage}」，不能改成 ${body.status}`, stage }, 409);
+      if (body.status === 'open') {          // 還卡：分支名保留；清負責人、送審、放行與結果
+        if (stage === 'new') return json(view(c));
+        if (!['developing', 'reviewing', 'rejected'].includes(stage)) return no();
+        sets.push('status=?', 'owner=NULL', 'owner_thread=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', 'stuck_notified_at=NULL', ...CLEAR_REVIEW.split(','));
+        vals.push('open');
+      } else if (body.status === 'dropped') { // 放棄：除已合併外任何階段都可
+        if (stage === 'dropped') return json(view(c));
+        if (stage === 'merged') return no();
+        sets.push('status=?'); vals.push('dropped');
+      } else return json({ error: 'status 只能改成 open（還卡）或 dropped（放棄）；認領請用 /api/claim' }, 400);
+      after = `${stage} → ${body.status}` + (body.note ? `：${body.note}` : '');
     }
     if (!sets.length) return json({ error: '沒有要改的欄位' }, 400);
     sets.push('updated_at=?'); vals.push(now());
     // 狀態轉移也帶舊狀態條件，避免兩個人同時改
     await db.prepare(`UPDATE cards SET ${sets.join(',')} WHERE id=? AND status=?`).bind(...vals, id, c.status).run();
-    await log(db, id, actor, note);
+    await log(db, id, actor, after || note);
     return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
   }
   return json({ error: 'not found' }, 404);

@@ -5,12 +5,14 @@ export const STAGES = ['new', 'developing', 'reviewing', 'selftesting', 'batchin
 
 export function stageOf(c) {
   if (c.status === 'dropped') return 'dropped';
-  if (c.status === 'open') return 'new';
   if (c.phase === 'merged') return 'merged';
-  if (c.rejected_reason || c.phase === 'rejected' || c.phase === 'halted') return 'rejected';
-  if (c.approved_commit) return ['selftest_green', 'queued', 'batching'].includes(c.phase) ? 'batching' : 'selftesting';
-  if (c.submitted_commit) return 'reviewing';
-  return 'developing';
+  if (c.status === 'open') return 'new';
+  if (c.rejected_reason) return 'rejected';
+  if (!c.submitted_commit) return 'developing';
+  if (!c.approved_commit) return 'reviewing';
+  if (['rejected', 'halted'].includes(c.phase)) return 'rejected';
+  if (['selftest_green', 'queued', 'batching'].includes(c.phase)) return 'batching';
+  return 'selftesting';
 }
 
 // 放行的提交必須等於送審的提交（短 hash 當前綴比對，至少 7 碼）
