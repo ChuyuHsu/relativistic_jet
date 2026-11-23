@@ -1,11 +1,14 @@
 """執行器測試：全部用合成的假測試指令（python -c），不需要任何專案，雲端容器可跑。"""
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from unittest import mock
 
 from jet import cores
 from jet.executor import (CoreBusy, Executor, ExecutorError, Job, ResourceLow, fill_argv,
@@ -365,6 +368,109 @@ class ResourceTest(Base):
 
     def test_ok_above_watermark(self):
         self.assertIsNone(Executor(min_free_mem_mb=1, min_free_disk_mb=1).check_resources(self.tmp))
+
+
+LAUNCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "jet", "_launch.py")
+
+
+def launch(*args):
+    return subprocess.run([PY, "-I", LAUNCH, *args], capture_output=True, text=True, timeout=30)
+
+
+class LauncherTest(unittest.TestCase):
+    def test_pins_then_execs_same_pid(self):
+        r = launch(str(ALLOWED[0]), "--", PY, "-c", "import os;print(os.getpid(), sorted(os.sched_getaffinity(0)))")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(str([ALLOWED[0]]), r.stdout)
+
+    def test_bad_core_list(self):
+        for spec in ("", "x", "100000"):
+            r = launch(spec, "--", PY, "-c", "pass")
+            self.assertEqual(r.returncode, 125, (spec, r.stderr))
+        self.assertIn("綁核失敗", launch("100000", "--", PY).stderr)
+
+    def test_bad_usage(self):
+        self.assertEqual(launch(str(ALLOWED[0]), PY).returncode, 125)
+        self.assertEqual(launch(str(ALLOWED[0]), "--").returncode, 125)
+
+    def test_missing_and_non_executable_command(self):
+        self.assertEqual(launch(str(ALLOWED[0]), "--", "/nonexistent/cmd-xyz").returncode, 127)
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "plain.txt")
+            open(p, "w").close()
+            self.assertEqual(launch(str(ALLOWED[0]), "--", p).returncode, 126)
+
+    def test_command_args_with_dashes_pass_through(self):
+        r = launch(str(ALLOWED[0]), "--", PY, "-c", "import sys;print(sys.argv[1:])", "--", "-x")
+        self.assertEqual(r.stdout.strip(), "['--', '-x']")
+
+
+class ThreadSafetyTest(Base):
+    """排隊器主行程有別的執行緒：fork 與 exec 之間不能跑 Python（不用 preexec_fn），連續起很多工作不卡。"""
+
+    def test_no_preexec_fn(self):
+        with mock.patch("jet.executor.subprocess.Popen", wraps=subprocess.Popen) as popen:
+            self.run_job(self.ok_job("pass"))
+        kw = popen.call_args.kwargs
+        self.assertIsNone(kw.get("preexec_fn"))
+        self.assertTrue(kw["start_new_session"])
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[1:3], ["-I", LAUNCH])
+
+    def test_many_jobs_with_busy_threads(self):
+        stop = threading.Event()
+        log = logging.getLogger("jet_test_busy")
+        log.addHandler(logging.NullHandler())
+        log.propagate = False
+
+        def churn():   # 一直拿 logging 的鎖、一直配置記憶體：fork 時最容易剛好握著鎖
+            junk = []
+            while not stop.is_set():
+                log.warning("x" * 200)
+                junk.append(bytearray(10000))
+                if len(junk) > 200:
+                    junk.clear()
+                time.sleep(0.0005)   # 讓出 GIL：不讓測試本身被餓死，鎖與記憶體照樣高頻被握著
+
+        threads = [threading.Thread(target=churn, daemon=True) for _ in range(3)]
+        for t in threads:
+            t.start()
+        self.addCleanup(lambda: (stop.set(), [t.join(5) for t in threads]))
+        t0 = time.monotonic()
+        for _ in range(30):
+            _, r = self.run_job(self.ok_job("pass"), secs=30)
+            self.assertEqual(r.status, "pass")
+        self.assertLess(time.monotonic() - t0, 120)
+
+    def test_jobs_started_from_other_threads_do_not_hang(self):
+        results, errors = [], []
+
+        def worker(i):
+            try:
+                ex = Executor()
+                core = ALLOWED[i % len(ALLOWED)]
+                for k in range(5):
+                    j = Job(layer="gate", workdir=self.tmp, cores=[core], timeout_s=30,
+                            report_path=os.path.join(self.tmp, f"t{i}_{k}.json"), log_path=os.path.join(self.tmp, f"t{i}_{k}.log"),
+                            argv=[PY, "-c", "import json,sys;json.dump({'items':[{'id':'a','status':'pass'}]},open(sys.argv[1],'w'))",
+                                  "{report}"])
+                    h = ex.start(j)
+                    end = time.monotonic() + 30
+                    r = None
+                    while r is None and time.monotonic() < end:
+                        r = ex.poll(h)
+                        time.sleep(0.01)
+                    results.append(r.status if r else "hang")
+            except Exception as e:   # noqa: BLE001
+                errors.append(repr(e))
+
+        ts = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(120)
+        self.assertEqual(errors, [])
+        self.assertEqual(results, ["pass"] * 15)
 
 
 class ReportTest(unittest.TestCase):

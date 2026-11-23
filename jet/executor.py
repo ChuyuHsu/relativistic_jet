@@ -7,20 +7,22 @@ infra（不算紅，重跑）。退出碼 0 但報告裡有紅項時以報告為
 
 報告（{report}）缺、壞、沒有項目，或退出碼 1 卻沒有任何紅項：一律判 infra 重跑（寧可重跑，不可誤合）。
 
-只用標準庫、Linux。前提：呼叫者是單執行緒（排隊器主行程）——start 用 preexec_fn 在子行程裡綁核，
-preexec_fn 只在單執行緒下安全；之後若同一行程要開 HTTP 執行緒，這裡要改成先 fork 一個單執行緒的啟動器。本模組不寫資料庫、不碰 Git；呼叫它的是排隊器主行程（單執行緒）。
+只用標準庫、Linux。排隊器主行程可以有別的執行緒：開子行程時 fork 與 exec 之間不跑任何 Python
+（不用 preexec_fn）；綁核由小啟動器 jet/_launch.py 在新行程裡做，做完 exec 成真正的指令。本模組不寫資料庫、不碰 Git；呼叫它的是排隊器主行程（單執行緒）。
 """
 import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import IO, List, Optional, Set
 
 from . import cores as _cores
 
+LAUNCHER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_launch.py")
 PLACEHOLDERS = ("{layer}", "{cores}", "{ncores}", "{workdir}", "{report}", "{only}")
 RED = ("fail", "timeout")   # 報告裡算紅的項目狀態
 
@@ -115,6 +117,15 @@ def fill_argv(template: List[str], job: Job) -> List[str]:
     return out
 
 
+def resolve_command(argv0: str, cwd: str, env_path: Optional[str] = None) -> Optional[str]:
+    """指令找得到而且能執行才回路徑（含 / 的相對路徑照工作目錄解）；找不到回 None。
+    啟動器會 exec，找不到只會在子行程裡失敗；這裡先擋，讓 start 像以前一樣直接丟 ExecutorError。"""
+    if os.sep in argv0:
+        p = argv0 if os.path.isabs(argv0) else os.path.join(cwd, argv0)
+        return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
+    return shutil.which(argv0, path=env_path)
+
+
 def read_report(path: str) -> Optional[List[str]]:
     """報告（JSON）裡 fail／timeout 的項目 id。報告不存在、JSON 壞、沒有 items、或 items 是空的
     （等於沒測任何東西）回 None＝報告不可信；呼叫者不可把它當成「沒有紅項」。"""
@@ -180,6 +191,11 @@ class Executor:
         if why:
             raise ResourceLow(why)
         argv = fill_argv(template, job)
+        if resolve_command(argv[0], job.workdir) is None:
+            raise ExecutorError("找不到指令：%s" % argv[0])
+        known = _cores.online_cpus() | _cores.default_baseline()
+        if not cores <= known:
+            raise ExecutorError("核不存在：%s" % sorted(cores - known))
         for p in (job.log_path, job.report_path):
             os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
         # 舊報告會讓「沒寫報告的失敗」被誤判成另一輪的結果，先清掉
@@ -189,11 +205,12 @@ class Executor:
             pass
         log = open(job.log_path, "wb")
         try:
-            # preexec_fn 在子行程裡綁核，確保指令一開始就只在專屬核上；
-            # 主行程是單執行緒，用 preexec_fn 是安全的。
+            # fork 與 exec 之間不跑 Python（多執行緒行程裡 preexec_fn 可能卡死）：
+            # exec 啟動器，由它在新行程裡綁核再 exec 真正的指令，指令從第一行起就只在專屬核上。
+            launch = [sys.executable, "-I", LAUNCHER, ",".join(str(c) for c in sorted(cores)), "--"] + argv
             proc = subprocess.Popen(
-                argv, cwd=job.workdir, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                start_new_session=True, preexec_fn=lambda: _cores.pin(cores), close_fds=True)
+                launch, cwd=job.workdir, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True, close_fds=True)
         except (OSError, subprocess.SubprocessError) as e:
             log.close()
             raise ExecutorError(f"開不了工作：{e}")

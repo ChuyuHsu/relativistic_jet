@@ -94,6 +94,9 @@ stdout：`{"verdict":"docs_only"}` 或 `{"verdict":"test"}`。沒設定＝一律
   一個工作一個行程群組，逾時／取消殺整群；開跑前 `cores.foreign_busy` 檢查核上沒有外人。
   `start` 開不了時丟例外而不是回空：`CoreBusy(cores)`（核已被我方別的工作或外面綁核的行程佔住）、
   `ResourceLow(reason)`（記憶體或磁碟低於水位）、`ExecutorError`（其他，例如指令不存在）。
+  開子行程時 fork 與 exec 之間不跑 Python（不用 preexec_fn，排隊器主行程可以有 HTTP 等執行緒）：
+  exec 小啟動器 `jet/_launch.py`，由它在新行程裡 `sched_setaffinity` 後 exec 指令（pid 不變）；
+  綁核失敗 125、不能執行 126、找不到指令 127（執行器當 infra）。
   `Job.argv` 可覆蓋 `Executor(test_cmd=…)` 的指令範本；handle 有 `.pgid`。`live_pgids()`／`live_cores()`
   給排隊器查；`check_resources(path)` 讓排隊器派工前先問水位。
   結果：退出碼 0→pass（但報告有紅項改判 fail）、1→fail、其他（含 2、被訊號殺）→infra；逾時 timeout、取消 cancelled；
