@@ -72,7 +72,10 @@ class Repo(Protocol):
 
 class GitRepo:
     def __init__(self, remote: str, work_dir: str, main: str = "main",
-                 branch_patterns: Sequence[str] = ("*",)):
+                 branch_patterns: Sequence[str] = ("*",), timeout_s: float = 900,
+                 fetch_timeout_s: float = 3600):
+        self.timeout_s = timeout_s
+        self.fetch_timeout_s = fetch_timeout_s
         self.remote = remote
         self.main = main
         self.patterns = list(branch_patterns) or ["*"]
@@ -88,7 +91,8 @@ class GitRepo:
 
     # ---- 基礎 ----
     def _git(self, *args: str, cwd: Optional[str] = None, check: bool = True,
-             env: Optional[dict] = None, input: Optional[str] = None) -> subprocess.CompletedProcess:
+             env: Optional[dict] = None, input: Optional[str] = None,
+             timeout: Optional[float] = None) -> subprocess.CompletedProcess:
         e = dict(os.environ)
         e.update({"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1"})
         if env:
@@ -96,8 +100,20 @@ class GitRepo:
         full = ["git"] + list(args)
         if cwd is None:
             full = ["git", "--git-dir", self.mirror] + list(args)
-        r = subprocess.run(full, cwd=cwd, env=e, input=input,
-                           capture_output=True, text=True)
+        # 自己一個行程群組＋逾時：卡住的 git（例如 ssh 等不到回應）整群殺掉，不會把主迴圈卡死
+        t = self.timeout_s if timeout is None else timeout
+        proc = subprocess.Popen(full, cwd=cwd, env=e, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            out, err = proc.communicate(input, timeout=t)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, 9)
+            except OSError:
+                pass
+            proc.communicate()
+            raise GitError(f"git {' '.join(args[:3])} 逾時（{t:.0f} 秒）")
+        r = subprocess.CompletedProcess(full, proc.returncode, out, err)
         if check and r.returncode != 0:
             raise GitError(f"git {' '.join(args[:3])} 失敗（{r.returncode}）：{r.stderr.strip()[:400]}")
         return r
@@ -134,7 +150,18 @@ class GitRepo:
     # ---- 讀 ----
     def fetch(self) -> None:
         self._git("fetch", "--prune", "--no-tags", "-q", "origin",
-                  "+refs/heads/*:refs/remotes/origin/*")
+                  "+refs/heads/*:refs/remotes/origin/*", timeout=self.fetch_timeout_s)
+
+    def mirror_info(self) -> Dict[str, object]:
+        """鏡像現況（給診斷用）：存在嗎、有幾個遠端分支、物件庫大小。"""
+        info: Dict[str, object] = {"path": self.mirror, "exists": os.path.isdir(self.mirror)}
+        if info["exists"]:
+            r = self._git("for-each-ref", "--format=x", "refs/remotes/origin", check=False)
+            info["refs"] = len(r.stdout.split())
+            c = self._git("count-objects", "-v", check=False).stdout
+            m = re.search(r"size-pack: (\d+)", c)
+            info["pack_kb"] = int(m.group(1)) if m else None
+        return info
 
     def list_branches(self) -> Dict[str, str]:
         out = self._out("for-each-ref", "--format=%(refname:strip=3) %(objectname)", "refs/remotes/origin")

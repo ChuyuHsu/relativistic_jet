@@ -15,6 +15,9 @@ class Config:
     remote: str
     main_branch: str = "main"
     branch_patterns: List[str] = field(default_factory=lambda: ["*"])
+    fetch_interval_s: float = 15
+    git_timeout_s: float = 900
+    fetch_timeout_s: float = 3600
     state_dir: str = "state"
     work_dir: str = "work"
     pool: List[int] = field(default_factory=list)
@@ -67,6 +70,9 @@ def parse(d: dict) -> Config:
         remote=_need(git, "remote", str),
         main_branch=git.get("main", "main"),
         branch_patterns=git.get("branch_patterns", ["*"]),
+        fetch_interval_s=git.get("fetch_interval_s", 15),
+        git_timeout_s=git.get("timeout_s", 900),
+        fetch_timeout_s=git.get("fetch_timeout_s", 3600),
         state_dir=paths.get("state_dir", "state"),
         work_dir=paths.get("work_dir", "work"),
         pool=pool,
@@ -116,6 +122,10 @@ def _validate(c: Config) -> None:
         raise ConfigError("commands.test 必須是非空字串陣列")
     if c.classify_cmd is not None and not all(isinstance(x, str) for x in c.classify_cmd):
         raise ConfigError("commands.classify 必須是字串陣列")
+    if min(c.fetch_interval_s, c.git_timeout_s, c.fetch_timeout_s) <= 0:
+        raise ConfigError("git.fetch_interval_s／timeout_s／fetch_timeout_s 必須 > 0")
+    if not c.branch_patterns or not all(isinstance(x, str) for x in c.branch_patterns):
+        raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.batch_max < 1:
         raise ConfigError("limits.batch_max 必須 ≥ 1")
     if sorted(c.points) != c.points or any(p < 1 for p in c.points):

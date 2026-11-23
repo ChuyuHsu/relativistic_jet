@@ -1,5 +1,6 @@
 """命令列：與 HTTP 同功能。
 
+  診斷：doctor（設定、remote、分支樣式、測試指令、核池）；status --verbose（心跳、fetch、掃描、最近錯誤）
   讀：status branches branch merged todo metrics
   寫：approve revoke priority set-parent run-test pause resume resolve   （全部經 HTTP，由主行程執行）
   維運：serve check-config init-keys backup list-backups restore deploy rollback supervise
@@ -87,7 +88,55 @@ def cmd_status(args):
         lines.append(f"最近合入：{_ts(lm['finished_at'])}（{lm['merged_count']} 條）")
     if s.get("restored_at"):
         lines.append(f"（資料庫曾在 {_ts(float(s['restored_at']))} 從備份還原）")
+    if getattr(args, "verbose", False):
+        lines += _verbose_lines(s.get("scheduler") or {}, s.get("now") or time.time())
     _out(args, s, "\n".join(lines))
+
+
+def _verbose_lines(sc: dict, now: float) -> List[str]:
+    out = ["", "── 調度詳情 ──"]
+    tick = sc.get("tick")
+    if tick:
+        age = now - tick["at"]
+        out.append(f"心跳：{_ts(tick['at'])}（{age:.0f} 秒前）" + ("　⚠ 超過 60 秒沒動，主迴圈可能卡住" if age > 60 else "")
+                   + f"　跑著 {tick['jobs']} 個工作，核 {tick['pool_busy']}/{tick['pool_total']} 在用")
+    else:
+        out.append("心跳：沒有（調度核心沒在跑？）")
+    f = sc.get("fetch")
+    if f:
+        if f["state"] == "running":
+            out.append(f"fetch：進行中，已 {now - f['started_at']:.0f} 秒（第一次抓大 repo 要幾分鐘）")
+        elif f["state"] == "ok":
+            out.append(f"fetch：成功，{_ts(f['finished_at'])}，花 {f.get('seconds')} 秒")
+        else:
+            out.append(f"fetch：失敗 {_ts(f.get('finished_at'))}：{f.get('error')}")
+    else:
+        out.append("fetch：還沒開始")
+    sn = sc.get("scan")
+    if sn and sn.get("waiting"):
+        out.append(f"掃描：{sn['waiting']}")
+    elif sn:
+        out.append(f"掃描：{_ts(sn['at'])}　遠端 {sn['remote']} 條（新 {sn['new']}、更新 {sn['changed']}、消失 {sn['dropped']}），"
+                   f"追蹤 {sn.get('tracked')} 條，main {sn.get('main')}")
+    else:
+        out.append("掃描：還沒掃過")
+    e = sc.get("last_error")
+    out.append(f"最近錯誤：{_ts(e['at'])} {e['where']}：{e['message']}" if e else "最近錯誤：無")
+    return out
+
+
+def cmd_doctor(args):
+    from . import doctor
+    try:
+        cfg = config.load(_cfg_path(args))
+    except (config.ConfigError, OSError) as e:
+        print(f"✗ 設定檔：{e}", file=sys.stderr)
+        return 1
+    checks = doctor.run_checks(cfg, remote_timeout=args.timeout)
+    print(doctor.format_checks(checks))
+    bad = [c for c in checks if c[0] == "fail"]
+    print(f"\n{'有 ' + str(len(bad)) + ' 項不通過' if bad else '全部通過'}")
+    return 1 if bad else 0
 
 
 def cmd_branches(args):
@@ -167,9 +216,10 @@ def cmd_serve(args):
     from .scheduler import Scheduler
 
     def make_scheduler(cfg, con, wq):
-        repo = GitRepo(cfg.remote, cfg.work_dir, cfg.main_branch, cfg.branch_patterns)
+        repo = GitRepo(cfg.remote, cfg.work_dir, cfg.main_branch, cfg.branch_patterns,
+                       cfg.git_timeout_s, cfg.fetch_timeout_s)
         ex = Executor(cfg.test_cmd, cfg.min_free_mem_mb, cfg.min_free_disk_mb)
-        return Scheduler(cfg, con, repo, ex)
+        return Scheduler(cfg, con, repo, ex, async_fetch=True)
 
     srv = serve.Server(_cfg_path(args), make_scheduler)
     signal.signal(signal.SIGTERM, lambda *_: srv.stop())     # 乾淨結束（退出碼 0）
@@ -263,7 +313,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.set_defaults(fn=fn)
         return sp
 
-    add("status", cmd_status, "現況")
+    sp = add("status", cmd_status, "現況"); sp.add_argument("--verbose", "-v", action="store_true",
+                                                         help="加看心跳、fetch、掃描、最近錯誤")
+    sp = add("doctor", cmd_doctor, "檢查設定、remote 連線、分支樣式、測試指令、核池（不需要主行程在跑）")
+    sp.add_argument("--timeout", type=float, default=60, help="連 remote 的逾時秒數")
     sp = add("branches", cmd_branches, "分支清單"); sp.add_argument("--state")
     sp = add("branch", cmd_branch, "單一分支的狀態與紅項"); sp.add_argument("name")
     sp = add("merged", cmd_merged, "已合入"); sp.add_argument("--limit", type=int, default=20)

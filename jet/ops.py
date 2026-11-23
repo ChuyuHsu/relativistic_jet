@@ -57,6 +57,15 @@ def _has_approval(con, branch: str, content_id: str) -> bool:
     return row is not None
 
 
+def _json_meta(con, key):
+    import json
+    v = _meta(con, key)
+    try:
+        return json.loads(v) if v else None
+    except ValueError:
+        return None
+
+
 def query_status(con, now: Optional[float] = None) -> Dict[str, Any]:
     now = time.time() if now is None else now
     counts = {s.value: 0 for s in State}
@@ -82,6 +91,7 @@ def query_status(con, now: Optional[float] = None) -> Dict[str, Any]:
         "main_sha": _meta(con, "main_sha"),
         "open_todo": open_todo,
         "restored_at": _meta(con, "restored_at"),
+        "scheduler": {k: _json_meta(con, "obs_" + k) for k in ("tick", "scan", "fetch", "last_error")},
     }
 
 

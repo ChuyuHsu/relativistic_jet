@@ -109,10 +109,17 @@ class Server:
             while not self._stop.is_set():
                 try:
                     self.step()
-                except Exception:   # 單一輪出錯不能弄掛主行程；記下來、通知，下一輪再來
+                except Exception as e:   # 單一輪出錯不能弄掛主行程；記下來、通知，下一輪再來
                     log.exception("主迴圈這一輪出錯")
                     try:
-                        maintenance.record_queue_error(self.con, "主迴圈出錯，詳見排隊器紀錄", self.now())
+                        msg = f"{type(e).__name__}: {e}"[:300]
+                        if msg != getattr(self, "_last_loop_err", None):     # 同樣的錯不洗版
+                            self._last_loop_err = msg
+                            maintenance.record_queue_error(self.con, "主迴圈出錯：" + msg, self.now())
+                        import json as _j
+                        self.con.execute(
+                            "INSERT INTO meta(key,value) VALUES('obs_last_error',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            (_j.dumps({"at": self.now(), "where": "主迴圈", "message": msg}, ensure_ascii=False),))
                     except Exception:
                         pass
                 self._stop.wait(TICK_S)

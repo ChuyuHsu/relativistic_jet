@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -72,7 +73,7 @@ def default_resources_ok(cfg) -> bool:
 class Scheduler:
     def __init__(self, cfg, con, repo, executor, clock: Callable[[], float] = time.time,
                  resources_ok: Optional[Callable[[], bool]] = None,
-                 foreign_busy=_foreign_busy):
+                 foreign_busy=_foreign_busy, async_fetch: bool = False):
         self.cfg, self.con, self.repo, self.executor = cfg, con, repo, executor
         self.clock = clock
         self.resources_ok = resources_ok or (lambda: default_resources_ok(cfg))
@@ -85,6 +86,12 @@ class Scheduler:
         self._start_fail = 0
         self._infra_streak = 0
         self._stop = False
+        self.async_fetch = async_fetch      # 正式跑用背景執行緒 fetch，第一次抓一個大 repo 不會卡住主迴圈
+        self._fetch_thread: Optional[threading.Thread] = None
+        self._fetch_started = 0.0
+        self._fetch_res = None
+        self._fetch_done_once = False
+        self._last_err_msg: Optional[str] = None
         self.recover()
 
     # ---------- 啟動復原 ----------
@@ -150,9 +157,84 @@ class Scheduler:
             self.executor.test_cmd = list(cfg.test_cmd)
 
     # ---------- 一輪 ----------
+    # ---------- 可觀測性：狀態寫進 meta，/status 與 jet doctor 讀得到 ----------
+    def _put(self, key: str, d: dict):
+        store.set_meta(self.con, f"obs_{key}", json.dumps(d, ensure_ascii=False))
+
+    def _note_error(self, where: str, msg: str):
+        """錯誤一律寫日誌；同一個訊息只發一次待辦事件，不洗版。"""
+        log.error("%s：%s", where, msg)
+        self._put("last_error", {"at": self.clock(), "where": where, "message": msg})
+        if msg != self._last_err_msg:
+            self._last_err_msg = msg
+            store.add_event(self.con, "queue_error", None, f"{where}：{msg}"[:500])
+
+    def _fetch_sync(self):
+        t0 = time.time()
+        self._put("fetch", {"state": "running", "started_at": t0})
+        try:
+            self.repo.fetch()
+        except Exception as e:
+            self._put("fetch", {"state": "error", "started_at": t0, "finished_at": time.time(), "error": str(e)})
+            self._note_error("fetch 失敗", str(e))
+            raise
+        dt = time.time() - t0
+        self._put("fetch", {"state": "ok", "started_at": t0, "finished_at": time.time(), "seconds": round(dt, 2)})
+        self._fetch_done_once = True
+        if dt > 30:
+            log.info("fetch 完成（%.0f 秒）", dt)
+
+    def _fetch_worker(self, t0):
+        """背景執行緒只做 git fetch，不碰資料庫（sqlite 連線不跨執行緒）；結果交給主執行緒記錄。"""
+        try:
+            self.repo.fetch()
+            self._fetch_res = (True, None, t0, time.time())
+        except Exception as e:
+            self._fetch_res = (False, str(e), t0, time.time())
+
+    def _harvest_fetch(self):
+        if self._fetch_thread is None or self._fetch_thread.is_alive():
+            return
+        self._fetch_thread = None
+        ok, err, t0, t1 = self._fetch_res
+        if ok:
+            self._put("fetch", {"state": "ok", "started_at": t0, "finished_at": t1, "seconds": round(t1 - t0, 2)})
+            self._fetch_done_once = True
+            self._last_err_msg = None
+            if t1 - t0 > 30:
+                log.info("fetch 完成（%.0f 秒）", t1 - t0)
+        else:
+            self._put("fetch", {"state": "error", "started_at": t0, "finished_at": t1, "error": err})
+            self._note_error("fetch 失敗", err)
+
+    def _maybe_fetch(self) -> bool:
+        """回傳這一輪能不能繼續（鏡像裡有東西可掃）。"""
+        if not self.async_fetch:
+            self._fetch_sync()
+            return True
+        self._harvest_fetch()
+        if self._fetch_thread is None and time.time() - self._fetch_started >= self.cfg.fetch_interval_s:
+            t0 = self._fetch_started = time.time()
+            self._put("fetch", {"state": "running", "started_at": t0})
+            if not self._fetch_done_once:
+                log.info("開始第一次 fetch（大的 repo 要幾分鐘；進度看 jet status --verbose）")
+            self._fetch_thread = threading.Thread(target=self._fetch_worker, args=(t0,), daemon=True)
+            self._fetch_thread.start()
+        if self._fetch_done_once:
+            return True
+        try:                                  # 重啟後鏡像本來就有東西，不用乾等
+            self.repo.main_sha()
+            return True
+        except Exception:
+            self._put("scan", {"at": self.clock(), "waiting": "第一次 fetch 還沒完成，鏡像是空的"})
+            return False
+
     def tick(self) -> None:
         self._bad = None
-        self.repo.fetch()
+        self._put("tick", {"at": self.clock(), "jobs": len(self.jobs),
+                           "pool_busy": len(self.pool.busy), "pool_total": len(self.pool.all)})
+        if not self._maybe_fetch():
+            return
         self.main = self.repo.main_sha()
         self._scan()
         self._sweep_parents()
@@ -181,7 +263,14 @@ class Scheduler:
     # ---------- 掃 Git ----------
     def _scan(self):
         remote = self.repo.list_branches()
+        before = {r["name"]: r["head_sha"] for r in store.list_branches(self.con)}
+        stats = {"at": self.clock(), "remote": len(remote), "new": 0, "changed": 0, "dropped": 0,
+                 "main": self.main[:12]}
         for name, sha in remote.items():
+            if name not in before:
+                stats["new"] += 1
+            elif before[name] != sha:
+                stats["changed"] += 1
             row = store.get_branch(self.con, name)
             if row is not None and row["state"] == S.MERGED.value and row["head_sha"] != sha:
                 self.con.execute("DELETE FROM branches WHERE name=?", (name,))
@@ -192,7 +281,17 @@ class Scheduler:
                 self._updated(row, sha)
         for row in store.list_branches(self.con):
             if row["name"] not in remote and row["state"] != S.MERGED.value:
+                stats["dropped"] += 1
                 self._drop(row)
+        stats["tracked"] = self.con.execute("SELECT count(*) FROM branches").fetchone()[0]
+        prev = store.get_meta(self.con, "obs_scan")
+        self._put("scan", stats)
+        if stats["new"] or stats["changed"] or stats["dropped"] or prev is None:
+            log.info("掃描：遠端 %d 條（新 %d、更新 %d、消失 %d），追蹤中 %d 條，main %s",
+                     stats["remote"], stats["new"], stats["changed"], stats["dropped"],
+                     stats["tracked"], stats["main"])
+        if stats["remote"] == 0 and stats["tracked"] == 0:
+            self._note_error("掃描", "遠端沒有符合 git.branch_patterns 的分支（樣式設定對嗎？用 jet doctor 檢查）")
 
     def _base_for(self, row) -> str:
         if row is not None and row["parent"]:

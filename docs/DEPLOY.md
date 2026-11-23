@@ -124,3 +124,22 @@ python3 -m jet rollback --root $JET_HOME                    # 手動退版（cur
 - 所有資料（含進度頁用的）都要讀鑰匙，寫入要寫鑰匙，比對用常數時間；`/` 只回一個不含資料的頁面外殼。
 - 請求內容上限 64 KB，連線 15 秒沒動就斷；回應裡本機的資料夾路徑與鑰匙字串一律遮蔽。
 - 鑰匙檔權限 600；對外前先換掉預設產生的鑰匙以外的任何舊鑰匙。
+
+## 8. 診斷（上線後看不到分支時）
+
+只用 jet 自己的指令與 git：
+
+```sh
+python3 -m jet doctor --config $JET_HOME/jet.json        # 設定、remote 連線、分支樣式比對到幾條、測試指令、核池、鑰匙
+python3 -m jet status --verbose --config $JET_HOME/jet.json   # 心跳、fetch 進度、最近一次掃描、最近錯誤
+git --git-dir $JET_HOME/work/mirror.git for-each-ref refs/remotes/origin | wc -l   # 鏡像抓到幾個分支
+du -sh $JET_HOME/work/mirror.git; ls -la $JET_HOME/work/mirror.git/objects/pack   # 第一次 fetch 進行中會看到 tmp_pack_* 在長大
+```
+
+怎麼判讀：
+
+- `status --verbose` 的「fetch：進行中，已 N 秒」＝第一次抓大 repo 還在跑，等；超過 `git.fetch_timeout_s`（預設 3600）會中止並記錯誤。
+- 「fetch：失敗 …」＝看錯誤字串（ssh 金鑰、網路、遠端路徑）。`doctor` 的「remote 連線」會用同樣的方式連一次。
+- 「掃描：…遠端 0 條」或 `doctor` 的「分支樣式 ✗」＝`git.branch_patterns` 沒對上遠端分支名（樣式比對的是去掉 `origin/` 的名稱，例如 `dev/foo`）。
+- 「心跳」超過 60 秒沒動＝主迴圈卡住，看 supervisor 輸出；所有 git 呼叫都有逾時（`git.timeout_s` 預設 900 秒），卡住的 ssh 會整群被殺。
+- 鏡像（`work/mirror.git`）可以隨時整個刪掉重建，不影響正確性，只是下次要重新抓一次。
