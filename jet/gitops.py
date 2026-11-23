@@ -1,12 +1,42 @@
-"""Git 操作介面（DESIGN 原則 1、4）。對被測專案只准兩種寫入：
-fast_forward_main、delete_branch。其餘都在自己的 work_dir 副本裡做。
-骨架：只定介面，實作由 Git 串負責。"""
+"""Git 操作（DESIGN 原則 1、4）。對被測專案只准兩種寫入：
+fast_forward_main、delete_branch。其餘都在自己的 work_dir 副本（一個 bare 鏡像）裡做。
+
+需要 git ≥ 2.38（用 `merge-tree --write-tree` 做不碰工作目錄的三方合併）。只用標準庫。
+
+堆疊分支：content_id／changed_files／conflicts_with 的 base 由呼叫端給（堆疊分支給父分支 head），
+指紋與改動檔只看 merge-base(分支, base)..分支。stack 自己偵測：已疊進去的分支裡，head 是這條分支祖先的，
+就以它（最新的那個）當共同祖先，這樣子分支只套自己的那一段，不會跟已壓合的父分支撞自己。
+"""
+import contextlib
+import fnmatch
+import os
+import re
+import shutil
+import subprocess
+import uuid
 from dataclasses import dataclass
-from typing import ContextManager, Dict, List, Optional, Protocol, Tuple
+from typing import ContextManager, Dict, Iterator, List, Optional, Protocol, Sequence, Tuple
+
+MIN_GIT = (2, 38)
+EMPTY_ID = "empty"  # 沒有任何改動的分支的內容指紋
+
+# 壓合提交用固定身分與時間，同樣的輸入一定得到同樣的 sha
+_IDENT = {
+    "GIT_AUTHOR_NAME": "jet", "GIT_AUTHOR_EMAIL": "jet@localhost",
+    "GIT_COMMITTER_NAME": "jet", "GIT_COMMITTER_EMAIL": "jet@localhost",
+}
 
 
-class MainMoved(Exception):
+class GitError(Exception):
+    pass
+
+
+class MainMoved(GitError):
     """fast_forward_main 時遠端 main 已不是 expect_main。"""
+
+
+class StaleBranch(GitError):
+    """遠端分支已不是預期的 sha。"""
 
 
 @dataclass
@@ -36,3 +66,212 @@ class Repo(Protocol):
         """推 main：遠端 main 必須仍是 expect_main，否則丟 MainMoved。絕不 force。"""
     def delete_branch(self, name: str, expect_sha: str) -> None:
         """刪已合入的分支；sha 對不上就不刪。"""
+
+
+class GitRepo:
+    def __init__(self, remote: str, work_dir: str, main: str = "main",
+                 branch_patterns: Sequence[str] = ("*",)):
+        self.remote = remote
+        self.main = main
+        self.patterns = list(branch_patterns) or ["*"]
+        self.work_dir = os.path.abspath(work_dir)
+        self.mirror = os.path.join(self.work_dir, "mirror.git")
+        self.wt_root = os.path.join(self.work_dir, "wt")
+        self._check_version()
+        os.makedirs(self.work_dir, exist_ok=True)
+        if not os.path.isdir(self.mirror):
+            self._git("init", "--bare", "-q", self.mirror, cwd=self.work_dir)
+        self._git("remote", "remove", "origin", check=False)
+        self._git("remote", "add", "origin", remote)
+
+    # ---- 基礎 ----
+    def _git(self, *args: str, cwd: Optional[str] = None, check: bool = True,
+             env: Optional[dict] = None, input: Optional[str] = None) -> subprocess.CompletedProcess:
+        e = dict(os.environ)
+        e.update({"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1"})
+        if env:
+            e.update(env)
+        full = ["git"] + list(args)
+        if cwd is None:
+            full = ["git", "--git-dir", self.mirror] + list(args)
+        r = subprocess.run(full, cwd=cwd, env=e, input=input,
+                           capture_output=True, text=True)
+        if check and r.returncode != 0:
+            raise GitError(f"git {' '.join(args[:3])} 失敗（{r.returncode}）：{r.stderr.strip()[:400]}")
+        return r
+
+    def _out(self, *args: str, **kw) -> str:
+        return self._git(*args, **kw).stdout.strip()
+
+    @staticmethod
+    def _check_version() -> None:
+        try:
+            out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+        except OSError as e:
+            raise GitError(f"找不到 git：{e}")
+        m = re.search(r"(\d+)\.(\d+)", out)
+        if not m or (int(m.group(1)), int(m.group(2))) < MIN_GIT:
+            raise GitError(f"git 版本太舊（需要 ≥ {MIN_GIT[0]}.{MIN_GIT[1]}）：{out.strip()}")
+
+    def _has(self, sha: str) -> bool:
+        return self._git("cat-file", "-e", sha + "^{commit}", check=False).returncode == 0
+
+    def _merge_base(self, a: str, b: str) -> str:
+        r = self._git("merge-base", a, b, check=False)
+        if r.returncode != 0 or not r.stdout.strip():
+            raise GitError("兩個提交沒有共同祖先")
+        return r.stdout.strip().split()[0]
+
+    def _is_ancestor(self, a: str, b: str) -> bool:
+        return self._git("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
+
+    # ---- 讀 ----
+    def fetch(self) -> None:
+        self._git("fetch", "--prune", "--no-tags", "-q", "origin",
+                  "+refs/heads/*:refs/remotes/origin/*")
+
+    def list_branches(self) -> Dict[str, str]:
+        out = self._out("for-each-ref", "--format=%(refname:strip=3) %(objectname)", "refs/remotes/origin")
+        res: Dict[str, str] = {}
+        for line in out.splitlines():
+            name, _, sha = line.partition(" ")
+            if not name or name in ("HEAD", self.main):
+                continue
+            if any(fnmatch.fnmatchcase(name, p) for p in self.patterns):
+                res[name] = sha
+        return res
+
+    def main_sha(self) -> str:
+        r = self._git("rev-parse", "--verify", "-q", f"refs/remotes/origin/{self.main}", check=False)
+        if r.returncode != 0:
+            raise GitError(f"遠端沒有 {self.main}")
+        return r.stdout.strip()
+
+    def content_id(self, branch_sha: str, base_sha: str) -> str:
+        """patch-id：只看加減的行，不看行號與上下文，所以重疊到新 main 不變。
+        先把分支套到 base 上（三方合併），再取「base → 結果」的差：這樣父分支壓合進 main 之後，
+        子分支相對 main 重算，父分支那段已在 main 裡、不會算進去，指紋與當初相對父分支時相同。
+        套不上去（撞檔）時退回直接看 merge-base..分支 的差。"""
+        mb = self._merge_base(branch_sha, base_sha)
+        tree = self._merge_tree(base_sha, branch_sha, mb)
+        if tree is not None:
+            diff = self._git("diff", "--no-color", "--no-ext-diff", base_sha, tree).stdout
+        else:
+            diff = self._git("diff", "--no-color", "--no-ext-diff", mb, branch_sha).stdout
+        if not diff.strip():
+            return EMPTY_ID
+        r = self._git("patch-id", "--stable", input=diff, cwd=self.work_dir)
+        pid = r.stdout.split()
+        return pid[0] if pid else EMPTY_ID
+
+    def changed_files(self, branch_sha: str, base_sha: str) -> List[str]:
+        mb = self._merge_base(branch_sha, base_sha)
+        out = self._git("diff", "--name-only", "-z", mb, branch_sha).stdout
+        return sorted(f for f in out.split("\0") if f)
+
+    # ---- 合併（不碰工作目錄） ----
+    def _merge_tree(self, tip: str, branch_sha: str, mb: str) -> Optional[str]:
+        """以 mb 為共同祖先，把 branch 的改動套到 tip 上；回傳結果 tree，撞檔回 None。"""
+        r = self._git("merge-tree", "--write-tree", f"--merge-base={mb}", tip, branch_sha, check=False)
+        if r.returncode == 0:
+            return r.stdout.split()[0]
+        if r.returncode == 1:
+            return None
+        raise GitError(f"merge-tree 失敗（{r.returncode}）：{r.stderr.strip()[:400]}")
+
+    def conflicts_with(self, branch_sha: str, base_sha: str) -> bool:
+        mb = self._merge_base(branch_sha, base_sha)
+        return self._merge_tree(base_sha, branch_sha, mb) is None
+
+    def stack(self, base_sha: str, items: List[Tuple[str, str]]) -> StackResult:
+        tip = base_sha
+        kept: List[int] = []
+        prefixes: List[str] = []
+        kept_heads: List[str] = []
+        for i, (_name, b) in enumerate(items):
+            # 已疊進去而且是這條祖先的分支（堆疊的父）：以最新的那個當共同祖先
+            mb = None
+            for c in (k for k in kept_heads if self._is_ancestor(k, b)):
+                if mb is None or self._is_ancestor(mb, c):
+                    mb = c
+            if mb is None:
+                mb = self._merge_base(b, base_sha)
+            tree = self._merge_tree(tip, b, mb)
+            if tree is None:
+                continue
+            subject = self._out("log", "-1", "--format=%s", b) or "squash"
+            when = self._out("log", "-1", "--format=%cI", b)
+            env = dict(_IDENT, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+            msg = f"{subject}\n\n壓合自 {b[:12]}\n"
+            tip = self._out("commit-tree", tree, "-p", tip, "-m", msg, env=env)
+            kept.append(i)
+            prefixes.append(tip)
+            kept_heads.append(b)
+        return StackResult(kept, prefixes)
+
+    # ---- worktree ----
+    @contextlib.contextmanager
+    def worktree(self, sha: str) -> Iterator[str]:
+        if not self._has(sha):
+            raise GitError(f"副本裡沒有這個提交：{sha[:12]}")
+        os.makedirs(self.wt_root, exist_ok=True)
+        path = os.path.join(self.wt_root, uuid.uuid4().hex[:12])
+        self._git("worktree", "add", "--detach", "-q", path, sha)
+        try:
+            yield path
+        finally:
+            self._git("worktree", "remove", "--force", path, check=False)
+            if os.path.exists(path):
+                shutil.rmtree(path, ignore_errors=True)
+            self._git("worktree", "prune", check=False)
+
+    def cleanup_worktrees(self) -> int:
+        """啟動時清掉上次當掉留下的 worktree，回傳清掉幾個。"""
+        n = 0
+        if os.path.isdir(self.wt_root):
+            for d in os.listdir(self.wt_root):
+                shutil.rmtree(os.path.join(self.wt_root, d), ignore_errors=True)
+                n += 1
+        self._git("worktree", "prune", check=False)
+        return n
+
+    # ---- 唯二的寫入 ----
+    def _remote_sha(self, branch: str) -> Optional[str]:
+        out = self._out("ls-remote", "origin", f"refs/heads/{branch}")
+        for line in out.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref == f"refs/heads/{branch}":
+                return sha
+        return None
+
+    def fast_forward_main(self, sha: str, expect_main: str) -> None:
+        if not self._has(sha):
+            raise GitError(f"副本裡沒有這個提交：{sha[:12]}")
+        cur = self._remote_sha(self.main)
+        if cur != expect_main:
+            raise MainMoved(f"遠端 {self.main} 已經是 {str(cur)[:12]}，不是預期的 {expect_main[:12]}")
+        if self._git("merge-base", "--is-ancestor", expect_main, sha, check=False).returncode != 0:
+            raise GitError("這個提交不是預期 main 的後代，不是快轉")
+        # 不帶任何 force：就算中間被別人動過，非快轉會被遠端拒絕
+        r = self._git("push", "-q", "origin", f"{sha}:refs/heads/{self.main}", check=False)
+        if r.returncode != 0:
+            now = self._remote_sha(self.main)
+            if now != expect_main:
+                raise MainMoved(f"推送時 {self.main} 已被動過：{r.stderr.strip()[:200]}")
+            raise GitError(f"推 main 失敗：{r.stderr.strip()[:300]}")
+        self._git("update-ref", f"refs/remotes/origin/{self.main}", sha)
+
+    def delete_branch(self, name: str, expect_sha: str) -> None:
+        if name == self.main:
+            raise GitError("不准刪 main")
+        r = self._git("push", "-q", f"--force-with-lease=refs/heads/{name}:{expect_sha}",
+                      "origin", f":refs/heads/{name}", check=False)
+        if r.returncode != 0:
+            cur = self._remote_sha(name)
+            if cur is None:
+                return  # 已經不在了
+            if cur != expect_sha:
+                raise StaleBranch(f"分支 {name} 已有新提交（{cur[:12]}），沒刪")
+            raise GitError(f"刪分支失敗：{r.stderr.strip()[:300]}")
+        self._git("update-ref", "-d", f"refs/remotes/origin/{name}", check=False)
+
