@@ -100,7 +100,8 @@ def _verbose_lines(sc: dict, now: float) -> List[str]:
     if tick:
         age = now - tick["at"]
         out.append(f"心跳：{_ts(tick['at'])}（{age:.0f} 秒前）" + ("　⚠ 超過 60 秒沒動，主迴圈可能卡住" if age > 60 else "")
-                   + f"　跑著 {tick['jobs']} 個工作，核 {tick['pool_busy']}/{tick['pool_total']} 在用")
+                   + f"　跑著 {tick['jobs']} 個工作，" + ("實體核 " if tick.get("pool_unit") == "physical" else "核 ")
+                   + f"{tick['pool_busy']}/{tick['pool_total']} 在用")
     else:
         out.append("心跳：沒有（調度核心沒在跑？）")
     f = sc.get("fetch")
@@ -276,9 +277,17 @@ def cmd_start(args):
 
 def cmd_check_config(args):
     try:
-        config.load(args.path)
+        cfg = config.load(args.path)
     except (config.ConfigError, OSError) as e:
         print(f"設定檔有問題：{e}", file=sys.stderr)
+        return 1
+    from .cores import pool_check
+    bad = False
+    for st, msg in pool_check(cfg):
+        if st != "ok":
+            print(f"{'錯誤' if st == 'fail' else '警告'}：核池：{msg}", file=sys.stderr)
+        bad = bad or st == "fail"
+    if bad:
         return 1
     print("設定檔正確")
     return 0

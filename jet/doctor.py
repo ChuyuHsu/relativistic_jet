@@ -113,6 +113,12 @@ def run_checks(cfg: config.Config, remote_timeout: float = 60,
         add("warn", "分類指令", f"找不到 {cfg.classify_cmd[0]}（找不到時一律當要測）")
 
     try:
+        from .cores import pool_check
+        for st, msg in pool_check(cfg):
+            add(st, "核池（實體核）", msg)
+    except Exception as e:
+        add("warn", "核池（實體核）", f"無法檢查：{e}")
+    try:
         avail = os.sched_getaffinity(0)
         missing = [c for c in cfg.pool if c not in avail]
         if missing:
@@ -122,7 +128,7 @@ def run_checks(cfg: config.Config, remote_timeout: float = 60,
             if busy:
                 add("warn", "核池", f"{len(cfg.pool)} 顆核都存在，但現在有外人行程綁在 {busy[:8]}…（共 {len(busy)} 顆），派工會避開")
             else:
-                add("ok", "核池", f"{len(cfg.pool)} 顆核可用，沒有外人占用")
+                add("ok", "核池", f"{len(cfg.pool)} 顆邏輯核都存在，沒有外人占用")
         need = max(cfg.selftest_cores, cfg.batch_cores)
         if need > len(cfg.pool):
             add("fail", "核池", f"單一工作要 {need} 顆，池只有 {len(cfg.pool)} 顆")

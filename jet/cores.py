@@ -255,3 +255,22 @@ def foreign_busy(cores: Iterable[int], own_pgids: Set[int], *, baseline: Optiona
 def pin(cores: Iterable[int]) -> None:
     """子行程啟動前呼叫：只准在這幾顆核上跑。"""
     os.sched_setaffinity(0, set(cores))
+
+
+def pool_check(cfg, topo=None):
+    """核池防呆（doctor 與 check-config 共用）。回傳 [(狀態, 訊息)]；狀態 fail／warn／ok。
+    實體核模式：兄弟執行緒不在池裡的實體核整顆排除；可用實體核比單一工作要的少就 fail。"""
+    need = max(cfg.selftest_cores, cfg.batch_cores)
+    if cfg.core_unit != "physical":
+        return [("ok", f"邏輯核模式，池 {len(cfg.pool)} 顆")] if len(cfg.pool) >= need else \
+            [("fail", f"池只有 {len(cfg.pool)} 顆，單一工作要 {need} 顆")]
+    pp = PhysicalPool(cfg.pool, cfg.threads, topo)
+    n, ex = len(pp.units), pp.excluded
+    exs = f"；因為兄弟執行緒不在池裡而被排除的核：{ex[:16]}{'…' if len(ex) > 16 else ''}（把兄弟也加進 cores.pool）" if ex else ""
+    if n == 0:
+        return [("fail", f"實體核模式下可用實體核是 0 顆，排隊器永遠派不出工作{exs}")]
+    if n < need:
+        return [("fail", f"實體核模式下可用實體核只有 {n} 顆，單一工作要 {need} 顆{exs}")]
+    if ex:
+        return [("warn", f"實體核模式：可用 {n} 顆實體核，另有 {len(ex)} 條邏輯核被排除{exs}")]
+    return [("ok", f"實體核模式：可用 {n} 顆實體核")]

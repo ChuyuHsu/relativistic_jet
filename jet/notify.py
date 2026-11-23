@@ -195,6 +195,7 @@ class _Dest:
         self.fails = 0
         self.next_try = 0.0
         self.last_error: Optional[str] = None
+        self.last_code: Optional[int] = None
 
 
 class Notifier:
@@ -246,6 +247,9 @@ class Notifier:
         d.thread = None
         ids, err = d.inflight, d.result
         d.inflight, d.result, d.done = [], None, False
+        con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",     # 每次送出都記回應碼（狀態頁看得到）
+                    (f"notify_last:{d.name}", json.dumps({"at": now, "code": d.last_code, "events": len(ids),
+                                                          "error": err or None}, ensure_ascii=False)))
         if err:
             d.fails += 1
             d.last_error = err
@@ -263,8 +267,11 @@ class Notifier:
             else:
                 self._post(d.url, payload, self.timeout)
             d.result = ""
+            d.last_code = 200
         except Exception as e:   # 任何錯都只是「這次沒送成」，不能弄壞主行程
             d.result = str(e) or type(e).__name__
+            m = re.search(r"對方回 (\d+)", d.result)
+            d.last_code = int(m.group(1)) if m else None
         d.done = True
 
     def tick(self, con, now: Optional[float] = None) -> None:

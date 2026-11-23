@@ -199,6 +199,18 @@ class Scheduler:
             log.error("%s：%s", where, msg)
             store.add_event(self.con, "queue_error", None, f"{where}：{msg}"[:500])
 
+    def _check_pool(self):
+        """核池小到永遠派不出工作（例如實體核模式但池裡沒有兄弟執行緒）：不能靜悄悄，寫進最近錯誤。"""
+        if hasattr(self.pool, "units"):
+            n = len(self.pool.units)
+            ex = getattr(self.pool, "excluded", [])
+        else:
+            n, ex = len(self.pool.all), []
+        need = max(self.cfg.selftest_cores, self.cfg.batch_cores)
+        if n < need:
+            self._note_error("核池", f"可用{'實體' if hasattr(self.pool, 'units') else ''}核只有 {n} 顆，單一工作要 {need} 顆，派不出工作"
+                             + (f"（兄弟執行緒不在池裡而被排除的核：{ex[:16]}）" if ex else ""))
+
     def _fetch_sync(self):
         t0 = time.time()
         self._put("fetch", {"state": "running", "started_at": t0})
@@ -261,8 +273,11 @@ class Scheduler:
 
     def tick(self) -> None:
         self._bad = None
-        self._put("tick", {"at": self.clock(), "jobs": len(self.jobs),
-                           "pool_busy": len(self.pool.busy), "pool_total": len(self.pool.all)})
+        phys = hasattr(self.pool, "units")
+        self._put("tick", {"at": self.clock(), "jobs": len(self.jobs), "pool_unit": "physical" if phys else "logical",
+                           "pool_busy": (len(self.pool.units) - self.pool.free_count()) if phys else len(self.pool.busy),
+                           "pool_total": len(self.pool.units) if phys else len(self.pool.all)})
+        self._check_pool()
         if not self._maybe_fetch():
             return
         self.main = self.repo.main_sha()
