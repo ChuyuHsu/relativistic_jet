@@ -77,6 +77,8 @@ class Server:
         elif cfg is not self.cfg:
             self.cfg = cfg
             self.notifier = notify.Notifier(cfg.notify_url, cfg.notify_batch_s)
+            if hasattr(self.scheduler, "update_config"):
+                self.scheduler.update_config(cfg)
         if self.scheduler is not None:
             self.scheduler.tick()
         self.notifier.tick(self.con, now)

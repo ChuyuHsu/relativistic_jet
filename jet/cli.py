@@ -161,7 +161,18 @@ def cmd_run_test(args):
 # ---------------------------------------------------------------- 維運
 def cmd_serve(args):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    srv = serve.Server(_cfg_path(args))
+    import signal
+    from .executor import Executor
+    from .gitops import GitRepo
+    from .scheduler import Scheduler
+
+    def make_scheduler(cfg, con, wq):
+        repo = GitRepo(cfg.remote, cfg.work_dir, cfg.main_branch, cfg.branch_patterns)
+        ex = Executor(cfg.test_cmd, cfg.min_free_mem_mb, cfg.min_free_disk_mb)
+        return Scheduler(cfg, con, repo, ex)
+
+    srv = serve.Server(_cfg_path(args), make_scheduler)
+    signal.signal(signal.SIGTERM, lambda *_: srv.stop())     # 乾淨結束（退出碼 0）
     try:
         srv.run_forever()
     except KeyboardInterrupt:

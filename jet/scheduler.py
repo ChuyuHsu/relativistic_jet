@@ -138,6 +138,17 @@ class Scheduler:
         if done:
             self._after_merge(done, final, None, b["base_sha"])
 
+    def update_config(self, cfg):
+        """設定檔熱重載（已檢查過格式）。核池變了就重建，保留還在用的核。"""
+        if cfg.pool != self.cfg.pool:
+            old = self.pool
+            self.pool = CorePool(cfg.pool)
+            self.pool.busy = {c for c in old.busy if c in set(cfg.pool)}
+        self.cfg = cfg
+        t = getattr(self.executor, "test_cmd", None)
+        if t is not None:
+            self.executor.test_cmd = list(cfg.test_cmd)
+
     # ---------- 一輪 ----------
     def tick(self) -> None:
         self._bad = None
