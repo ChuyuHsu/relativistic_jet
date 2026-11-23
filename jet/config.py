@@ -28,6 +28,7 @@ class Config:
     reserve_for_selftest: int = 0
     core_unit: str = "logical"        # logical＝以邏輯核計；physical＝以實體核為單位配槽
     threads: str = "all"             # physical 時：all＝實體核的兄弟執行緒都給同一個槽；one＝只給一條，另一條空著
+    max_selftest_slots_with_batch: int = 0   # 有批測在跑或在等時，自測最多幾槽；0＝不另外限制
     max_selftest_slots: int = 0       # 同時自測槽數上限；0＝不限（只受核數限制）
     selftest_timeout_s: int = 600
     batch_timeout_s: int = 3600
@@ -94,6 +95,7 @@ def parse(d: dict) -> Config:
         core_unit=cores.get("unit", "logical"),
         threads=cores.get("threads", "all"),
         max_selftest_slots=cores.get("max_selftest_slots", 0),
+        max_selftest_slots_with_batch=cores.get("max_selftest_slots_with_batch", 0),
         selftest_timeout_s=lim.get("selftest_timeout_s", 600),
         batch_timeout_s=lim.get("batch_timeout_s", 3600),
         batch_max=lim.get("batch_max", 16),
@@ -179,6 +181,8 @@ def _validate(c: Config) -> None:
         raise ConfigError('有設 source 時 git.scope 必須是 "tracked"（清單裡有的才管）')
     if c.core_unit not in ("logical", "physical") or c.threads not in ("all", "one"):
         raise ConfigError('cores.unit 要是 "logical" 或 "physical"，cores.threads 要是 "all" 或 "one"')
+    if not isinstance(c.max_selftest_slots_with_batch, int) or c.max_selftest_slots_with_batch < 0:
+        raise ConfigError("cores.max_selftest_slots_with_batch 不能是負的")
     if c.max_selftest_slots < 0:
         raise ConfigError("cores.max_selftest_slots 不能是負的")
     if c.baseline_history < 1:

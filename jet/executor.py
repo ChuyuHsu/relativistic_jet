@@ -238,8 +238,11 @@ class Executor:
             # exec 啟動器，由它在新行程裡綁核再 exec 真正的指令，指令從第一行起就只在專屬核上。
             launch = [sys.executable, "-I", LAUNCHER, "--exit-file", exit_path_for(job),
                       ",".join(str(c) for c in sorted(cores)), "--"] + argv
+            env = dict(os.environ)       # 讓測試指令知道自己分到幾顆核，好把 -j、引擎執行緒數壓在這個數字內
+            env["JET_CORES"] = ",".join(str(c) for c in sorted(cores))
+            env["JET_NCORES"] = str(len(cores))
             proc = subprocess.Popen(
-                launch, cwd=job.workdir, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                launch, cwd=job.workdir, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True, close_fds=True)
         except (OSError, subprocess.SubprocessError) as e:
             log.close()

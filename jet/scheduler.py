@@ -882,6 +882,8 @@ class Scheduler:
                 break                                         # 同時自測槽數上限（硬上限，不論有沒有批測）
             if wanted and in_use + self.cfg.selftest_cores > self.cfg.reserve_for_selftest:
                 break
+            if wanted and self.cfg.max_selftest_slots_with_batch and slots >= self.cfg.max_selftest_slots_with_batch:
+                break                                         # 有批測在等：自測槽數的硬上限
             if r["parent"]:
                 if any(x["state"] in (S.REJECTED.value, S.HALTED.value) for x in self._chain(r["name"])[:-1]):
                     continue                                  # 祖先被退回：等它好了再測

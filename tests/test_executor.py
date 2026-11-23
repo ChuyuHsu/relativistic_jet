@@ -520,3 +520,14 @@ class OverloadDetectTest(unittest.TestCase):
             self.assertFalse(ex._was_overloaded(h, 50.0))      # 機器不忙：單純卡住，算測試的錯
         finally:
             cores.system_overloaded = old
+
+
+class EnvTest(Base):
+    def test_job_sees_its_core_count(self):
+        c = ALLOWED[:2] if len(ALLOWED) >= 2 else ALLOWED[:1]
+        j = self.job("", cores_=c)
+        j.argv = [PY, "-c", "import os,json;print(os.environ['JET_CORES'],os.environ['JET_NCORES']);"
+                  "json.dump({'items':[{'id':'a','status':'pass'}]},open(%r,'w'))" % j.report_path]
+        _, r = self.run_job(j)
+        self.assertEqual(r.status, "pass")
+        self.assertIn(",".join(map(str, sorted(c))) + " " + str(len(c)), rd(j.log_path))

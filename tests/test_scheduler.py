@@ -719,3 +719,19 @@ class StartedEvents(Base):
         self.assertEqual({e["branch"] for e in bs}, {"a", "b"})
         p = notify.build_payload([notify._enrich(self.con, bs[0])], 1.0)["events"][0]
         self.assertEqual((p["batch_size"], p["pos"] in (1, 2)), (2, True))
+
+
+class SlotsWithBatch(Base):
+    def test_selftest_slots_capped_while_batch_wanted(self):
+        self.mk(delay=6, policy={"require_approval": False},
+                cores={"pool": "0-31", "selftest_cores": 2, "batch_cores": 4, "reserve_for_selftest": 20,
+                       "max_selftest_slots_with_batch": 2})
+        for i in range(6):
+            self.repo.add(f"n{i}")
+        peak_with_batch = 0
+        for _ in range(80):
+            self.s.tick()
+            n = sum(1 for j in self.s.jobs.values() if j.kind == "selftest")
+            if self.s.batch is not None or store.list_branches(self.con, "queued"):
+                peak_with_batch = max(peak_with_batch, n)
+        self.assertLessEqual(peak_with_batch, 2)
