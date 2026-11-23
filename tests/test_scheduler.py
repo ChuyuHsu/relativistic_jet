@@ -131,16 +131,39 @@ class Culprits(Base):
         store.resume_branch(self.con, "a")
         self.assertEqual(self.state("a"), "pending")
 
-    def test_batch_timeout_requeues(self):
-        self.mk(policy={"require_approval": False}, delay=2)
+    def test_batch_point_timeout_is_red_and_found(self):
+        """測點逾時＝紅：找出兇手退回，其餘合入。"""
+        self.mk(policy={"require_approval": False}, limits={"batch_max": 4})
+        for n in ("a", "b", "c", "d"):
+            self.repo.add(n)
+        self.go(40, until=lambda: all(self.state(n) == "selftest_green" or self.state(n) == "queued"
+                                      for n in "abcd") or self.state("a") == "batching")
+        # b 疊進去的所有測點（前綴含 b）都逾時
+        for k in range(2, 5):
+            pass
+        self.ex.force = {}
+        orig_poll = self.ex.poll
+
+        def poll(h):
+            res = orig_poll(h)
+            if res is not None and h.job.layer == "gate" and ">" in h.job.workdir \
+                    and "b" in h.job.workdir.rsplit(">", 1)[1].split("+"):
+                res.status, res.failed_items = "timeout", []
+            return res
+        self.ex.poll = poll
+        self.go(80, until=lambda: self.state("b") == "rejected" and
+                {self.state(n) for n in "acd"} == {"merged"})
+        self.assertIn("逾時", store.get_branch(self.con, "b")["reject_reason"])
+
+    def test_three_infra_pause_queue(self):
+        self.mk(policy={"require_approval": False})
         self.repo.add("a")
-        self.go(40, until=lambda: self.state("a") == "batching")
-        self.ex.force["m0>a"] = "timeout"
-        self.go(40, until=lambda: self.con.execute(
-            "SELECT count(*) FROM batches WHERE status='aborted'").fetchone()[0] >= 1)
-        self.assertIn(self.state("a"), ("queued", "batching"))
-        self.ex.force.clear()
-        self.go(until=lambda: self.merged() == {"a"})
+        orig = self.ex.poll
+        self.ex.poll = lambda h: (lambda r: r and type(r)("infra", None))(orig(h))
+        self.go(30)
+        self.assertTrue(store.is_paused(self.con))
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE kind='queue_error'").fetchone()[0], 1)
+        self.assertNotEqual(self.state("a"), "merged")
 
 
 class Rules(Base):

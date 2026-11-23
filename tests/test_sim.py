@@ -88,6 +88,8 @@ class Sim:
             repo.merged[ext] = dict(reds=set(), gate_reds=set(), files=["src/x.py"])
             repo.main = repo.main + ">" + ext
             repo.main_files[repo.main] = ["src/x.py"]
+        if store.is_paused(self.con) and r.random() < 0.2:
+            store.set_paused(self.con, False, "sim")        # 人來處理暫停
         self.ex.force = {}
         if r.random() < 0.08 * p and repo.branches:
             n = r.choice(list(repo.branches))
@@ -107,6 +109,7 @@ class SimTest(unittest.TestCase):
                     sim.chaos()
                     sim.s.tick()
                 sim.ff_fail = 0.0
+                store.set_paused(sim.con, False, "sim")
                 for n in list(sim.repo.branches):
                     if store.get_branch(sim.con, n):
                         store.approve(sim.con, n, "sim")

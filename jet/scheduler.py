@@ -83,7 +83,7 @@ class Scheduler:
         self.main: str = ""
         self._bad: Optional[Set[int]] = None
         self._start_fail = 0
-        self._infra: Dict[str, int] = {}
+        self._infra_streak = 0
         self._stop = False
         self.recover()
 
@@ -345,6 +345,8 @@ class Scheduler:
                 continue
             self.con.execute("UPDATE runs SET exit_code=? WHERE id=?", (res.exit_code, rid))
             self._release_job(rid, res.status)
+            if res.status not in ("infra", "cancelled"):
+                self._infra_streak = 0
             if j.kind == "selftest":
                 self._on_selftest(j, res)
             elif j.kind == "baseline":
@@ -362,10 +364,11 @@ class Scheduler:
         return not items or not items <= baseline
 
     def _infra_retry(self, key) -> bool:
-        n = self._infra.get(key, 0) + 1
-        self._infra[key] = n
-        if n == 3:
-            store.add_event(self.con, "queue_error", None, f"{key} 連續基礎設施錯誤")
+        """基礎設施錯誤（測試根本沒跑起來）：重跑；連續 3 次就暫停整個排隊器並發待辦事件。"""
+        self._infra_streak += 1
+        if self._infra_streak >= 3 and not store.is_paused(self.con):
+            store.set_paused(self.con, True, "scheduler")
+            store.add_event(self.con, "queue_error", None, f"{key} 連續基礎設施錯誤，排隊器已暫停")
         return True
 
     # ---------- 基準 ----------
@@ -647,15 +650,14 @@ class Scheduler:
             self._infra_retry(f"batch:{j.kind}:{j.size}")
             b.launched.discard((j.kind, j.size))
             return
-        if res.status == "timeout":
-            self._abort_batch("測點逾時")
-            store.add_event(self.con, "queue_error", None, "批測逾時，整批重排")
-            return
         base = store.get_baseline(self.con, b.base_sha, "gate") or set()
-        red = self._red(res, base)
+        red = self._red(res, base)       # 逾時＝這個測點紅，照一般流程找兇手
         target = b.results if j.kind == "point" else b.probes
         target[j.size] = RED if red else GREEN
-        b.failed[j.size] = set(res.failed_items) - base if red else set(res.failed_items)
+        if res.status == "timeout":
+            b.failed[j.size] = {"逾時"}
+        else:
+            b.failed[j.size] = set(res.failed_items) - base if red else set(res.failed_items)
 
     def _finish_batch(self, v):
         b, c = self.batch, self.con
