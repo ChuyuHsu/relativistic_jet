@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   card_id TEXT NOT NULL,
   op TEXT NOT NULL,                       -- track / untrack / approve / revoke
   payload TEXT NOT NULL,                  -- 要送給上游排隊器的 JSON
-  state TEXT NOT NULL DEFAULT 'pending',  -- pending / done / failed（上游明確拒絕，不再重送）
+  state TEXT NOT NULL DEFAULT 'pending',  -- pending / sending（某個行程正在送）/ done / failed（上游明確拒絕，不再重送）
+  claimed_at INTEGER,                     -- 轉成 sending 的時間；太久沒結果由 runSync 放回 pending
   tries INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   created_at INTEGER NOT NULL,

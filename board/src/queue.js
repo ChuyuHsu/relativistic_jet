@@ -119,27 +119,36 @@ export async function enqueueSync(db, cardId, op, payload) {
   return r;
 }
 
-// 依序送出待送的呼叫。同一張卡前一筆沒送成，後面的不越過它（順序不能亂：取消舊的才登記新的）。
-// 上游 2xx → done；4xx（408／429 除外）→ failed 不再重送、留下原因；其餘（連不上、5xx）保留重送。
+// 依序送出待送的呼叫。
+// 競態：請求裡的 runSync 與 cron 的 runSync 可能同時跑，所以每筆送之前先原子認領（pending→sending，
+// 影響 0 列就是別人在送，跳過）；同一張卡前面還有沒結束的（pending／剛認領的 sending），後面的一律不送，順序不亂。
+// 上游 2xx → done；4xx（401／403／408／429 除外）→ failed 不再重送、留下原因；其餘（連不上、5xx、權杖設錯）放回 pending 重送，錯誤顯示在卡片上。
+const SENDING_TIMEOUT_S = 90;
 export async function runSync(env, cardId) {
   const db = env.DB;
+  await db.prepare("UPDATE sync_jobs SET state='pending' WHERE state='sending' AND claimed_at<?").bind(now() - SENDING_TIMEOUT_S).run();
   const jobs = (cardId
-    ? await db.prepare("SELECT * FROM sync_jobs WHERE state='pending' AND card_id=? ORDER BY n LIMIT 50").bind(cardId).all()
-    : await db.prepare("SELECT * FROM sync_jobs WHERE state='pending' ORDER BY n LIMIT 50").all()).results;
+    ? await db.prepare("SELECT * FROM sync_jobs WHERE state IN ('pending','sending') AND card_id=? ORDER BY n LIMIT 50").bind(cardId).all()
+    : await db.prepare("SELECT * FROM sync_jobs WHERE state IN ('pending','sending') ORDER BY n LIMIT 50").all()).results;
   const blocked = new Set();
   let done = 0;
   for (const j of jobs) {
     if (blocked.has(j.card_id)) continue;
-    const res = await queueCall(env, 'POST', PATH_OF[j.op], JSON.parse(j.payload));
-    let msg = '';
-    if (!res.ok) { try { msg = (await res.text()).slice(0, 300); } catch { msg = ''; } }
+    if (j.state === 'sending') { blocked.add(j.card_id); continue; }   // 別人正在送這筆：它之後的不搶先
+    const got = await db.prepare("UPDATE sync_jobs SET state='sending',claimed_at=? WHERE n=? AND state='pending'").bind(now(), j.n).run();
+    if (got.meta.changes !== 1) { blocked.add(j.card_id); continue; }
+    let res, msg = '';
+    try {
+      res = await queueCall(env, 'POST', PATH_OF[j.op], JSON.parse(j.payload));
+      if (!res.ok) msg = (await res.text()).slice(0, 300);
+    } catch (e) { res = { ok: false, status: 0 }; msg = '送出時出錯'; }
     if (res.ok) {
       await db.prepare("UPDATE sync_jobs SET state='done',tries=tries+1,done_at=?,last_error=NULL WHERE n=?").bind(now(), j.n).run();
       done++;
-    } else if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+    } else if (res.status >= 400 && res.status < 500 && ![401, 403, 408, 429].includes(res.status)) {
       await db.prepare("UPDATE sync_jobs SET state='failed',tries=tries+1,last_error=? WHERE n=?").bind(`${res.status} ${msg}`, j.n).run();
     } else {
-      await db.prepare('UPDATE sync_jobs SET tries=tries+1,last_error=? WHERE n=?').bind(`${res.status} ${msg}`, j.n).run();
+      await db.prepare("UPDATE sync_jobs SET state='pending',tries=tries+1,last_error=? WHERE n=?").bind(`${res.status} ${msg}`, j.n).run();
       blocked.add(j.card_id);
     }
   }
@@ -148,9 +157,10 @@ export async function runSync(env, cardId) {
 
 // 卡片回傳要附的同步狀態：還沒送達幾筆、被上游拒絕幾筆（與最近一筆原因）
 export async function withSync(db, card) {
-  const r = await db.prepare("SELECT state, count(*) AS n FROM sync_jobs WHERE card_id=? AND state IN ('pending','failed') GROUP BY state").bind(card.id).all();
+  const r = await db.prepare("SELECT state, count(*) AS n FROM sync_jobs WHERE card_id=? AND state IN ('pending','sending','failed') GROUP BY state").bind(card.id).all();
   const by = Object.fromEntries(r.results.map(x => [x.state, x.n]));
-  const out = { ...card, sync_pending: by.pending || 0, sync_failed: by.failed || 0 };
-  if (out.sync_failed) out.sync_error = (await db.prepare("SELECT op,last_error FROM sync_jobs WHERE card_id=? AND state='failed' ORDER BY n DESC LIMIT 1").bind(card.id).first()) || null;
+  const out = { ...card, sync_pending: (by.pending || 0) + (by.sending || 0), sync_failed: by.failed || 0 };
+  if (out.sync_pending || out.sync_failed)   // 最近一筆帶錯誤的（卡在重試的，或被拒絕的）
+    out.sync_error = (await db.prepare("SELECT op,state,last_error FROM sync_jobs WHERE card_id=? AND last_error IS NOT NULL AND state IN ('pending','failed') ORDER BY n DESC LIMIT 1").bind(card.id).first()) || null;
   return out;
 }

@@ -166,4 +166,33 @@ test('上游明確拒絕（4xx）：標失敗不重送；5xx 保留重送；放�
 });
 
 import { runSync } from '../src/queue.js';
+
+test('競態：兩邊同時補送，同一筆只送一次、順序不亂', async () => {
+  const e = mkenv(); await regQueue(e); await card(e, 'c1', 'dev/c1', 'a');
+  await e.DB.prepare('DELETE FROM sync_jobs').run();
+  const { enqueueSync } = await import('../src/queue.js');
+  await enqueueSync(e.DB, 'c1', 'untrack', { branch: 'dev/a' }); await enqueueSync(e.DB, 'c1', 'track', { branch: 'dev/b' });
+  const sent = [];
+  await withFetch(async () => { await Promise.all([runSync(e), runSync(e, 'c1'), runSync(e)]); },
+    async (u, init) => { sent.push(u.replace('https://q.trycloudflare.com', '')); await new Promise(r => setTimeout(r, 5)); return new Response('{}'); });
+  assert.deepEqual(sent, ['/untrack', '/track']);
+});
+
+test('401／403 當可重試（權杖設錯修好後會補上），錯誤顯示在卡片上', async () => {
+  const e = mkenv(); await regQueue(e);
+  await call(e, 'POST', '/api/cards', { id: 'c1', title: 'c1' });
+  await withFetch(() => call(e, 'POST', '/api/claim', { id: 'c1', owner: 'a' }), async () => new Response('no', { status: 401 }));
+  let c = await getCard(e, 'c1');
+  assert.deepEqual([c.sync_pending, c.sync_failed], [1, 0]);
+  assert.match(c.sync_error.last_error, /401/);
+  await withFetch(() => runSync(e), async () => new Response('{}'));
+  assert.equal((await getCard(e, 'c1')).sync_pending, 0);
+});
+
+test('卡在 sending 太久的會放回 pending', async () => {
+  const e = mkenv(); await regQueue(e); await card(e, 'c1', 'dev/c1', 'a');
+  await e.DB.prepare("UPDATE sync_jobs SET state='sending',claimed_at=1").run();
+  await withFetch(() => runSync(e), async () => new Response('{}'));
+  assert.equal((await getCard(e, 'c1')).sync_pending, 0);
+});
 const flushSync = e => runSync(e);

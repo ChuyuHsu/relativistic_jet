@@ -11,7 +11,7 @@
 2. **退回後重做**：`POST /api/cards/<id>/rebranch`，分支變 `<卡號>-r2`、`-r3`…；看板先 `POST /untrack` 舊分支、再 `/track` 新分支。
 3. **釋放（status:open）或放棄（dropped）**：`POST /untrack` 該分支。
 4. **放行／撤回**：`POST /api/cards/<id>/approve`、`/revoke` 經看板轉給排隊器。
-5. **送不到不丟**：以上四種對排隊器的呼叫（track、untrack、approve、revoke）都先寫進 `sync_jobs` 再送。連不上或上游 5xx：保留，cron（每 2 分鐘）補送到成功為止；同一張卡前一筆沒送成，後面的不越過它。上游明確拒絕（4xx，例如放行時版本已變）：標 `failed`、不再重送、留下原因。卡片回傳帶 `sync_pending`（還沒送達幾筆）、`sync_failed`、`sync_error`；approve／revoke 還沒送達時回 202 與 `delivered:false`。
+5. **送不到不丟**：以上四種對排隊器的呼叫（track、untrack、approve、revoke）都先寫進 `sync_jobs` 再送。連不上或上游 5xx：保留，cron（每 2 分鐘）補送到成功為止；同一張卡前一筆沒送成，後面的不越過它。上游明確拒絕（4xx，例如放行時版本已變；401／403／408／429 除外，那些多半是權杖或暫時狀況，當可重試）：標 `failed`、不再重送、留下原因。補送前先原子認領（`pending→sending`），cron 與請求同時補送也不會重複或亂序；`sending` 超過 90 秒沒結果會放回 `pending`。卡片回傳帶 `sync_pending`（還沒送達幾筆）、`sync_failed`、`sync_error`；approve／revoke 還沒送達時回 202 與 `delivered:false`。
 
 ## API
 讀取要 `TOKEN` 或 `READ_TOKEN`，寫入要 `TOKEN`（`Authorization: Bearer …`，常數時間比對）；因為讀取會用看板自己的 `QUEUE_TOKEN` 代查排隊器，所以不開放匿名讀取。看板網頁本身是靜態的：打開後輸入一次讀取權杖，或直接開 `https://<你的網址>/#t=<讀取權杖>`（`#` 後面不會送到伺服器，也不進請求紀錄），權杖會記在你的瀏覽器並從網址列移除，之後免再輸入。`READ_TOKEN` 只能讀（GET），不能寫，適合手機只看不改。
