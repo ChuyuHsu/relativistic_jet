@@ -14,13 +14,9 @@ const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者
 const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
-// 放棄查驗事件的原文與看板怎麼處理的，留最近 100 筆，查問題用
-async function hookLog(db, e, outcome) {
-  try {
-    await db.prepare('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)').bind(now(), JSON.stringify(e).slice(0, 600), outcome).run();
-    await db.prepare('DELETE FROM hook_log WHERE n NOT IN (SELECT n FROM hook_log ORDER BY n DESC LIMIT 100)').run();
-  } catch {}
-}
+// 一批事件在記憶體裡依序處理（卡片狀態用預載的副本，邊處理邊更新），所有寫入收成語句，最後用 D1 batch 一次送出
+// （每個事件的語句整組同進同出，不跨 batch 切開）：一批 50 筆只有幾次往返，一組失敗不會留下做一半的事件。
+const chunk = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };
 
 export async function handleHook(req, env, ctx) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
@@ -29,82 +25,111 @@ export async function handleHook(req, env, ctx) {
   if (!body || !Array.isArray(body.events)) return json({ error: 'body 要有 events 陣列' }, 400);
   const db = env.DB, source = String(body.source || 'queue');
   const admins = list(env.ADMIN_THREADS);
-  let applied = 0, unmatched = 0, dup = 0, stale = 0;
-  const post = (owners, card, kind, branch, detail) => Promise.all(owners.map(o => db.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)')
-    .bind(o, card?.id ?? null, branch, kind, detail, now()).run()));
-  for (const e of body.events.slice(0, 200)) {
-    const kind = String(e.kind || ''), branch = e.branch ? String(e.branch) : null;
-    if (e.id != null && e.id !== '') {
-      const r = await db.prepare('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)').bind(`${source}:${String(e.id)}`).run();
-      if (!r.meta.changes) { dup++; continue; }
-    }
-    let card = branch ? await db.prepare('SELECT * FROM cards WHERE branch=?').bind(branch).first() : null;
-    if (!card && kind === 'drop_checked' && e.card) card = await db.prepare('SELECT * FROM cards WHERE id=?').bind(String(e.card)).first();
-    const detail = e.detail ? String(e.detail).slice(0, 500) : '';
-    if (!card) {
-      unmatched++;
-      if (kind === 'drop_checked') await hookLog(db, e, '找不到對應的卡（branch／card 都對不上）');
-      if (ADMIN_KINDS.has(kind)) await post(admins.length ? admins : [''], null, kind, branch, detail);   // 排隊器自己的問題：通知管理者
-      continue;
-    }
-    if (kind === 'drop_checked') {   // 放棄待查的結果：只對「放棄待查」的卡有效，其他一律當過期丟掉
-      if (!card || !card.dropping_at || card.status === 'dropped') { stale++; await hookLog(db, e, `過期：卡${card ? `不在待查（${card.status}）` : '不存在'}`); continue; }
-      // 比對是哪一次放棄的結果：事件帶回 dropping_at 就必須相同；沒帶但有 target 就必須是現在接手卡的分支
-      if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; await hookLog(db, e, `過期：dropping_at 對不上（卡上 ${card.dropping_at}）`); continue; }
-      if (e.dropping_at == null && card.superseded_by && e.target != null) {
-        const sc = await db.prepare('SELECT id,branch FROM cards WHERE id=?').bind(card.superseded_by).first();
-        // 接手卡的分支還不存在時排隊器回的 target 是 main（退回只看 main），也算對得上
-        if (!sc || (String(e.target) !== 'main' && String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`))) { stale++; await hookLog(db, e, `過期：target 對不上（接手卡 ${card.superseded_by}）`); continue; }
-      }
-      const unmerged = e.unmerged === true, covered = e.covered === true, mc = Number(e.missing_count ?? 0) || 0;
-      const missing = Array.isArray(e.missing_files) ? e.missing_files.slice(0, 20).map(String).join('、') : '';
-      applied++;
-      await hookLog(db, e, '收下');
-      // 帶 superseded_by：沒有不在 main 的改動，或接手的卡全都涵蓋了才放棄；只帶 discard_reason：一律放棄（有漏的另發通知）
-      const ok = !card.superseded_by ? true : (!unmerged || covered);
-      if (ok) {
-        const r = await db.prepare("UPDATE cards SET status='dropped',drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL AND status!='dropped'").bind(unmerged ? 1 : 0, now(), now(), card.id).run();
-        if (r.meta.changes === 1) {
-          await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(card.id, now(), source, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`).run();
-          await notifyKids(env, card.id);
-          if (unmerged && !card.superseded_by) await post(admins.length ? admins : [''], card, 'drop_discarded', card.branch, `缺 ${mc} 個檔${missing ? `：${missing}` : ''}；放棄原因：${card.discard_reason}`);
-        }
-      } else {   // 放棄不成立：回到原階段，通知負責串與管理者
-        const r = await db.prepare('UPDATE cards SET dropping_at=NULL,superseded_by=NULL,discard_reason=NULL,drop_unmerged=1,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL').bind(now(), now(), card.id).run();
-        if (r.meta.changes === 1) {
-          const why = `這張卡還有改動不在 main，也不在 ${card.superseded_by} 裡${mc ? `（缺 ${mc} 個檔）` : ''}${missing ? `，缺的檔：${missing}` : ''}`;
-          await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(card.id, now(), source, `放棄沒成立：${why}`).run();
-          await post([...new Set([card.owner_thread || '', ...(admins.length ? admins : [])])], card, 'drop_rejected', card.branch, why);
-        }
-      }
-      continue;
-    }
-    // 過期回報不算數：卡片沒在跑（沒放行、已放棄），或事件依據的放行版本／重測計數跟卡片現在的不符，一律丟掉（仍回 200）
-    const claimedAndApproved = card.status === 'claimed' && card.approved_commit;
-    const sameApproval = e.approved_sha == null || sameCommit(String(e.approved_sha), card.approved_commit);
-    const sameRetest = e.retest == null || Number(e.retest) === card.retest;
-    if (kind !== 'merged' && (!claimedAndApproved || !sameApproval || !sameRetest)) { stale++; continue; }   // 已合併事實一律接受（main 已經有了）
-    applied++;
-    if (kind === 'superseded') {   // 內容變了：送審、放行、舊結果作廢，回到開發中
-      await db.prepare('UPDATE cards SET submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,phase=NULL,phase_at=NULL,last_result=NULL,updated_at=? WHERE id=?').bind(now(), card.id).run();
-    }
-    // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
-    const to = kind === 'superseded' ? null : e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
-    if (to) await db.prepare('UPDATE cards SET phase=?,phase_at=?,updated_at=? WHERE id=?').bind(to, now(), now(), card.id).run();
-    if (!['approved', 'revoked', 'superseded', 'parent_blocked'].includes(kind)) {   // 放行是看板自己的欄位；父卡擋住只是註記，都不覆蓋「最新結果」
-      let fi = Array.isArray(e.failed_items) && e.failed_items.length ? e.failed_items.slice(0, 50) : null;
-      if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && e.commit && prev.commit === e.commit) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的
-      const res = { kind, at: e.at ?? now(), commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: fi };
-      await db.prepare('UPDATE cards SET last_result=? WHERE id=?').bind(JSON.stringify(res), card.id).run();
-    }
-    await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)')
-      .bind(card.id, now(), source, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`).run();
-    // 通知：被排隊器退回、內容變了 → 領卡的開發者；暫停、父卡擋住 → 管理者
-    if (ADMIN_KINDS.has(kind)) await post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
-    else if (ATTENTION.has(kind)) await post([card.owner_thread || ''], card, kind, branch, detail);
+  const events = body.events.slice(0, 200), remaining = Math.max(0, body.events.length - events.length);
+  const T = now();
+  let applied = 0, unmatched = 0, dup = 0, stale = 0, logged = false;
+  // ---- 預載：已見過的事件編號、事件牽涉的卡 ----
+  const keyOf = e => `${source}:${String(e.id)}`, hasId = e => e.id != null && e.id !== '';
+  const seen = new Set();
+  for (const ks of chunk(events.filter(hasId).map(keyOf), 90)) {
+    const r = await db.prepare(`SELECT key FROM hook_seen WHERE key IN (${ks.map(() => '?').join(',')})`).bind(...ks).all();
+    for (const row of r.results) seen.add(row.key);
   }
+  const byBranch = new Map(), byId = new Map();
+  const load = rows => { for (const c of rows) { if (!byId.has(c.id)) byId.set(c.id, c); if (c.branch && !byBranch.has(c.branch)) byBranch.set(c.branch, byId.get(c.id)); } };
+  for (const bs of chunk([...new Set(events.map(e => e.branch).filter(Boolean).map(String))], 90))
+    load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
+  for (const ids of chunk([...new Set(events.filter(e => e.kind === 'drop_checked').flatMap(e => [e.card].filter(Boolean)).map(String))], 90))
+    load((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results);
+  // ---- 逐筆處理，寫入累積成語句 ----
+  let cur = [];
+  const q = (sql, ...args) => cur.push(db.prepare(sql).bind(...args));
+  const patch = (card, cols) => { const ks = Object.keys(cols); q(`UPDATE cards SET ${ks.map(k => `${k}=?`).join(',')} WHERE id=?`, ...ks.map(k => cols[k]), card.id); Object.assign(card, cols); };
+  const post = (owners, card, kind, branch, detail) => owners.forEach(o => q('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)', o, card?.id ?? null, branch, kind, detail, T));
+  const logEv = (id, note) => q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', id, T, source, note);
+  const hl = (e, outcome) => { logged = true; q('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)', T, JSON.stringify(e).slice(0, 600), outcome); };
+  const groups = [];
+  for (const e of events) {
+    cur = [];
+    await (async () => {
+      const kind = String(e.kind || ''), branch = e.branch ? String(e.branch) : null;
+      if (hasId(e)) {
+        if (seen.has(keyOf(e))) { dup++; return; }
+        seen.add(keyOf(e)); q('INSERT OR IGNORE INTO hook_seen(key) VALUES(?)', keyOf(e));
+      }
+      let card = branch ? byBranch.get(branch) : null;
+      if (!card && kind === 'drop_checked' && e.card) card = byId.get(String(e.card));
+      const detail = e.detail ? String(e.detail).slice(0, 500) : '';
+      if (!card) {
+        unmatched++;
+        if (kind === 'drop_checked') hl(e, '找不到對應的卡（branch／card 都對不上）');
+        if (ADMIN_KINDS.has(kind)) post(admins.length ? admins : [''], null, kind, branch, detail);   // 排隊器自己的問題：通知管理者
+        return;
+      }
+      if (kind === 'drop_checked') {   // 放棄待查的結果：只對「放棄待查」的卡有效，其他一律當過期丟掉
+        if (!card.dropping_at || card.status === 'dropped') { stale++; hl(e, `過期：卡不在待查（${card.status}）`); return; }
+        // 比對是哪一次放棄的結果：事件帶回 dropping_at 就必須相同；沒帶但有 target 就必須是現在接手卡的分支
+        if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; hl(e, `過期：dropping_at 對不上（卡上 ${card.dropping_at}）`); return; }
+        if (e.dropping_at == null && card.superseded_by && e.target != null) {
+          let sc = byId.get(card.superseded_by);
+          if (!sc) { sc = await db.prepare('SELECT id,branch FROM cards WHERE id=?').bind(card.superseded_by).first(); if (sc) byId.set(sc.id, sc); }
+          // 接手卡的分支還不存在時排隊器回的 target 是 main（退回只看 main），也算對得上
+          if (!sc || (String(e.target) !== 'main' && String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`))) { stale++; hl(e, `過期：target 對不上（接手卡 ${card.superseded_by}）`); return; }
+        }
+        const unmerged = e.unmerged === true, covered = e.covered === true, mc = Number(e.missing_count ?? 0) || 0;
+        const missing = Array.isArray(e.missing_files) ? e.missing_files.slice(0, 20).map(String).join('、') : '';
+        applied++;
+        hl(e, '收下');
+        // 帶 superseded_by：沒有不在 main 的改動，或接手的卡全都涵蓋了才放棄；只帶 discard_reason：一律放棄（有漏的另發通知）
+        const ok = !card.superseded_by ? true : (!unmerged || covered);
+        if (ok) {
+          patch(card, { status: 'dropped', drop_unmerged: unmerged ? 1 : 0, drop_checked_at: T, updated_at: T });
+          logEv(card.id, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`);
+          const kids = (await db.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(card.id).all()).results;   // 子卡被擋住，通知管理者
+          for (const k of kids) post(admins.length ? admins : [k.owner_thread || ''], k, 'parent_blocked', k.branch, `父卡 ${card.id} 被放棄，請改接別張卡或直接接 main`);
+          if (unmerged && !card.superseded_by) post(admins.length ? admins : [''], card, 'drop_discarded', card.branch, `缺 ${mc} 個檔${missing ? `：${missing}` : ''}；放棄原因：${card.discard_reason}`);
+        } else {   // 放棄不成立：回到原階段，通知負責串與管理者
+          const why = `這張卡還有改動不在 main，也不在 ${card.superseded_by} 裡${mc ? `（缺 ${mc} 個檔）` : ''}${missing ? `，缺的檔：${missing}` : ''}`;
+          const owner = card.owner_thread || '';
+          patch(card, { dropping_at: null, superseded_by: null, discard_reason: null, drop_unmerged: 1, drop_checked_at: T, updated_at: T });
+          logEv(card.id, `放棄沒成立：${why}`);
+          post([...new Set([owner, ...(admins.length ? admins : [])])], card, 'drop_rejected', card.branch, why);
+        }
+        return;
+      }
+      // 過期回報不算數：卡片沒在跑（沒放行、已放棄），或事件依據的放行版本／重測計數跟卡片現在的不符，一律丟掉（仍回 200）
+      const claimedAndApproved = card.status === 'claimed' && card.approved_commit;
+      const sameApproval = e.approved_sha == null || sameCommit(String(e.approved_sha), card.approved_commit);
+      const sameRetest = e.retest == null || Number(e.retest) === card.retest;
+      if (kind !== 'merged' && (!claimedAndApproved || !sameApproval || !sameRetest)) { stale++; return; }   // 已合併事實一律接受（main 已經有了）
+      applied++;
+      if (kind === 'superseded') {   // 內容變了：送審、放行、舊結果作廢，回到開發中
+        patch(card, { submitted_commit: null, submitted_at: null, rejected_reason: null, rejected_by: null, rejected_at: null, approved_commit: null, approved_by: null, approved_at: null, phase: null, phase_at: null, last_result: null, updated_at: T });
+      }
+      // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
+      const to = kind === 'superseded' ? null : e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
+      if (to) patch(card, { phase: to, phase_at: T, updated_at: T });
+      if (!['approved', 'revoked', 'superseded', 'parent_blocked'].includes(kind)) {   // 放行是看板自己的欄位；父卡擋住只是註記，都不覆蓋「最新結果」
+        let fi = Array.isArray(e.failed_items) && e.failed_items.length ? e.failed_items.slice(0, 50) : null;
+        if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && e.commit && prev.commit === e.commit) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的
+        const res = { kind, at: e.at ?? T, commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: fi };
+        patch(card, { last_result: JSON.stringify(res) });
+      }
+      logEv(card.id, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`);
+      // 通知：被排隊器退回、內容變了 → 領卡的開發者；暫停、父卡擋住 → 管理者
+      if (ADMIN_KINDS.has(kind)) post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
+      else if (ATTENTION.has(kind)) post([card.owner_thread || ''], card, kind, branch, detail);
+    })();
+    if (cur.length) groups.push(cur);
+  }
+  if (logged) groups.push([db.prepare('DELETE FROM hook_log WHERE n NOT IN (SELECT n FROM hook_log ORDER BY n DESC LIMIT 100)')]);
+  // ---- 一次送出：每個 batch 最多 80 句，事件的語句整組不拆開 ----
+  let batch = [];
+  const flushBatch = async () => { if (batch.length) { const b = batch; batch = []; await db.batch(b); } };
+  for (const g of groups) { if (batch.length && batch.length + g.length > 80) await flushBatch(); batch.push(...g); }
+  await flushBatch();
   if (ctx && ctx.waitUntil) ctx.waitUntil(autoFlush(env));
-  return json({ ok: true, applied, unmatched, duplicate: dup, stale });
+  return json({ ok: true, applied, unmatched, duplicate: dup, stale, processed: events.length, remaining });
 }
 
 // 卡片上存的排隊器最新結果（事件原樣整理後存成 JSON 字串）

@@ -49,3 +49,7 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 
 - `POST /api/outbox/claim {actor}`（TOKEN）：回 `{messages:[{to_thread, ids, kinds, card_ids, created_at, text}]}`，每個收件串一則、已合併；`text` 含哪張卡、發生什麼、原因與紅項、下一步。領過的標記時間，5 分鐘內不重給；沒有收件串的（沒填負責串）改給 `ADMIN_THREADS` 第一個。
 - `POST /api/outbox/ack {actor, ids}`（TOKEN）：ids 用 claim 回傳的 `ids`（全部攤平）；ack 過的不再給，沒 ack 的 5 分鐘後會再給一次。
+
+## /hooks/queue 的批次處理
+
+一個請求最多處理 200 筆事件（超過的回 `remaining`，對方用 `processed` 之後的接著送）；回 `{ok, applied, unmatched, duplicate, stale, processed, remaining}`。處理方式：先用幾次查詢預載已見過的事件編號與牽涉的卡，在記憶體裡依序處理，寫入收成語句用 D1 batch 一次送出（每個事件的語句整組同進同出）。事件編號去重，整批重送不會重複寫；一批 50 筆約個位數次 D1 往返。

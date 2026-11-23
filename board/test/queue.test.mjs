@@ -544,3 +544,23 @@ test('放棄查驗事件的處理結果記進 hook_log（過期與收下都留�
   const rows = (await e.DB.prepare('SELECT outcome FROM hook_log ORDER BY n').all()).results.map(r => r.outcome);
   assert.match(rows[0], /過期/); assert.equal(rows[1], '收下');
 });
+
+test('hook 一批 50 筆：D1 往返只有個位數、同批多事件依序生效、整批重送不重複', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  for (let i = 0; i < 50; i++) await approved(e, `b${i}`, `th${i}`);
+  // 計 D1 往返：prepare 出來的 run／all／first 各算一次，batch 算一次
+  let trips = 0; const real = e.DB;
+  e.DB = { prepare: sql => { const st = real.prepare(sql); const w = { bind: (...a) => { st.bind(...a); return w; }, _run: () => st._run(), run: () => { trips++; return st.run(); }, all: () => { trips++; return st.all(); }, first: () => { trips++; return st.first(); } }; return w; }, batch: l => { trips++; return real.batch(l.map(x => x)); } };
+  const events = [];
+  for (let i = 0; i < 50; i++) events.push({ id: `bt:${i}:1`, branch: br(`b${i}`), kind: 'tested_red', approved_sha: SHA, commit: SHA, detail: 'x', failed_items: [{ item_id: 'f' + i }] }, { id: `bt:${i}:2`, branch: br(`b${i}`), kind: 'rejected', approved_sha: SHA, commit: SHA });
+  const r = await (await hook(e, events)).json();
+  assert.deepEqual([r.applied, r.processed, r.remaining], [100, 100, 0]);
+  assert.ok(trips <= 10, `D1 往返 ${trips} 次`);
+  const c = await getCard(e, 'b7');
+  assert.equal(c.stage, 'rejected'); assert.equal(c.rejected.failed_items[0].item_id, 'f7');   // 同批後面的事件沒帶紅項，沿用前面的
+  const again = await (await hook(e, events)).json();
+  assert.deepEqual([again.applied, again.duplicate], [0, 100]);                                  // 整批重送：全部判重複，不重複寫
+  assert.equal((await e.DB.prepare("SELECT count(*) n FROM outbox WHERE card_id='b7' AND kind='tested_red'").first()).n, 1);
+  const over = await (await hook(e, Array.from({ length: 205 }, (_, i) => ({ id: `ov:${i}`, kind: 'queue_error' })))).json();
+  assert.deepEqual([over.processed, over.remaining], [200, 5]);                                  // 超過 200 筆回報還剩幾筆讓對方續傳
+});
