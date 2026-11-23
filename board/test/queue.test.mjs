@@ -522,3 +522,10 @@ test('放棄防呆補強：待查中擋改欄位；晚到的上一輪查驗結�
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: true, target: br('c3'), dropping_at: cur.dropping_at });
   assert.equal(await stageOf(e, 'c1'), 'dropped');
 });
+
+test('放棄防呆：接手分支還不存在時 target 是 main，仍算對得上這一輪', async () => {
+  const e = mkenv(); await claim(e, 'c1', 'th1'); await call(e, 'POST', '/api/cards', { id: 'c9', title: 'c9' });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c9' });
+  const r = await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, target: 'main' })).json();
+  assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'c1'), 'dropped');
+});

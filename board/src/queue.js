@@ -44,7 +44,8 @@ export async function handleHook(req, env, ctx) {
       if (e.dropping_at != null && Number(e.dropping_at) !== card.dropping_at) { stale++; continue; }
       if (e.dropping_at == null && card.superseded_by && e.target != null) {
         const sc = await db.prepare('SELECT id,branch FROM cards WHERE id=?').bind(card.superseded_by).first();
-        if (!sc || String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`)) { stale++; continue; }
+        // 接手卡的分支還不存在時排隊器回的 target 是 main（退回只看 main），也算對得上
+        if (!sc || (String(e.target) !== 'main' && String(e.target) !== (sc.branch || `dev/${String(sc.id).toLowerCase()}`))) { stale++; continue; }
       }
       const unmerged = e.unmerged === true, covered = e.covered === true, mc = Number(e.missing_count ?? 0) || 0;
       const missing = Array.isArray(e.missing_files) ? e.missing_files.slice(0, 20).map(String).join('、') : '';
