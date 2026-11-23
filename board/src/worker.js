@@ -90,6 +90,7 @@ async function desired(req, env) {
       if (p) Object.assign(e, p);
       if (c.approved_commit) e.approved_sha = c.approved_commit;
       e.retest = c.retest;
+      e.priority = c.priority;   // 數字小的先（跟看板排序一致）；排隊器拿來排自測與批測順序
       out.push(e);
     }
     if (new URL(req.url).searchParams.get('with') === 'drop_checks') {   // 放棄待查：排隊器要查這些分支有沒有改動漏掉

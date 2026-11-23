@@ -219,7 +219,7 @@ test('排隊器拉清單：已領、未合併、未放棄；帶父卡分支（�
   assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 'bad')).status, 401);
   assert.equal((await call(e, 'GET', '/api/queue/desired', undefined, 't')).status, 200);       // 寫入權杖也能讀（只讀端點）
   const a = await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json();
-  assert.deepEqual(a, [{ branch: 'dev/p', approved_sha: SHA, retest: 0 }, { branch: 'dev/k', parent: 'dev/p', approved_sha: SHA, retest: 0 }, { branch: 'dev/n', retest: 0 }]);
+  assert.deepEqual(a, [{ branch: 'dev/p', approved_sha: SHA, priority: 100, retest: 0 }, { branch: 'dev/k', parent: 'dev/p', approved_sha: SHA, priority: 100, retest: 0 }, { branch: 'dev/n', priority: 100, retest: 0 }]);
   assert.deepEqual(await (await call(e, 'GET', '/api/queue/desired', undefined, 'rd')).json(), a);
   await ev(e, 'P', { kind: 'merged', approved_sha: SHA });                                      // 父卡合併後子卡的 parent 省略
   assert.equal((await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json()).find(x => x.branch === 'dev/k').parent, undefined);

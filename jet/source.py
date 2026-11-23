@@ -1,6 +1,6 @@
 """外部來源（DESIGN 第 3 節）：排隊器定時去一個網址拉清單，清單就是「管哪些分支、放行到哪個版本」的唯一依據。
 
-清單格式（JSON 陣列）：[{"branch", "parent"?, "approved_sha"?, "retest"?}]。
+清單格式（JSON 陣列）：[{"branch", "parent"?, "approved_sha"?, "retest"?, "priority"?}]（priority 數字小的先）。
 - 拉不到、非 200、逾時、格式不對：保留上一次成功的清單，只記錯誤，絕不因此取消登記或撤回放行。
 - 空陣列是真的「一條都不管」。
 - 只往外連；權杖放檔案，不進設定檔。網路請求在背景執行緒，結果由主行程下一輪收（資料庫只有主行程寫）。
@@ -38,10 +38,13 @@ def parse_list(data) -> List[dict]:
             raise SourceError(f"{b} 的 approved_sha 不對")
         if isinstance(rt, bool) or not isinstance(rt, int) or rt < 0:
             raise SourceError(f"{b} 的 retest 要是 ≥0 的整數")
+        pr = e.get("priority")
+        if pr is not None and (isinstance(pr, bool) or not isinstance(pr, (int, float))):
+            raise SourceError(f"{b} 的 priority 要是數字")
         ps = e.get("parent_status")
         if ps is not None and ps not in ("open", "dropped"):
             raise SourceError(f"{b} 的 parent_status 只能是 open 或 dropped")
-        out.append({"branch": b, "parent": par or None, "parent_status": ps, "approved_sha": appr or None, "retest": rt})
+        out.append({"branch": b, "parent": par or None, "parent_status": ps, "approved_sha": appr or None, "retest": rt, "priority": pr})
     names = {e["branch"] for e in out}
     for e in out:                      # 父鏈不能成環（父不在清單上是允許的：那是「父卡擋住」）
         p, hops = e["parent"], 0

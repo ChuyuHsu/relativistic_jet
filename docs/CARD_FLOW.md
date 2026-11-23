@@ -241,3 +241,8 @@
 `{card, branch, target, unmerged, covered, missing_count, missing_files, dropping_at?}`。清單項若帶 `dropping_at`（看板用來分辨是哪一次放棄），原樣帶回事件；它變了就算新一輪、結論相同也重發。
 同一張卡「結論沒變」不重發；分支、目標或 main 變了、結論跟上次不同才再發一筆。git 查不出來時不發事件、下一輪再試。
 排隊器不因 drop_checks 改變任何登記、測試或合併。
+
+## 排序：看板優先序與手動優先序
+
+看板清單每筆帶 `priority`（數字小的先，跟看板排序一致）。自測派工與批測成員挑選的排序鍵是
+`(手動 jet priority 大的先, 看板 priority 小的先, 先來後到, 名字)`：手動值不同就照手動；同值（預設 0）才看看板；清單沒帶 priority 的排在有帶的後面。

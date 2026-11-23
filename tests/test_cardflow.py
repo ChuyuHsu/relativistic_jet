@@ -726,6 +726,38 @@ class FirstPull(CF):
         self.go(until=lambda: self.merged() == {"a"})
 
 
+class BoardPriority(CF):
+    """清單帶 priority（小的先）→ 自測照這個順序派；手動 jet priority（大的先）仍然優先。"""
+    def _first_started(self, prios, manual=None):
+        self.mk(cores={"pool": "0-31", "max_selftest_slots": 1, "reserve_for_selftest": 32})
+        names = list(prios)
+        for n in names:
+            self.repo.add(n)
+            self.ent(n)                                   # 先上清單但還沒放行，讓排隊器先掃到
+        self.tick(2)
+        for n, v in (manual or {}).items():
+            store.set_priority(self.con, n, v, "t")
+        for n in names:                                   # 同一輪放行，順序全看排序鍵
+            self.appr(n)
+            for e in self.list:
+                if e["branch"] == n and prios[n] is not None:
+                    e["priority"] = prios[n]
+        self.tick(1)
+        return [j.workdir.split(">")[-1] for j in self.ex.started if j.layer == "selftest" and not j.only][:1]
+
+    def test_smaller_board_priority_first(self):
+        first = self._first_started({"a": 100, "b": 5, "c": 50})
+        self.assertEqual(first, ["b"])
+
+    def test_missing_priority_goes_last(self):
+        first = self._first_started({"a": None, "b": 900})
+        self.assertEqual(first, ["b"])
+
+    def test_manual_priority_wins_then_board_breaks_ties(self):
+        first = self._first_started({"a": 100, "b": 5, "c": 50}, manual={"a": 1})
+        self.assertEqual(first, ["a"])
+
+
 class UnknownGrace(CF):
     def test_unresolvable_approved_sha_becomes_superseded_after_grace(self):
         self.mk()

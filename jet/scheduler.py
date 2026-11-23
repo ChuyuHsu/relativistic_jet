@@ -875,10 +875,17 @@ class Scheduler:
             r = store.get_branch(self.con, r["parent"]) if r["parent"] else None
         return rows[::-1]
 
+    def _board_prio(self, name) -> float:
+        """看板清單上這張卡的優先序（數字小的先）。跟手動的 jet priority 共存：手動值（大的先）優先比，同值才看這個；
+        沒有來源、清單沒帶就排最後（同為沒帶的照原順序）。"""
+        e = (self._entries or {}).get(name)
+        p = e.get("priority") if e else None
+        return float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) else float("inf")
+
     def _dispatch_selftests(self):
         c = self.con
         rows = [r for r in store.list_branches(c, S.PENDING.value) if not self._direct_docs(r)]
-        rows.sort(key=lambda r: (-r["prio_override"], r["seen_at"], r["name"]))
+        rows.sort(key=lambda r: (-r["prio_override"], self._board_prio(r["name"]), r["seen_at"], r["name"]))
         in_use = sum(j.units for j in self.jobs.values() if j.kind == "selftest")
         slots = sum(1 for j in self.jobs.values() if j.kind == "selftest")
         wanted = self.batch is not None or bool(store.list_branches(c, S.QUEUED.value))
@@ -1529,7 +1536,7 @@ class Scheduler:
         """依順序挑最多 N 條；子一定在父後面、而且父也被選上。"""
         rows = [r for r in store.list_branches(self.con, S.QUEUED.value) if not self._direct_docs(r)]
         rows = [r for r in rows if not self._blocked_by_main_red(r)]       # main 自己紅著：只有能修它的卡可以進批
-        rows.sort(key=lambda r: (-r["prio_override"], r["queued_at"] or 0, r["name"]))
+        rows.sort(key=lambda r: (-r["prio_override"], self._board_prio(r["name"]), r["queued_at"] or 0, r["name"]))
         chosen: List = []
         names: Set[str] = set()
         pend = rows
