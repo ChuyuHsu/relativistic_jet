@@ -1,6 +1,7 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, flush, resultOf } from './queue.js';
+import { handleHook, flush, resultOf, stuckCheck } from './queue.js';
+import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
 // 排隊器自己定時來拉 /api/queue/desired 取得該管哪些分支與放行；看板不主動連排隊器。
@@ -16,7 +17,23 @@ async function parentBranch(db, c) {
   const p = await db.prepare('SELECT branch FROM cards WHERE id=?').bind(c.parent).first();
   return p && p.branch ? p.branch : undefined;
 }
-const view = c => ({ ...c, last_result: undefined, result: resultOf(c) });
+const view = c => {
+  const result = resultOf(c), stage = stageOf(c);
+  let rejected = null;   // 退回的來源與原因（審查退回，或排隊器 rejected／halted／撞檔，附紅項）
+  if (stage === 'rejected') {
+    rejected = c.rejected_reason
+      ? { source: 'review', reason: c.rejected_reason, by: c.rejected_by }
+      : { source: 'queue', halted: c.phase === 'halted', reason: result ? result.detail : null, failed_items: result ? result.failed_items : null };
+  }
+  return { ...c, last_result: undefined, result, stage, rejected };
+};
+const CLEAR_REVIEW = 'submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL';
+const HEX = /^[0-9a-f]{7,64}$/i;
+// 通知名單（用逗號分隔的負責串 id 設定）攢批叫醒
+async function notify(db, owners, c, kind, detail) {
+  for (const o of owners) await db.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind(o, c.id, c.branch, kind, detail, now()).run();
+}
+const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 
 async function log(db, id, actor, note) {
   await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(id, now(), actor, note).run();
@@ -55,7 +72,10 @@ export async function handle(req, env, ctx) {
     const rows = status
       ? await db.prepare('SELECT * FROM cards WHERE status=? ORDER BY priority,created_at').bind(status).all()
       : await db.prepare('SELECT * FROM cards ORDER BY priority,created_at').all();
-    return json(rows.results.map(view));
+    let out = rows.results.map(view);
+    const sf = url.searchParams.get('stage');
+    if (sf) { const want = new Set(sf.split(',')); out = out.filter(c => want.has(c.stage)); }
+    return json(out);
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/cards\/([^/]+)\/tests$/))) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
@@ -70,12 +90,36 @@ export async function handle(req, env, ctx) {
   }
   const body = write ? await req.json().catch(() => ({})) : {};
   const actor = String(body.actor || 'unknown');
-  // 放行就是卡片上的欄位：approved_commit／approved_by／approved_at；撤回清空。排隊器自己來拉（/api/queue/desired）。
+  // 送審：記下送審的版本，進「審查中」；退回後改好再送審，會清掉上一次的退回與放行與舊結果。
+  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/submit$/))) {
+    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
+    if (!c || c.status !== 'claimed' || !c.branch) return json({ error: '只有已認領的卡能送審' }, 409);
+    if (!HEX.test(String(body.commit || ''))) return json({ error: '送審要帶提交 hash（commit，7 到 64 碼十六進位）' }, 400);
+    await db.prepare(`UPDATE cards SET rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,phase=NULL,phase_at=NULL,last_result=NULL,submitted_commit=?,submitted_at=?,updated_at=? WHERE id=?`).bind(String(body.commit), now(), now(), c.id).run();
+    await log(db, c.id, actor, `送審 ${String(body.commit).slice(0, 12)}`);
+    await notify(db, list(env.REVIEW_THREADS), c, 'review_requested', String(body.commit).slice(0, 12));
+    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
+  }
+  // 審查退回：進「退回」，原因存卡片並叫醒負責串；放行一併清掉。
+  if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/reject$/))) {
+    const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
+    if (!c || c.status !== 'claimed' || !c.submitted_commit) return json({ error: '只有已送審的卡能退回' }, 409);
+    if (!body.reason) return json({ error: '退回要寫原因（reason）' }, 400);
+    const reason = String(body.reason).slice(0, 1000);
+    await db.prepare('UPDATE cards SET rejected_reason=?,rejected_by=?,rejected_at=?,approved_commit=NULL,approved_by=NULL,approved_at=NULL,updated_at=? WHERE id=?').bind(reason, actor, now(), now(), c.id).run();
+    await log(db, c.id, actor, `審查退回：${reason}`);
+    if (c.owner_thread) await notify(db, [c.owner_thread], c, 'review_rejected', reason);
+    return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
+  }
+  // 放行就是卡片上的欄位：approved_commit／by／at；撤回清空。放行的 commit 必須等於送審的 commit。排隊器自己來拉（/api/queue/desired）。
   if (req.method === 'POST' && (m = path.match(/^\/api\/cards\/([^/]+)\/(approve|revoke)$/))) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
     if (!c || !c.branch) return json({ error: '卡不存在或還沒有分支' }, 404);
     if (m[2] === 'approve') {
-      if (!/^[0-9a-f]{7,64}$/i.test(String(body.commit || ''))) return json({ error: '放行要帶審過的提交 hash（commit，7 到 64 碼十六進位）' }, 400);
+      if (!HEX.test(String(body.commit || ''))) return json({ error: '放行要帶審過的提交 hash（commit，7 到 64 碼十六進位）' }, 400);
+      if (!c.submitted_commit) return json({ error: '還沒送審' }, 409);
+      if (c.rejected_reason) return json({ error: '已被審查退回，要先重新送審' }, 409);
+      if (!sameCommit(String(body.commit), c.submitted_commit)) return json({ error: `放行的版本與送審的版本不同（送審 ${c.submitted_commit.slice(0, 12)}），送審後可能又有新版本` }, 409);
       await db.prepare('UPDATE cards SET approved_commit=?,approved_by=?,approved_at=?,updated_at=? WHERE id=?').bind(String(body.commit), actor, now(), now(), c.id).run();
       await log(db, c.id, actor, `放行 ${String(body.commit).slice(0, 12)}`);
     } else {
@@ -90,7 +134,7 @@ export async function handle(req, env, ctx) {
     if (!c) return json({ error: 'not found' }, 404);
     if (c.status !== 'claimed' || !c.branch) return json({ error: '只有已認領的卡能換分支' }, 409);
     const attempt = c.attempt + 1, branch = branchFor(env, c.id, attempt);
-    const r = await db.prepare("UPDATE cards SET branch=?,attempt=?,phase=NULL,phase_at=NULL,last_result=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,updated_at=? WHERE id=? AND branch=?").bind(branch, attempt, now(), c.id, c.branch).run();
+    const r = await db.prepare(`UPDATE cards SET branch=?,attempt=?,phase=NULL,phase_at=NULL,last_result=NULL,${CLEAR_REVIEW},updated_at=? WHERE id=? AND branch=?`).bind(branch, attempt, now(), c.id, c.branch).run();
     if (r.meta.changes !== 1) return json({ error: '同時有人在改，請重試' }, 409);
     await log(db, c.id, actor, `換分支 ${c.branch} → ${branch}`);
     return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first()));
@@ -151,9 +195,10 @@ export async function handle(req, env, ctx) {
     let note = '修改';
     if ('status' in body) {
       if (!STATUSES.includes(body.status)) return json({ error: '狀態不合法' }, 400);
+      if (c.phase === 'merged') return json({ error: '已合併，不能再改狀態' }, 409);
       if (!canMove(c.status, body.status)) return json({ error: `不能從 ${c.status} 到 ${body.status}` }, 409);
       sets.push('status=?'); vals.push(body.status);
-      if (body.status === 'open') sets.push('owner=NULL', 'owner_thread=NULL', 'branch=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', 'approved_commit=NULL', 'approved_by=NULL', 'approved_at=NULL');
+      if (body.status === 'open') sets.push('owner=NULL', 'owner_thread=NULL', 'branch=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', ...CLEAR_REVIEW.split(','), 'stuck_notified_at=NULL');
       note = `${c.status} → ${body.status}` + (body.note ? `：${body.note}` : '');
     }
     if (!sets.length) return json({ error: '沒有要改的欄位' }, 400);
@@ -168,5 +213,5 @@ export async function handle(req, env, ctx) {
 
 export default {
   fetch: (req, env, ctx) => handle(req, env, ctx),
-  scheduled: (_ev, env, ctx) => ctx.waitUntil(flush(env)),
+  scheduled: (_ev, env, ctx) => ctx.waitUntil(stuckCheck(env).then(() => flush(env))),
 };

@@ -12,16 +12,17 @@ h1{font-size:20px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 </style></head><body>
 <h1>任務看板</h1><div class="tabs" id="tabs"></div><div id="list">載入中…</div>
 <script>
-const S={open:'未認領',claimed:'進行中',done:'已合入',dropped:'放棄'};
-const P={pending:'待自測',selftesting:'自測中',selftest_green:'自測綠',queued:'排隊',batching:'批測中',merged:'已合入',rejected:'退回',halted:'暫停待人'};
-const key=c=>c.status==='claimed'&&c.phase==='merged'?'done':c.status;
-let cards=[],cur='claimed';
+const S={new:'剛開卡',developing:'開發中',reviewing:'審查中',selftesting:'審查通過自測中',batching:'自測完畢批測中',merged:'已合併',rejected:'退回',dropped:'放棄'};
+let cards=[],cur='reviewing';
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function draw(){
-  const n=k=>cards.filter(c=>key(c)===k).length;
+  const n=k=>cards.filter(c=>c.stage===k).length;
   tabs.innerHTML=Object.keys(S).map(k=>`<button class="${k===cur?'on':''}" data-k="${k}">${S[k]} ${n(k)}</button>`).join('');
-  const l=cards.filter(c=>key(c)===cur);
-  list.innerHTML=l.length?l.map(c=>`<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.phase&&cur==='claimed'?'・'+esc(P[c.phase]||c.phase):''}${c.approved_commit&&cur==='claimed'?'・已放行':''}${c.branch?'・'+esc(c.branch):''}</span></div>`).join(''):'<div class="m">沒有</div>';
+  const l=cards.filter(c=>c.stage===cur);
+  list.innerHTML=l.length?l.map(c=>{
+    const r=c.rejected;
+    const why=r?`<span class="m">${r.source==='review'?'審查退回':(r.halted?'排隊器暫停':'排隊器退回')}：${esc(r.reason||'')}${(r.failed_items||[]).length?'（紅項 '+(r.failed_items||[]).map(f=>esc(f.item_id)).join('、')+'）':''}</span>`:'';
+    return `<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.branch?'・'+esc(c.branch):''}</span>${why}</div>`}).join(''):'<div class="m">沒有</div>';
 }
 tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
 let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}

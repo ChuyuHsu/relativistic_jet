@@ -2,14 +2,15 @@
 // 機密：HOOK_TOKEN（排隊器送事件、拉清單用）、ROUTINE_KEY（叫醒用）。
 // 設定：ROUTINE_ID、WAKE_BATCH_S（預設 300）、WAKE_MAX_PER_HOUR（預設 10）。
 import { bearerIs } from './auth.js';
+import { stageOf } from './stage.js';
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 const now = () => Math.floor(Date.now() / 1000);
 
 // 事件種類 → 上游分支狀態快取（phase；用上游自己的狀態名）。事件只當快取與叫醒，不當真相；沒列的只記錄。
-const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red: 'rejected', queued: 'queued', merged: 'merged', rejected: 'rejected' };
+const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red: 'rejected', queued: 'queued', merged: 'merged', rejected: 'rejected', conflict: 'rejected', halted: 'halted' };
 // 需要人處理、要叫醒負責串的種類
-const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'halted', 'queue_error']);
-const KIND_TEXT = { tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
+const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'halted', 'queue_error', 'superseded']);
+const KIND_TEXT = { superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
 export async function handleHook(req, env, ctx) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
@@ -28,10 +29,13 @@ export async function handleHook(req, env, ctx) {
     const detail = e.detail ? String(e.detail).slice(0, 500) : '';
     if (card) {
       applied++;
+      if (kind === 'superseded') {   // 內容又改了：送審、放行、舊結果作廢，回到開發中
+        await db.prepare('UPDATE cards SET submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL,phase=NULL,phase_at=NULL,last_result=NULL,updated_at=? WHERE id=?').bind(now(), card.id).run();
+      }
       // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
-      const to = e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
+      const to = kind === 'superseded' ? null : e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
       if (to) await db.prepare('UPDATE cards SET phase=?,phase_at=?,updated_at=? WHERE id=?').bind(to, now(), now(), card.id).run();
-      if (!['approved', 'revoked'].includes(kind)) {   // 放行是看板自己的欄位，排隊器回報的放行事件不覆蓋「最新結果」
+      if (!['approved', 'revoked', 'superseded'].includes(kind)) {   // 放行是看板自己的欄位，排隊器回報的放行事件不覆蓋「最新結果」
         const res = { kind, at: e.at ?? now(), commit: e.commit ?? null, detail: detail || null, from: e.from ?? null, to: e.to ?? null, failed_items: Array.isArray(e.failed_items) ? e.failed_items.slice(0, 50) : null };
         await db.prepare('UPDATE cards SET last_result=? WHERE id=?').bind(JSON.stringify(res), card.id).run();
       }
@@ -89,4 +93,23 @@ export async function flush(env) {
     sent++;
   }
   return { sent };
+}
+
+// 卡住提醒：開發中或退回的卡太久沒更新（STUCK_HOURS，預設 6），通知 ADMIN_THREADS（逗號分隔的串 id，設定值，不進公開庫）。
+// 有新動靜（updated_at 比上次提醒新）之後再卡住才會再提醒，不重複吵。
+export async function stuckCheck(env) {
+  const owners = String(env.ADMIN_THREADS || '').split(',').map(x => x.trim()).filter(Boolean);
+  if (!owners.length) return { skipped: true };
+  const hours = Number(env.STUCK_HOURS ?? 6), t = now();
+  const rows = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' AND branch IS NOT NULL AND updated_at<? AND (stuck_notified_at IS NULL OR stuck_notified_at<updated_at)").bind(t - hours * 3600).all()).results;
+  let n = 0;
+  for (const c of rows) {
+    const st = stageOf(c);
+    if (st !== 'developing' && st !== 'rejected') continue;
+    const detail = `${st === 'developing' ? '開發中' : '退回'}超過 ${hours} 小時沒動靜（負責串 ${c.owner_thread || '無'}）`;
+    for (const o of owners) await env.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind(o, c.id, c.branch, 'stuck', detail, t).run();
+    await env.DB.prepare('UPDATE cards SET stuck_notified_at=? WHERE id=?').bind(t, c.id).run();
+    n++;
+  }
+  return { notified: n };
 }

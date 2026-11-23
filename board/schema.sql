@@ -12,6 +12,12 @@ CREATE TABLE IF NOT EXISTS cards (
   approved_commit TEXT,                     -- 放行：審過的提交；撤回清空
   approved_by TEXT,
   approved_at INTEGER,
+  submitted_commit TEXT,                    -- 送審的提交；放行必須等於它
+  submitted_at INTEGER,
+  rejected_reason TEXT,                     -- 審查退回的原因（重新送審清掉）
+  rejected_by TEXT,
+  rejected_at INTEGER,
+  stuck_notified_at INTEGER,                -- 卡住提醒最後發的時間（有新動靜才會再提醒）
   last_result TEXT,                         -- 排隊器最新結果（事件整理成 JSON：kind、commit、detail、failed_items、to…）
   phase TEXT,                              -- 上游排隊器分支狀態的快取
   phase_at INTEGER,
