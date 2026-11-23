@@ -20,45 +20,44 @@ $JET_HOME/
   state/backup/        每小時本機備份
   state/runs/<id>/     每個測試工作的輸出（output.log、report.json）
   work/                Git 鏡像與暫時 worktree（可整個砍掉重建）
-  supervisor.log       保活與退版紀錄
+  supervisor.log       守護輸出（crontab 範例導向這裡）
 ```
 
 **狀態只在 `state/state.sqlite`。** `work/` 與 `state/runs/` 掉了不會影響正確性（`runs/` 只是舊輸出）。
 
 ## 3. 啟動
 
-先檢查設定檔，再長駐：
-
 ```sh
-python3 -m jet check-config $JET_HOME/jet.json
-cd $JET_HOME/current && python3 -m jet serve --config $JET_HOME/jet.json
+python3 -m jet check-config $JET_HOME/jet.json      # 先檢查設定檔
+python3 -m jet init-keys --config $JET_HOME/jet.json   # 第一次：產生讀、寫鑰匙檔
+python3 -m jet supervise --root $JET_HOME --config $JET_HOME/jet.json   # 長駐（守護＋主行程）
 ```
 
-`serve` 同時跑調度主迴圈與 HTTP 查詢介面（預設只聽 127.0.0.1）。收到 SIGTERM 會停止派新工作並正常結束（退出碼 0）；
+`supervise` 守著主行程（`jet serve`：調度主迴圈加 HTTP 查詢介面，預設只聽 127.0.0.1）：
+掛了就重啟；現行版在短時間內連續當掉 3 次，自動把 `current` 切回 `previous`，並通知。
+乾淨結束（退出碼 0）守護就跟著結束。收到 SIGTERM 會停止派新工作並正常結束。
 下次啟動時，上次沒做完的測試與批測一律作廢重來，已經推進 `main` 但來不及記帳的批會自動補記。
 
-## 4. 保活與自動退版
+只想前景跑（除錯）：`python3 -m jet serve --config $JET_HOME/jet.json`。
 
-`deploy/jet-supervisor.sh` 負責長駐：行程掛了就重啟；現行版在 5 分鐘內連續當掉 3 次，
-就把 `current` 切回 `previous` 再啟動（寫進 `supervisor.log`），沒有上一版可退就停下。
-同一時間只會有一份（`flock`），所以可以放心每分鐘叫一次。
+## 4. 保活
 
-crontab：
+守護本身要有人拉起來。crontab（`supervise` 同一時間只該有一份，建議用 `flock`）：
 
 ```cron
-* * * * * JET_HOME=/srv/jet CONFIG=/srv/jet/jet.json /srv/jet/current/deploy/jet-supervisor.sh >/dev/null 2>&1
+* * * * * flock -n /srv/jet/supervisor.lock python3 -m jet supervise --root /srv/jet --config /srv/jet/jet.json >>/srv/jet/supervisor.log 2>&1
 ```
 
-或 systemd（`Restart=` 交給 supervisor，所以單元只要保證它活著）：
+systemd：
 
 ```ini
 [Unit]
-Description=jet supervisor
+Description=jet
 After=network-online.target
 
 [Service]
-Environment=JET_HOME=/srv/jet CONFIG=/srv/jet/jet.json
-ExecStart=/srv/jet/current/deploy/jet-supervisor.sh
+WorkingDirectory=/srv/jet/current
+ExecStart=/usr/bin/python3 -m jet supervise --root /srv/jet --config /srv/jet/jet.json
 Restart=always
 RestartSec=5
 
@@ -66,33 +65,27 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-可調環境變數：`LIMIT`（連續當掉幾次退版，預設 3）、`WINDOW`（秒，預設 300）、`PYTHON`。
-
 ## 5. 換版與退版
 
 排隊器的程式不經過它自己管的那條隊伍，所以壞了可以直接換。
 
-換版：
-
 ```sh
 cd $JET_HOME/releases && git clone <程式庫> v<新版>        # 或解壓
-python3 -m jet check-config ...                              # 用新版檢查設定檔格式
-ln -sfn "$(readlink -f ../current)" ../previous
-ln -sfn "$PWD/v<新版>" ../current.new && mv -T ../current.new ../current
-pkill -TERM -f "jet serve"                                    # supervisor 會用新版拉起來
+python3 -m jet check-config $JET_HOME/jet.json              # 用新版檢查設定檔格式（在新版目錄下跑）
+python3 -m jet deploy --root $JET_HOME v<新版>              # previous←現行、current←新版
+pkill -TERM -f "jet serve"                                   # 守護會用新版拉起來
+python3 -m jet rollback --root $JET_HOME                    # 手動退版（current 與 previous 對調）
 ```
 
-退版：把 `current` 指回 `previous` 同樣用 `mv -T`，再 TERM 一次。資料庫有版本號：
-新版程式可以升級舊資料庫，**舊版程式不會開比它新的資料庫**（會拒絕），所以升級過結構之後要退版，先還原升級前的備份。
-
-換設定檔不用重啟：新設定先檢查格式，壞的不載、沿用舊的。
+資料庫有版本號：新版程式可以升級舊資料庫，**舊版程式不會開比它新的資料庫**（會拒絕），
+所以升級過結構之後要退版，先還原升級前的備份。換設定檔不用重啟：新設定先檢查格式，壞的不載、沿用舊的。
 
 ## 6. 備份與還原
 
 排隊器每小時用 SQLite 備份 API 在 `state/backup/` 存一份。資料庫壞了：
 
 1. 停掉排隊器。
-2. 把最新的備份複製成 `state/state.sqlite`（刪掉同目錄的 `-wal`、`-shm`）。
+2. `python3 -m jet restore --config $JET_HOME/jet.json`（預設用最新備份；`--from` 指定；`list-backups` 列出）。
 3. 啟動。排隊器會重掃 Git 上的分支；備份之後才給的放行記號作廢、需重新確認（寧可重審，不可誤合）。
 
 備份在同一台機器上，**不防整台機器壞**。要防的話，自己定期把 `state/backup/` 同步到別處。
