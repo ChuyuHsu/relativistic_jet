@@ -238,6 +238,6 @@
 - 寧可誤擋不可誤放：被擋的由人決定（把內容接過去，或寫原因走「真的不要」）。
 
 **事件 `drop_checked`**（機器事件，跟 §7 其他事件一樣經 notify 送出；`branch` 是被放棄的分支）：
-`{card, branch, target, unmerged, covered, missing_count, missing_files}`。
+`{card, branch, target, unmerged, covered, missing_count, missing_files, dropping_at?}`。清單項若帶 `dropping_at`（看板用來分辨是哪一次放棄），原樣帶回事件；它變了就算新一輪、結論相同也重發。
 同一張卡「結論沒變」不重發；分支、目標或 main 變了、結論跟上次不同才再發一筆。git 查不出來時不發事件、下一輪再試。
 排隊器不因 drop_checks 改變任何登記、測試或合併。

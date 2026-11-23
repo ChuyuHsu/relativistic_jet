@@ -901,12 +901,14 @@ class Scheduler:
                 log.warning("放棄查核 %s 失敗：%r", card, e)
                 self._drop_sig = None
                 continue
-            key = json.dumps([r.get("branch_sha"), r.get("target_sha"), r.get("main_sha"), sup], sort_keys=True)
+            key = json.dumps([r.get("branch_sha"), r.get("target_sha"), r.get("main_sha"), sup, d.get("dropping_at")], sort_keys=True)
             if store.get_meta(self.con, f"dck:{card}", None) == key:
                 continue
             store.set_meta(self.con, f"dck:{card}", key)
             res = {"unmerged": bool(r["unmerged"]), "covered": bool(r["covered"]), "target": r["target"],
                    "missing_count": int(r["missing_count"]), "missing_files": list(r["missing_files"])[:20]}
+            if d.get("dropping_at") is not None:
+                res["dropping_at"] = d["dropping_at"]
             sigr = json.dumps([card, res], sort_keys=True)
             if store.get_meta(self.con, f"dcr:{card}", None) == sigr:
                 continue                       # 結論沒變：不重發

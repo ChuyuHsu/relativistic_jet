@@ -138,7 +138,7 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
             "approved_sha": e.get("approved_sha"), "retest": e.get("retest"),
             "card": e.get("card"), "target": e.get("target"), "unmerged": e.get("unmerged"),
             "covered": e.get("covered"), "missing_count": e.get("missing_count"),
-            "missing_files": e.get("missing_files"),
+            "missing_files": e.get("missing_files"), "dropping_at": e.get("dropping_at"),
         }.items() if v is not None or k in ("branch", "detail")} for e in events],
     }
     if destination:
@@ -163,7 +163,7 @@ def _enrich(con, r) -> Dict[str, Any]:
         if isinstance(d, dict):
             e["from"], e["to"] = d.get("from"), d.get("to")
             if e["kind"] == "drop_checked":
-                for k in ("card", "target", "unmerged", "covered", "missing_count", "missing_files"):
+                for k in ("card", "target", "unmerged", "covered", "missing_count", "missing_files", "dropping_at"):
                     e[k] = d.get(k)
                 d = {"reason": ("已全部包含於 " if d.get("covered") else "有 %s 個檔不在 " % d.get("missing_count")) + str(d.get("target"))}
             e["detail"] = str(d.get("reason") or d.get("merged_sha") or d.get("by") or "")[:MAX_DETAIL] or None

@@ -765,6 +765,19 @@ class DropCheckFlowTest(CF):
         self.tick(2)
         self.assertEqual(len(self.events("drop_checked", "x")), 2)
 
+    def test_dropping_at_echoed_and_new_round_reemits(self):
+        from jet import notify
+        self.repo.drop_res["x"] = self.res()
+        self.drops = [{"card": "C1", "branch": "x", "dropping_at": 111}]
+        self.tick(2)
+        ev = self.events("drop_checked", "x")
+        self.assertEqual(json.loads(ev[0]["detail"])["dropping_at"], 111)
+        p = notify.build_payload([notify._enrich(self.con, ev[0])], 1.0)["events"][0]
+        self.assertEqual(p["dropping_at"], 111)
+        self.drops = [{"card": "C1", "branch": "x", "dropping_at": 222}]   # 重新放棄一次：結論同也要回報
+        self.tick(2)
+        self.assertEqual(len(self.events("drop_checked", "x")), 2)
+
     def test_git_error_emits_nothing_and_retries(self):
         self.repo.drop_res["x"] = RuntimeError("boom")
         self.drops = [{"card": "C1", "branch": "x"}]

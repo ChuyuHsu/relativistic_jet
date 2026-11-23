@@ -76,7 +76,10 @@ def parse_payload(data):
             if card in seen:
                 continue
             seen.add(card)
-            drops.append({"card": card, "branch": d["branch"], "superseded_by_branch": sup})
+            item = {"card": card, "branch": d["branch"], "superseded_by_branch": sup}
+            if d.get("dropping_at") is not None:       # 看板用來分辨是哪一次放棄，原樣帶回事件
+                item["dropping_at"] = d["dropping_at"]
+            drops.append(item)
         data = raw
     return parse_list(data), drops
 
