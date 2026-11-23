@@ -5,7 +5,7 @@ from typing import Iterable, List, Optional, Set
 
 
 def parse_cores(spec: str) -> List[int]:
-    """'8-87' 或 '4-7,88-95' → 核編號清單。"""
+    """'0-7' 或 '0-3,8-11' → 核編號清單。"""
     out: List[int] = []
     for part in spec.split(","):
         part = part.strip()
