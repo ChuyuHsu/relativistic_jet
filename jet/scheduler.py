@@ -112,6 +112,7 @@ class Scheduler:
         self._repull_ok = False
         self._repull_retry_at = 0.0
         self._anc_cache: Dict[Tuple[str, str], bool] = {}
+        self._cls_ctx = self._cls_dir = self._cls_sha = None   # 分類指令用的 main 檢出（換 main 才換）
         self._wait_proven: Set[str] = set()                # 因父卡還沒綠而被重排的子分支：父卡綠了才再測
         self._blocked: Dict[str, str] = {}                 # 被父卡擋住的分支 → 原因
         self._stop = False
@@ -321,6 +322,7 @@ class Scheduler:
 
     def shutdown(self):
         """立刻停機前：殺掉所有測試行程群組、釋放核。批與狀態留給下次啟動的 recover 接續。"""
+        self._cls_close()
         for rid, j in list(self.jobs.items()):
             try:
                 self.executor.cancel(j.handle)
@@ -477,6 +479,27 @@ class Scheduler:
                 self._parent_changed(r)                  # 父卡不在隊伍裡了（放行被撤回、重測中）：子卡回待自測
 
     # ---------- 分類 ----------
+    def _classify_dir(self) -> Optional[str]:
+        """分類指令的工作目錄：被測專案最新 main 的檢出（相對路徑以專案根為準）。main 換了就換一份檢出。"""
+        if self._cls_sha != self.main:
+            self._cls_close()
+            try:
+                ctx = self.repo.worktree(self.main)
+                self._cls_dir = ctx.__enter__()
+                self._cls_ctx, self._cls_sha = ctx, self.main
+            except Exception as e:
+                self._cls_dir, self._cls_sha = None, self.main
+                self._note_error("分類指令", f"取不到 main 的檢出：{e}")
+        return self._cls_dir if self._cls_dir and os.path.isdir(self._cls_dir) else None
+
+    def _cls_close(self):
+        if self._cls_ctx is not None:
+            try:
+                self._cls_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+        self._cls_ctx, self._cls_dir, self._cls_sha = None, None, None
+
     def _is_docs(self, files: List[str]) -> bool:
         cmd = self.cfg.classify_cmd
         if not cmd or not files:
@@ -487,9 +510,13 @@ class Scheduler:
             path = f.name
         try:
             argv = [a.replace("{files}", path) for a in cmd]
-            out = subprocess.run(argv, capture_output=True, text=True, timeout=60)
-            return out.returncode == 0 and json.loads(out.stdout).get("verdict") == "docs_only"
-        except Exception:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=self._classify_dir())
+            if out.returncode != 0:                      # 指令本身壞了（找不到、路徑不對）：當要測，但要讓人看得到
+                self._note_error("分類指令", f"回傳碼 {out.returncode}（一律當要測）：{(out.stderr or out.stdout).strip()[:200]}")
+                return False
+            return json.loads(out.stdout).get("verdict") == "docs_only"
+        except Exception as e:
+            self._note_error("分類指令", f"執行失敗（一律當要測）：{type(e).__name__}: {str(e)[:200]}")
             return False
         finally:
             os.unlink(path)
@@ -582,6 +609,16 @@ class Scheduler:
                 self._on_baseline(j, res)
             else:
                 self._on_point(j, res)
+
+    def _store_items(self, rid, res, base: Set[str]):
+        """紅項寫進 run_items（通知與看板要看）；本來就紅的（已知紅）標成 known，不算這條分支的。"""
+        c = self.con
+        if res.status == "timeout":
+            c.execute("INSERT OR REPLACE INTO run_items(run_id,item_id,status,summary) VALUES(?,?,?,?)",
+                      (rid, "逾時", "timeout", "測試逾時"))
+        for it in res.failed_items:
+            c.execute("INSERT OR REPLACE INTO run_items(run_id,item_id,status,summary) VALUES(?,?,?,?)",
+                      (rid, it, "known" if it in base else "fail", None))
 
     @staticmethod
     def _red(res, baseline: Set[str]) -> bool:
@@ -728,6 +765,7 @@ class Scheduler:
             return
         self._overload.pop(j.branch, None)
         base = self._known_red("selftest", self.main)
+        self._store_items(j.run_id, res, base)
         if self._red(res, base) and self._ancestor_unproven(j.branch):
             self._wait_proven.add(j.branch)
             store.apply_event(c, j.branch, Event.RETRY)       # 父卡的錯不算子卡的：父卡過了再測一次
@@ -1240,6 +1278,7 @@ class Scheduler:
             b.launched.discard((j.kind, j.size))
             return
         self._overload.pop(f"b{j.size}", None)
+        self._store_items(j.run_id, res, base)
         red = self._red(res, base)       # 逾時＝這個測點紅，照一般流程找兇手
         target = b.results if j.kind == "point" else b.probes
         target[j.size] = RED if red else GREEN
