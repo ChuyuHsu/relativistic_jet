@@ -204,13 +204,25 @@ def group_members(pgid: int, procs: Optional[List[ProcInfo]] = None) -> List[Pro
     return [p for p in procs if (p.pgrp == pgid or p.sid == pgid) and p.state not in ("Z", "X")]
 
 
+def _is_init(ppid: int, proc_root: str) -> bool:
+    """親是 init／systemd（包含使用者層的收養者）：行程的原主人已經不在了。"""
+    if ppid <= 1:
+        return True
+    try:
+        with open(f"{proc_root}/{ppid}/comm", encoding="utf-8", errors="replace") as f:
+            return f.read().strip() in ("systemd", "init", "tini", "dumb-init")
+    except OSError:
+        return True            # 親已經不在：也算孤兒
+
+
 def own_leftovers(root: str, keep_pgids: Iterable[int] = (), proc_root: str = "/proc") -> List[Tuple[ProcInfo, str]]:
-    """上一代留下的自己人：工作目錄在我們的 worktree 底下的活行程（含領頭已死、子行程還在的群組）。
-    只認「目前工作目錄在 root 底下」，不是這個目錄的行程一律不碰。keep_pgids＝現在合法在跑的群組。"""
+    """上一代留下的自己人：工作目錄在我們的 worktree 底下、而且「原主人已經不在」的活行程。
+    現役的測試（祖先鏈上還有排隊器）一律不碰：只收「這一串行程最上面那個的親是 init」的整串。
+    領頭已死、子行程還在的群組也認得出來。不是這個目錄的行程一律不碰。keep_pgids＝再額外保護的群組。"""
     root = os.path.abspath(root).rstrip(os.sep) + os.sep
     keep = set(keep_pgids)
     me = os.getpid()
-    out: List[Tuple[ProcInfo, str]] = []
+    cand: Dict[int, Tuple[ProcInfo, str]] = {}
     for p in scan_procs(proc_root):
         if p.pid == me or p.state in ("Z", "X") or p.flags & PF_KTHREAD or p.pgrp in keep or p.sid in keep:
             continue
@@ -219,6 +231,13 @@ def own_leftovers(root: str, keep_pgids: Iterable[int] = (), proc_root: str = "/
         except OSError:
             continue
         if (cwd.rstrip(os.sep) + os.sep).startswith(root):
+            cand[p.pid] = (p, cwd)
+    out: List[Tuple[ProcInfo, str]] = []
+    for pid, (p, cwd) in cand.items():
+        top, hops = p, 0
+        while top.ppid in cand and hops < 64:      # 往上走到這串候選行程的最上面
+            top, hops = cand[top.ppid][0], hops + 1
+        if _is_init(top.ppid, proc_root):
             out.append((p, cwd))
     return out
 
