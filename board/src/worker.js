@@ -193,7 +193,9 @@ export async function handle(req, env, ctx) {
       return done('撤回放行');
     }
     // retest：只有被排隊器退回（含暫停）的卡；放行保留、重測計數加一、清排隊器結果，回到審查通過自測中
-    if (stage !== 'rejected' || c.rejected_reason) return no(c.rejected_reason ? '被審查退回的卡不能重測，要改好再送審' : undefined);
+    // force：看板沒收到排隊器的退回（事件被當過期丟掉）而卡在自測中／批測中時，強制重測：重測計數加一，排隊器看到計數變大就從待自測重來
+    const forced = body.force === true && (stage === 'selftesting' || stage === 'batching') && !c.rejected_reason;
+    if (!forced && (stage !== 'rejected' || c.rejected_reason)) return no(c.rejected_reason ? '被審查退回的卡不能重測，要改好再送審' : undefined);
     if (!await upd(`retest=retest+1,${QUEUE_CLEAR}`)) return lost();
     return done(`重測（第 ${c.retest + 1} 次）`);
   }

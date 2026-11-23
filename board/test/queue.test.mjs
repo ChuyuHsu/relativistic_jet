@@ -111,6 +111,13 @@ test('紅項的失敗原因 summary 保留在卡上、過長截斷', async () =>
   assert.equal(c.rejected.failed_items[1].summary.length, 1200);
 });
 
+test('retest force：看板卡在自測中（沒收到退回）時，force 可強制重測；沒帶 force 仍 409', async () => {
+  const e = mkenv(); await approved(e, 'c1');
+  assert.equal((await act(e, 'c1', 'retest', { actor: 'rev' })).status, 409);           // 自測中、沒 force：不行
+  const r = await (await act(e, 'c1', 'retest', { actor: 'rev', force: true })).json();
+  assert.deepEqual([r.stage, r.retest, r.approved_commit], ['selftesting', 1, SHA]);     // 放行保留、計數加一
+});
+
 test('排隊器退回→重測：放行保留、retest 加一、清結果，回自測中；只有排隊器退回的能重測', async () => {
   const e = mkenv(); await approved(e, 'c1');
   await ev(e, 'c1', { kind: 'tested_red', approved_sha: SHA, retest: 0, detail: '紅', failed_items: [{ item_id: 'unit', status: 'fail' }] });
