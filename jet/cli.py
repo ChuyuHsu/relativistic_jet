@@ -88,6 +88,14 @@ def cmd_status(args):
         lines.append(f"最近合入：{_ts(lm['finished_at'])}（{lm['merged_count']} 條）")
     if s.get("restored_at"):
         lines.append(f"（資料庫曾在 {_ts(float(s['restored_at']))} 從備份還原）")
+    for name, nl in sorted((s.get("notify_last") or {}).items()):     # 通知出問題要一眼看到（不用加 -v）
+        if nl.get("error") or nl.get("skipped"):
+            bits = []
+            if nl.get("error"):
+                bits.append(f"連續失敗 {nl.get('fails')} 次（每批降到 {nl.get('limit')} 筆）：{nl['error']}")
+            if nl.get("skipped"):
+                bits.append(f"跳過過送不出去的事件 #{nl['skipped'].get('id')}（{_ts(nl['skipped'].get('at'))}）")
+            lines.append(f"⚠ 通知 {name}：" + "；".join(bits))
     if getattr(args, "verbose", False):
         lines += _verbose_lines(s.get("scheduler") or {}, s.get("now") or time.time())
         lines.append("抖動項（main 上時紅時綠，已不計成新紅，請修測試）：" + ("、".join(s["flaky"]) if s.get("flaky") else "無"))

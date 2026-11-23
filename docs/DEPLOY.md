@@ -193,3 +193,7 @@ du -sh $JET_HOME/work/mirror.git; ls -la $JET_HOME/work/mirror.git/objects/pack 
 
 - `jet doctor` 會列出「上一代留下、工作目錄在 work_dir 底下、還活著」的測試行程（引擎子行程在領頭結束後會變孤兒）；`jet reap` 一鍵清掉（`--dry-run` 只列、`--all` 連現在在跑的一起殺）。只認工作目錄在 work_dir 底下的，不是自己開的行程不碰。啟動復原（recover）也會做同樣的清理。
 - `jet status -v` 有一行「放棄查核」：清單帶了幾筆、查了幾筆、發了幾個事件、失敗幾個。清單沒帶 drop_checks 要把 `source.url` 加上 `?with=drop_checks`；notify 目的地的 kinds 要含 `drop_checked`（或 `"all"`）。`jet doctor` 兩項都會警告。
+
+## 11. 通知分批與送不出去的處理
+
+每個目的地可設 `max_events`（每次請求最多幾筆，預設 10）、`timeout_s`（預設 30 秒）。一批送不出去（逾時或對方回錯）就對半切、5 秒後再試，成功後再慢慢放大；切到單筆還失敗，就改送它後面的一筆來比對：後面的送得出去、它卻不行，才確定是它有問題，記下並跳過（`jet status` 會警示，並寫一筆 queue_error）；後面的也失敗就是對方整個壞了，不會跳過任何事件、照退避重試。連續失敗超過 10 分鐘發一筆 queue_error 並寫 log。`jet status` 不加 -v 就會顯示通知異常。

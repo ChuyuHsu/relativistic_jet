@@ -7,6 +7,7 @@
 不卡主迴圈，結果由下一輪 tick 收。
 """
 import json
+import logging
 import re
 import threading
 import time
@@ -27,7 +28,11 @@ KIND_TEXT = {
 }
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-MAX_EVENTS_PER_POST = 50
+MAX_EVENTS_PER_POST = 10          # 每次請求最多幾筆（可用 max_events 調）；對方處理慢時整批會逾時，所以預設小
+DEFAULT_TIMEOUT_S = 30.0
+ALERT_AFTER_S = 600               # 連續失敗超過這麼久：發 queue_error、寫 log
+SPLIT_RETRY_S = 5                 # 對半切後馬上再試，不用等指數退避
+log = logging.getLogger(__name__)
 MAX_DETAIL = 500
 BACKOFF_BASE_S = 60
 BACKOFF_MAX_S = 1800
@@ -98,7 +103,14 @@ def check_destinations(dests: Any) -> List[Dict[str, Any]]:
         bs = d.get("batch_seconds", 60)
         if isinstance(bs, bool) or not isinstance(bs, (int, float)) or bs < 0:
             raise NotifyError("batch_seconds 必須是 ≥ 0 的數字")
-        out.append({"name": name, "url": url, "token_file": tf, "kinds": list(kinds), "batch_s": bs})
+        me = d.get("max_events", MAX_EVENTS_PER_POST)
+        if isinstance(me, bool) or not isinstance(me, int) or not 1 <= me <= 200:
+            raise NotifyError("max_events 必須是 1～200 的整數")
+        to = d.get("timeout_s", DEFAULT_TIMEOUT_S)
+        if isinstance(to, bool) or not isinstance(to, (int, float)) or to <= 0:
+            raise NotifyError("timeout_s 必須 > 0")
+        out.append({"name": name, "url": url, "token_file": tf, "kinds": list(kinds), "batch_s": bs,
+                    "max_events": me, "timeout_s": to})
     return out
 
 
@@ -192,9 +204,16 @@ def _enrich(con, r) -> Dict[str, Any]:
 
 
 class _Dest:
-    def __init__(self, name, url, token_file, kinds, batch_s, replay):
+    def __init__(self, name, url, token_file, kinds, batch_s, replay, max_events=MAX_EVENTS_PER_POST,
+                 timeout_s=DEFAULT_TIMEOUT_S):
         self.name, self.url, self.token_file = name, url, token_file
         self.kinds, self.batch_s, self.replay = list(kinds), batch_s, replay
+        self.max_events, self.timeout_s = max_events, timeout_s
+        self.limit = max_events             # 目前每批筆數：失敗就對半切，成功再慢慢放大
+        self.suspect: Optional[int] = None  # 單筆也送不出去的事件：下一筆送得出去才確定是它的問題
+        self.fail_since: Optional[float] = None
+        self.alerted = False
+        self.poison: Optional[dict] = None  # 最近一次被跳過的事件
         self.thread: Optional[threading.Thread] = None
         self.inflight: List[int] = []
         self.result: Optional[str] = None   # None＝還沒結果；"" 成功；其他字串是錯誤
@@ -209,17 +228,19 @@ class Notifier:
     """主行程每輪 tick 呼叫一次 `tick(con)`。可有多個目的地，各自有進度（meta 的 notify_cursor:<名字>）：
     事件依 id 由小到大送，同一目的地同時只有一批在送，成功才前進；失敗保留重送（退避），不丟、不亂序。"""
 
-    def __init__(self, url: Optional[str] = None, batch_s: int = 60, timeout: float = 10.0,
+    def __init__(self, url: Optional[str] = None, batch_s: int = 60, timeout: float = DEFAULT_TIMEOUT_S,
                  poster: Optional[Callable[..., None]] = None,
                  destinations: Optional[List[Dict[str, Any]]] = None):
         self.timeout = timeout
         self._post = poster or post_json
         self.dests: List[_Dest] = []
         if url:
-            self.dests.append(_Dest("default", check_url(url), None, NOTIFY_KINDS, max(0, int(batch_s)), True))
+            self.dests.append(_Dest("default", check_url(url), None, NOTIFY_KINDS, max(0, int(batch_s)), True,
+                                    MAX_EVENTS_PER_POST, timeout))
         for d in destinations or []:
             self.dests.append(_Dest(d["name"], d["url"], d.get("token_file"), d["kinds"],
-                                    d.get("batch_s", 60), False))
+                                    d.get("batch_s", 60), False, d.get("max_events", MAX_EVENTS_PER_POST),
+                                    d.get("timeout_s", timeout)))
 
     @property
     def url(self):
@@ -254,25 +275,50 @@ class Notifier:
         d.thread = None
         ids, err = d.inflight, d.result
         d.inflight, d.result, d.done = [], None, False
-        con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",     # 每次送出都記回應碼（狀態頁看得到）
-                    (f"notify_last:{d.name}", json.dumps({"at": now, "code": d.last_code, "events": len(ids),
-                                                          "error": err or None}, ensure_ascii=False)))
         if err:
             d.fails += 1
             d.last_error = err
-            d.next_try = now + min(BACKOFF_MAX_S, BACKOFF_BASE_S * (2 ** (d.fails - 1)))
-            return
-        d.fails, d.last_error = 0, None
-        marks = ",".join("?" * len(ids))
-        con.execute(f"UPDATE events SET notified_at=? WHERE id IN ({marks}) AND notified_at IS NULL", (now, *ids))
-        con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (self._cursor_key(d), str(max(ids))))
+            if d.fail_since is None:
+                d.fail_since = now
+            if len(ids) > 1:                                   # 一批送不出去：對半切再試（可能是某幾筆讓對方處理太久）
+                d.limit = max(1, len(ids) // 2)
+                d.suspect = None
+                d.next_try = now + SPLIT_RETRY_S
+            else:
+                if d.suspect is not None and d.suspect not in ids:
+                    d.suspect = None                           # 拿「後面那一筆」來比對也失敗：是對方整個壞了，不是毒藥事件
+                elif d.suspect is None and ids:
+                    d.suspect = ids[0]                         # 單筆失敗：下一輪改送它後面的一筆來比對
+                d.next_try = now + min(BACKOFF_MAX_S, BACKOFF_BASE_S * (2 ** (min(d.fails, 12) - 1)))
+            if not d.alerted and now - d.fail_since >= ALERT_AFTER_S:
+                d.alerted = True
+                msg = f"通知 {d.name} 已連續失敗 {(now - d.fail_since) / 60:.0f} 分鐘：{err[:200]}"
+                log.error(msg)
+                con.execute("INSERT INTO events(kind,detail,at) VALUES('queue_error',?,?)", (msg, now))
+        else:
+            if d.suspect is not None and ids and min(ids) > d.suspect:   # 後面的送得出去、它卻不行：它是毒藥，跳過
+                d.poison = {"id": d.suspect, "at": now}
+                log.error("通知 %s：事件 %s 單獨送一直失敗而後面的送得出去，跳過它", d.name, d.suspect)
+                con.execute("INSERT INTO events(kind,detail,at,notified_at,resolved_at) VALUES('queue_error',?,?,?,?)",
+                            (f"通知 {d.name} 跳過了送不出去的事件 #{d.suspect}", now, now, now))
+            d.suspect = None
+            d.fails, d.last_error, d.fail_since, d.alerted = 0, None, None, False
+            d.limit = min(d.max_events, max(d.limit * 2, 1))
+            marks = ",".join("?" * len(ids))
+            con.execute(f"UPDATE events SET notified_at=? WHERE id IN ({marks}) AND notified_at IS NULL", (now, *ids))
+            con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (self._cursor_key(d), str(max(ids))))
+        con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",     # 每次送出都記回應碼（狀態頁看得到）
+                    (f"notify_last:{d.name}", json.dumps(
+                        {"at": now, "code": d.last_code, "events": len(ids), "error": err or None,
+                         "fails": d.fails, "limit": d.limit, "since": d.fail_since,
+                         "suspect": d.suspect, "skipped": d.poison}, ensure_ascii=False)))
 
     def _run(self, d, payload, headers) -> None:
         try:
             if headers:
-                self._post(d.url, payload, self.timeout, headers)
+                self._post(d.url, payload, d.timeout_s, headers)
             else:
-                self._post(d.url, payload, self.timeout)
+                self._post(d.url, payload, d.timeout_s)
             d.result = ""
             d.last_code = 200
         except Exception as e:   # 任何錯都只是「這次沒送成」，不能弄壞主行程
@@ -294,10 +340,18 @@ class Notifier:
         marks = ",".join("?" * len(d.kinds))
         mm = ",".join("?" * len(MACHINE_KINDS))
         extra = " AND notified_at IS NULL" if d.replay else ""
-        rows = con.execute(
-            f"SELECT id, kind, branch, detail, at, commit_sha, approved_sha, retest FROM events WHERE id>? AND kind IN ({marks}) "
-            f"AND (resolved_at IS NULL OR kind IN ({mm})){extra} ORDER BY id LIMIT ?",
-            (cur, *d.kinds, *MACHINE_KINDS, MAX_EVENTS_PER_POST)).fetchall()
+        def fetch(after):
+            return con.execute(
+                f"SELECT id, kind, branch, detail, at, commit_sha, approved_sha, retest FROM events WHERE id>? AND kind IN ({marks}) "
+                f"AND (resolved_at IS NULL OR kind IN ({mm})){extra} ORDER BY id LIMIT ?",
+                (after, *d.kinds, *MACHINE_KINDS, d.limit)).fetchall()
+        rows = []
+        if d.suspect is not None:
+            rows = fetch(d.suspect)[:1]                        # 比對用：只送嫌疑事件後面的一筆
+            if not rows:
+                d.suspect = None                               # 後面沒有別的事件可比對：直接重試它
+        if d.suspect is None:
+            rows = fetch(cur)
         if not rows:
             return
         if now - min(r["at"] for r in rows) < d.batch_s:   # 攢批：最舊的事件滿 batch_s 才送

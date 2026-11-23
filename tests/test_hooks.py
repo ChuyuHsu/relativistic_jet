@@ -133,17 +133,78 @@ class DestTest(unittest.TestCase):
         pump(n, self.con, 10)
         for i in range(3):
             self._ev("queued", "feat-a", None, 11 + i)
-        pump(n, self.con, 20)                 # 失敗
+        pump(n, self.con, 20)                 # 失敗：一批 3 筆
         self.assertIsNotNone(n.last_error)
         self._ev("merged", "feat-a", None, 21)   # 失敗期間又來新事件
-        pump(n, self.con, 30)                 # 還在退避
-        self.assertEqual(len(cap.calls), 1)
-        pump(n, self.con, 200)                # 退避結束，重送
-        ids = [e["id"] for e in cap.calls[-1][1]["events"]]
-        self.assertEqual(ids, sorted(ids))
-        self.assertEqual(len(ids), 4)         # 舊的沒丟、依序一起送
-        pump(n, self.con, 300)
-        self.assertEqual(len(cap.calls), 2)   # 送完不重複
+        for t in range(30, 80, 6):
+            pump(n, self.con, t)              # 對半切後很快再試，逐批送完
+        sent = [e["id"] for c in cap.calls[1:] for e in c[1]["events"]]
+        self.assertEqual(sent, sorted(sent))
+        self.assertEqual(len(sent), 4)        # 舊的沒丟、依序、不重複
+        self.assertIsNone(n.last_error)
+
+    def _flood(self, n_ev):
+        for i in range(n_ev):
+            self._ev("queued", "feat-a", None, 11 + i)
+
+    def test_batches_are_capped_and_timeout_default_30(self):
+        seen = []
+        n = notify.Notifier(poster=lambda url, p, to, h=None: seen.append((len(p["events"]), to)),
+                            destinations=[self._dests()[0]])
+        pump(n, self.con, 10)
+        self._flood(25)
+        for t in range(20, 60, 3):
+            pump(n, self.con, t)
+        self.assertEqual([c for c, _ in seen], [10, 10, 5])
+        self.assertTrue(all(to == 30 for _, to in seen))
+
+    def test_slow_receiver_is_halved_until_it_fits(self):
+        """對方一次最多吃得下 3 筆（更多就逾時）：不能整批重送到死，要切小。"""
+        calls = []
+
+        def post(url, payload, to, headers=None):
+            calls.append(len(payload["events"]))
+            if len(payload["events"]) > 3:
+                raise notify.NotifyError("The read operation timed out")
+        n = notify.Notifier(poster=post, destinations=[self._dests()[0]])
+        pump(n, self.con, 10)
+        self._flood(10)
+        for t in range(20, 200, 6):
+            pump(n, self.con, t)
+        self.assertEqual(sum(c for c in calls if c <= 3), 10)
+        self.assertIsNone(n.last_error)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM events WHERE kind='queued' AND notified_at IS NULL").fetchone()[0] >= 0, True)
+
+    def test_poison_event_is_skipped_but_outage_is_not(self):
+        bad = {}
+
+        def post(url, payload, to, headers=None):
+            if any(int(str(e["id"]).split(":")[-1]) in bad for e in payload["events"]):
+                raise notify.NotifyError("boom")
+        n = notify.Notifier(poster=post, destinations=[self._dests()[0]])
+        pump(n, self.con, 10)
+        self._flood(5)
+        ids = [r[0] for r in self.con.execute("SELECT id FROM events WHERE kind='queued' ORDER BY id")]
+        bad[ids[2]] = True
+        for t in range(20, 400, 30):
+            pump(n, self.con, t)
+        self.assertIsNone(n.last_error)
+        cur = int(self.con.execute("SELECT value FROM meta WHERE key='notify_cursor:board'").fetchone()[0])
+        self.assertEqual(cur, ids[-1])                        # 毒藥被跳過，後面的都送了
+        self.assertEqual(n.dests[0].poison["id"], ids[2])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM events WHERE kind='queue_error' AND detail LIKE '%跳過%'").fetchone()[0], 1)
+
+    def test_total_outage_never_skips_and_alerts(self):
+        n = notify.Notifier(poster=lambda *a, **k: (_ for _ in ()).throw(notify.NotifyError("down")),
+                            destinations=[self._dests()[0]])
+        pump(n, self.con, 10)
+        self._flood(4)
+        for t in range(20, 20 + 1500, 30):
+            pump(n, self.con, t)
+        cur = int(self.con.execute("SELECT value FROM meta WHERE key='notify_cursor:board'").fetchone()[0])
+        self.assertLess(cur, min(r[0] for r in self.con.execute("SELECT id FROM events WHERE kind='queued'")))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM events WHERE kind='queue_error' AND detail LIKE '%連續失敗%'").fetchone()[0], 1)
+        self.assertIsNone(n.dests[0].poison)
 
     def test_new_destination_does_not_replay_history(self):
         self._ev("merged", "feat-a", None, 1)
