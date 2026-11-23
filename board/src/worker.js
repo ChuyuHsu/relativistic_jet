@@ -90,12 +90,12 @@ async function desired(req, env) {
       out.push(e);
     }
     if (new URL(req.url).searchParams.get('with') === 'drop_checks') {   // 放棄待查：排隊器要查這些分支有沒有改動漏掉
-      const dc = (await env.DB.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped' AND branch IS NOT NULL ORDER BY dropping_at").all()).results;
+      const dc = (await env.DB.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped' ORDER BY dropping_at").all()).results;
       const drop_checks = [];
       for (const c of dc) {
         let sb = null;
         if (c.superseded_by) { const sc = await env.DB.prepare('SELECT id,branch FROM cards WHERE id=?').bind(c.superseded_by).first(); sb = sc ? (sc.branch || branchFor(env, sc.id)) : null; }
-        drop_checks.push({ card: c.id, branch: c.branch, superseded_by_branch: sb });
+        drop_checks.push({ card: c.id, branch: c.branch || branchFor(env, c.id), superseded_by_branch: sb, dropping_at: c.dropping_at });   // dropping_at 請原樣帶回事件，用來認是哪一次放棄
       }
       return json({ cards: out, drop_checks });
     }
@@ -226,13 +226,13 @@ export async function handle(req, env, ctx) {
       let id = body.id;
       if (!id) {
         const r = body.area
-          ? await db.prepare("SELECT id FROM cards WHERE status='open' AND area=? ORDER BY priority,created_at LIMIT 1").bind(body.area).first()
-          : await db.prepare("SELECT id FROM cards WHERE status='open' ORDER BY priority,created_at LIMIT 1").first();
+          ? await db.prepare("SELECT id FROM cards WHERE status='open' AND dropping_at IS NULL AND area=? ORDER BY priority,created_at LIMIT 1").bind(body.area).first()
+          : await db.prepare("SELECT id FROM cards WHERE status='open' AND dropping_at IS NULL ORDER BY priority,created_at LIMIT 1").first();
         if (!r) return json({ error: '沒有可認領的卡' }, 404);
         id = r.id;
       }
       const branch = branchFor(env, id);
-      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=COALESCE(branch,?),owner_thread=?,updated_at=? WHERE id=? AND status='open'")
+      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=COALESCE(branch,?),owner_thread=?,updated_at=? WHERE id=? AND status='open' AND dropping_at IS NULL")
         .bind(String(body.owner), branch, body.owner_thread ? String(body.owner_thread) : null, now(), id).run();
       if (res.meta.changes === 1) {
         await log(db, id, actor, `認領 ${body.owner}`);
@@ -247,6 +247,8 @@ export async function handle(req, env, ctx) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first();
     if (!c) return json({ error: 'not found' }, 404);
     if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
+    const resend = body.status === 'dropped' && Object.keys(body).every(k => ['status', 'actor', 'superseded_by', 'discard_reason', 'note'].includes(k));
+    if (stageOf(c) === 'dropping' && !resend) return json({ error: '放棄待查中，等排隊器查完才能動這張卡', stage: 'dropping' }, 409);   // 待查中一律不能改（重送放棄請求除外，見下）
     const sets = [], vals = [];
     if ('branch' in body) return json({ error: '分支名由看板給定，領卡後不會變' }, 400);
     for (const k of ['title', 'body', 'area', 'owner_thread']) if (k in body) { sets.push(`${k}=?`); vals.push(String(body[k])); }
@@ -266,15 +268,17 @@ export async function handle(req, env, ctx) {
         if (!['developing', 'reviewing', 'rejected'].includes(stage)) return no();
         sets.push('status=?', 'owner=NULL', 'owner_thread=NULL', 'phase=NULL', 'phase_at=NULL', 'last_result=NULL', 'stuck_notified_at=NULL', ...CLEAR_REVIEW.split(','));
         vals.push('open');
-      } else if (body.status === 'dropped') { // 放棄：除已合併外任何階段都可；有送審過的卡要先查有沒有改動漏掉（放棄防呆）
+      } else if (body.status === 'dropped') { // 放棄：除已合併外任何階段都可；所有卡都要先查有沒有改動漏掉（放棄防呆），只有建卡人 10 分鐘內放棄還是 new 的卡例外
         if (stage === 'dropped' || stage === 'dropping') return json(view(c));
         if (stage === 'merged') return no();
-        if (!c.branch || !c.submitted_commit) {   // 沒有分支或從沒送審：沒東西可漏，直接放棄
+        // 唯一例外（開錯卡用）：建卡的人在卡還是 new、建卡 10 分鐘內放棄，直接放棄；其餘所有卡都先進放棄待查
+        const creator = (await db.prepare("SELECT actor FROM events WHERE card_id=? AND note='建立' ORDER BY n LIMIT 1").bind(id).first())?.actor;
+        if (stage === 'new' && creator && creator === actor && now() - c.created_at <= 600) {
           sets.push('status=?'); vals.push('dropped');
           dropKids = true;
         } else {
           const sup = body.superseded_by ? String(body.superseded_by) : '', why = String(body.discard_reason ?? '').trim();
-          if (!sup && !why) return json({ error: '這張卡已有送審過的改動，放棄要帶 superseded_by（由哪張未放棄的卡接手）或 discard_reason（真的不要了的原因）', stage }, 400);
+          if (!sup && !why) return json({ error: '放棄要帶 superseded_by（由哪張未放棄的卡接手）或 discard_reason（真的不要了的原因）', stage }, 400);
           if (sup) {
             const sc = sup === id ? null : await db.prepare('SELECT status FROM cards WHERE id=?').bind(sup).first();
             if (!sc || sc.status === 'dropped') return json({ error: 'superseded_by 必須是另一張存在且未放棄的卡' }, 409);
