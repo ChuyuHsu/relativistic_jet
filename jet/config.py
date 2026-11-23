@@ -1,5 +1,6 @@
 """設定檔（JSON）載入與檢查（DESIGN 第 5、6、9 節）。壞的不載。"""
 import json
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -39,6 +40,7 @@ class Config:
     require_approval: bool = True
     test_cmd: List[str] = field(default_factory=list)
     classify_cmd: Optional[List[str]] = None
+    artifacts: Optional[List[str]] = None   # 測試跑完（含逾時）要留下的檔案（相對工作目錄的 glob）
     notify_url: Optional[str] = None
     notify_batch_s: int = 180
     notify_destinations: List[dict] = field(default_factory=list)   # 多個通知目的地（選配）
@@ -100,6 +102,7 @@ def parse(d: dict) -> Config:
         require_approval=pol.get("require_approval", True),
         test_cmd=_need(cmds, "test", list),
         classify_cmd=cmds.get("classify"),
+        artifacts=cmds.get("artifacts"),
         notify_url=notify.get("url"),
         notify_batch_s=notify.get("batch_seconds", 60),
         notify_destinations=_parse_destinations(notify.get("destinations")),
@@ -147,6 +150,9 @@ def _parse_source(e):
 def _validate(c: Config) -> None:
     if not c.test_cmd or not all(isinstance(x, str) for x in c.test_cmd):
         raise ConfigError("commands.test 必須是非空字串陣列")
+    if c.artifacts is not None and not all(isinstance(x, str) and x and not os.path.isabs(x) and ".." not in x.split("/")
+                                           for x in c.artifacts):
+        raise ConfigError("commands.artifacts 必須是相對路徑的 glob 字串陣列（不能用絕對路徑或 ..）")
     if c.classify_cmd is not None and not all(isinstance(x, str) for x in c.classify_cmd):
         raise ConfigError("commands.classify 必須是字串陣列")
     if min(c.fetch_interval_s, c.git_timeout_s, c.fetch_timeout_s) <= 0:

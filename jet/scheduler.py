@@ -44,6 +44,7 @@ class Running:
     units: int = 0            # 占了幾個核單位（邏輯核或實體核，依設定）
     approved_sha: Optional[str] = None   # 開跑時依據的放行版本與重測計數（事件帶這個，不帶送出當下的）
     retest: Optional[int] = None
+    workdir: str = ""
 
 
 @dataclass
@@ -574,17 +575,47 @@ class Scheduler:
         self.con.execute("UPDATE runs SET pgid=? WHERE id=?", (getattr(handle, "pgid", None), rid))
         row = store.get_branch(self.con, branch) if branch else None
         self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id, ncores,
-                                 row["approved_sha"] if row else None, row["retest"] if row else None)
+                                 row["approved_sha"] if row else None, row["retest"] if row else None, wd)
         return True
 
     def _release_job(self, rid, status):
         j = self.jobs.pop(rid)
+        try:
+            self._keep_artifacts(j)
+        except Exception as e:                               # 留檔失敗不能影響測試結論
+            log.warning("留存測試產物失敗：%r", e)
         try:
             j.ctx.__exit__(None, None, None)
         finally:
             self.pool.release(j.cores)
         self.con.execute("UPDATE runs SET status=?, finished_at=? WHERE id=?", (status, self.clock(), rid))
         return j
+
+    ARTIFACT_MAX = 5 << 20           # 單檔上限；大的只留尾巴
+
+    def _keep_artifacts(self, j):
+        """工作目錄清掉之前，把設定的檔案（例如逐項耗時紀錄）複製到這次 run 的目錄，逾時也留得下來。"""
+        pats = self.cfg.artifacts
+        if not pats or not j.workdir:
+            return
+        import glob
+        dest = os.path.join(self.cfg.state_dir, "runs", str(j.run_id), "artifacts")
+        root = os.path.realpath(j.workdir)
+        n = 0
+        for pat in pats:
+            for src in sorted(glob.glob(os.path.join(j.workdir, pat), recursive=True)):
+                real = os.path.realpath(src)
+                if not os.path.isfile(real) or not real.startswith(root + os.sep) or n >= 50:
+                    continue
+                rel = os.path.relpath(real, root)
+                out = os.path.join(dest, rel)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                size = os.path.getsize(real)
+                with open(real, "rb") as f, open(out, "wb") as g:
+                    if size > self.ARTIFACT_MAX:
+                        f.seek(size - self.ARTIFACT_MAX)
+                    g.write(f.read())
+                n += 1
 
     def _cancel_jobs(self, branch=None, batch=False):
         for rid, j in list(self.jobs.items()):

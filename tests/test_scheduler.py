@@ -583,3 +583,31 @@ class Overload(Base):
         self.repo.add("a")
         self._timeout_overloaded(False)
         self.go(10, until=lambda: self.state("a") == "rejected")
+
+
+class ArtifactsKeep(Base):
+    """逾時也要留得下逐項耗時紀錄：工作目錄清掉前把設定的檔案複製到 run 目錄。"""
+
+    def test_config_rejects_bad_globs(self):
+        for bad in (["/etc/passwd"], ["../x"], [""], [1]):
+            with self.assertRaises(config.ConfigError):
+                self.mk(commands={"artifacts": bad})
+
+    def test_copies_matching_files_and_tail_of_big_ones(self):
+        from types import SimpleNamespace
+        self.mk(commands={"artifacts": ["out/*.log", "all.log"]})
+        wd = os.path.join(self.t.name, "wd")
+        os.makedirs(os.path.join(wd, "out"))
+        open(os.path.join(wd, "out", "a.log"), "w").write("a")
+        open(os.path.join(wd, "skip.txt"), "w").write("no")
+        with open(os.path.join(wd, "all.log"), "wb") as f:
+            f.write(b"x" * (self.s.ARTIFACT_MAX + 10) + b"END")
+        os.symlink("/etc/hostname", os.path.join(wd, "out", "link.log"))
+        self.s._keep_artifacts(SimpleNamespace(workdir=wd, run_id=7))
+        d = os.path.join(self.cfg.state_dir, "runs", "7", "artifacts")
+        self.assertEqual(open(os.path.join(d, "out", "a.log")).read(), "a")
+        big = open(os.path.join(d, "all.log"), "rb").read()
+        self.assertEqual(len(big), self.s.ARTIFACT_MAX)
+        self.assertTrue(big.endswith(b"END"))
+        self.assertFalse(os.path.exists(os.path.join(d, "skip.txt")))
+        self.assertFalse(os.path.exists(os.path.join(d, "out", "link.log")))     # 指到工作目錄外的連結不留
