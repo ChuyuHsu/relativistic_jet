@@ -3,7 +3,7 @@
   診斷：doctor（設定、remote、分支樣式、測試指令、核池）；status --verbose（心跳、fetch、掃描、最近錯誤）
   讀：status branches branch merged todo metrics
   寫：approve revoke priority set-parent run-test pause resume resolve   （全部經 HTTP，由主行程執行）
-  維運：serve check-config init-keys backup list-backups restore deploy rollback supervise
+  維運：serve check-config init-keys backup list-backups restore deploy rollback supervise start stop restart
 
 連線資訊從設定檔來（--config，或環境變數 JET_CONFIG，預設 ./jet.json）：位址用 api.listen，
 鑰匙用 api.read_key_file／write_key_file。也可以用 --url 與 --read-key-file／--write-key-file 蓋過。
@@ -228,6 +228,46 @@ def cmd_serve(args):
         srv.run_forever()
     except KeyboardInterrupt:
         srv.stop()
+    return srv.exit_code            # 0＝停；75＝要求重啟（守護會重新拉起）
+
+
+def _wait_gone(root: str, secs: float) -> bool:
+    import time
+    end = time.time() + secs
+    while time.time() < end:
+        if guard.pid_alive(root) is None:
+            return True
+        time.sleep(0.5)
+    return guard.pid_alive(root) is None
+
+
+def cmd_stop(args):
+    """停機：請排隊器自己收尾後退出，守護跟著停。預設等手上的批測做完；--now 立刻停。"""
+    root = os.path.abspath(args.root)
+    with open(os.path.join(root, guard.STOP_FILE), "w", encoding="utf-8") as f:   # 守護看到就不再拉起
+        f.write("stop\n")
+    try:
+        r = _client(args, need_write=True).post("/stop", {"mode": "now" if args.now else "graceful", "restart": False})
+        _out(args, r, "已請排隊器停機（" + ("立刻" if args.now else "等手上的批測與自測做完") + "）")
+    except ClientError as e:
+        print(f"排隊器沒回應（{e}）；守護在它結束後不會再拉起。", file=sys.stderr)
+    if args.wait and not _wait_gone(root, args.wait):
+        print(f"{args.wait} 秒內還沒停完；稍後再看 jet status，或加 --now。", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_restart(args):
+    """換版後重啟：切好 current 之後下這個，排隊器收尾退出，守護用新版把自己和排隊器都重新拉起。"""
+    r = _client(args, need_write=True).post("/stop", {"mode": "now" if args.now else "graceful", "restart": True})
+    _out(args, r, "已請排隊器重啟（" + ("立刻" if args.now else "等手上的批測與自測做完") + "），守護會用現在的 current 版本拉起")
+    return 0
+
+
+def cmd_start(args):
+    pid = guard.start_background(args.root, _cfg_path(args))
+    print(f"已啟動守護（pid {pid}），輸出在 {os.path.join(os.path.abspath(args.root), 'supervisor.log')}")
+    return 0
 
 
 def cmd_check_config(args):
@@ -296,7 +336,16 @@ def cmd_supervise(args):
     sup = guard.Supervisor(args.root, cfg.state_dir, guard.default_cmd(_cfg_path(args)),
                            notify_url=cfg.notify_url)
     guard.install_signal_handlers(sup)
-    return sup.run()
+    sup.reexec = guard.make_reexec(args.root, _cfg_path(args))
+    guard.write_pid(os.path.abspath(args.root))
+    try:
+        return sup.run()
+    finally:
+        try:
+            if guard.pid_alive(os.path.abspath(args.root)) == os.getpid():
+                os.remove(os.path.join(os.path.abspath(args.root), guard.PID_FILE))
+        except OSError:
+            pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -341,6 +390,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("restore", cmd_restore, "從備份還原（主行程要先停）"); sp.add_argument("--from", dest="source")
     sp = add("deploy", cmd_deploy, "換版：releases/<版本> 變成 current"); sp.add_argument("--root", required=True); sp.add_argument("release")
     sp = add("rollback", cmd_rollback, "退回上一版"); sp.add_argument("--root", required=True)
+    sp = add("stop", cmd_stop, "停機（排隊器自己收尾退出、守護跟著停；不需要 kill）"); sp.add_argument("--root", required=True)
+    sp.add_argument("--now", action="store_true", help="立刻停，不等手上的批測"); sp.add_argument("--wait", type=float, default=0, help="等守護完全停掉（秒）")
+    sp = add("restart", cmd_restart, "重啟（換版後用：守護用 current 的新版重新拉起，連守護自己也換）"); sp.add_argument("--now", action="store_true")
+    sp = add("start", cmd_start, "把守護叫起來（背景）"); sp.add_argument("--root", required=True)
     sp = add("supervise", cmd_supervise, "守著主行程：掛了重啟，連續當掉三次自動退版"); sp.add_argument("--root", required=True)
     return p
 

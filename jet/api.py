@@ -2,7 +2,7 @@
 
 讀（X-Jet-Read-Key）：GET /status /branches /branches/<name> /merged /todo /metrics
 人看的進度頁：GET /（頁面本身不含任何資料，資料用讀鑰匙另外抓）
-寫（X-Jet-Write-Key）：POST /approve /revoke /priority /set-parent /adhoc-run /pause /resume /resolve
+寫（X-Jet-Write-Key）：POST /approve /revoke /priority /set-parent /adhoc-run /pause /resume /resolve /stop
 
 規矩：
 - 讀、寫鑰匙分開：讀鑰匙只能讀；寫鑰匙可以寫，也可以讀。鑰匙只放檔案，不放設定值。
@@ -23,7 +23,7 @@ from . import ops
 from .page import PAGE_HTML
 
 READ_ROUTES = ["/status", "/branches", "/branches/<name>", "/merged", "/todo", "/metrics", "/"]
-WRITE_ROUTES = ["/approve", "/revoke", "/priority", "/set-parent", "/adhoc-run", "/pause", "/resume", "/resolve"]
+WRITE_ROUTES = ["/approve", "/revoke", "/priority", "/set-parent", "/adhoc-run", "/pause", "/resume", "/resolve", "/stop"]
 
 MAX_BODY = 64 * 1024          # 請求內容上限，擋掉亂塞
 WRITE_WAIT_S = 10.0           # 等主行程處理的時間；超過就回 202，命令仍在佇列裡

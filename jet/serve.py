@@ -6,13 +6,14 @@
 調度核心（scheduler）由 `scheduler_factory(cfg, con, wq)` 提供；沒提供時只跑介面與維運
 （讀得到、寫得進、會備份、會通知，但不會自己排隊測試）。
 """
+import json
 import logging
 import os
 import threading
 import time
 from typing import Any, Callable, Optional
 
-from . import api, config, db, guard, maintenance, notify, ops
+from . import api, config, db, guard, maintenance, notify, ops, store
 
 log = logging.getLogger("jet")
 TICK_S = 0.5
@@ -62,6 +63,8 @@ class Server:
             self.lock.release()
             raise
         self._stop = threading.Event()
+        self.exit_code = 0
+        self.con.execute("DELETE FROM meta WHERE key='shutdown_request'")   # 上一輪留下的停機要求不算
 
     # ------------------------------------------------------------
     def _pre_commit(self, action: str, args: dict, now: float) -> None:
@@ -91,8 +94,31 @@ class Server:
         if self.scheduler is not None:
             self.scheduler.tick()
         self.notifier.tick(self.con, now)
+        self._check_shutdown()
         if self.backups.tick(self.con, now) is None and self.backups.last_error:
             log.warning("備份失敗：%s", self.backups.last_error)
+
+    def _check_shutdown(self) -> None:
+        """人下了 jet stop／restart：排隊器自己收尾後退出（restart 的退出碼 75，守護會重新拉起）。"""
+        raw = store.get_meta(self.con, "shutdown_request")
+        if not raw:
+            return
+        try:
+            req = json.loads(raw)
+        except ValueError:
+            return
+        sched = self.scheduler
+        if req.get("mode") == "now":
+            if sched is not None and hasattr(sched, "shutdown"):
+                sched.shutdown()
+        else:
+            if sched is not None and hasattr(sched, "draining"):
+                sched.draining = True
+            if sched is not None and hasattr(sched, "idle") and not sched.idle():
+                return                                   # 等手上的批測與自測到安全點
+        self.exit_code = guard.RESTART_CODE if req.get("restart") else 0
+        log.info("依停機要求退出（%s，%s）", req.get("mode"), "重啟" if req.get("restart") else "停止")
+        self._stop.set()
 
     def run_forever(self) -> None:
         self.api.start()

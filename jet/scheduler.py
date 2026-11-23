@@ -109,6 +109,7 @@ class Scheduler:
         self._wait_proven: Set[str] = set()                # 因父卡還沒綠而被重排的子分支：父卡綠了才再測
         self._blocked: Dict[str, str] = {}                 # 被父卡擋住的分支 → 原因
         self._stop = False
+        self.draining = False               # 停機中：不再起新的批與自測，只把手上的做完
         self.async_fetch = async_fetch      # 正式跑用背景執行緒 fetch，第一次抓一個大 repo 不會卡住主迴圈
         self._fetch_thread: Optional[threading.Thread] = None
         self._fetch_started = 0.0
@@ -273,6 +274,10 @@ class Scheduler:
         self._promote()
         if store.is_paused(self.con) or not self.resources_ok():
             return
+        if self.draining:
+            if self.batch is not None:
+                self._batch_step()
+            return
         if not self._ensure_baseline():
             return
         self._batch_step()
@@ -289,6 +294,17 @@ class Scheduler:
 
     def stop(self):
         self._stop = True
+
+    def idle(self) -> bool:
+        return not self.jobs and self.batch is None
+
+    def shutdown(self):
+        """立刻停機前：殺掉所有測試行程群組、釋放核。批與狀態留給下次啟動的 recover 接續。"""
+        for rid, j in list(self.jobs.items()):
+            try:
+                self.executor.cancel(j.handle)
+            finally:
+                self._release_job(rid, "cancelled")
 
     # ---------- 掃 Git ----------
     def _scan(self):

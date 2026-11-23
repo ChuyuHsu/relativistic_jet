@@ -330,6 +330,20 @@ def op_resume(con, now, actor, args):
     return {"paused": False}
 
 
+def op_stop(con, now, actor, args):
+    """停機或換版：主行程自己收尾後退出（不需要任何 kill）。
+    mode=graceful（預設）：不再派新工作，等正在跑的批測與自測到安全點再退出；now：立刻停掉測試行程群組再退出。
+    restart=true 時退出碼是 75，守護看到就用現在的 current 版本重新拉起（連守護自己也換新）。"""
+    mode = args.get("mode", "graceful")
+    if mode not in ("graceful", "now"):
+        raise OpError("mode 要是 graceful 或 now")
+    restart = args.get("restart", False)
+    if not isinstance(restart, bool):
+        raise OpError("restart 要是 true 或 false")
+    store.set_meta(con, "shutdown_request", json.dumps({"mode": mode, "restart": restart, "at": now, "by": actor}))
+    return {"stopping": True, "mode": mode, "restart": restart}
+
+
 def op_resolve(con, now, actor, args):
     eid = args.get("id")
     if isinstance(eid, bool) or not isinstance(eid, int):
@@ -343,7 +357,7 @@ def op_resolve(con, now, actor, args):
 ACTIONS: Dict[str, Callable] = {
     "approve": op_approve, "revoke": op_revoke, "priority": op_priority,
     "set-parent": op_set_parent, "adhoc-run": op_adhoc_run,
-    "pause": op_pause, "resume": op_resume, "resolve": op_resolve,
+    "pause": op_pause, "resume": op_resume, "resolve": op_resolve, "stop": op_stop,
 }
 
 

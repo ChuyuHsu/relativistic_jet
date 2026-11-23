@@ -21,6 +21,9 @@ from . import notify
 
 EVENTS_FILE = "supervisor_events.jsonl"
 OFFSET_FILE = "supervisor_events.offset"
+RESTART_CODE = 75        # 主行程要求重啟（jet restart）：守護不算當掉，用現在的 current 重新拉起
+STOP_FILE = "STOP"       # <root>/STOP 存在＝守護下次看到子行程結束就不再拉起（jet stop 放的）
+PID_FILE = "supervisor.pid"
 
 
 class GuardError(Exception):
@@ -139,12 +142,13 @@ class Supervisor:
                  max_crashes: int = 3, window_s: float = 600.0, stable_s: float = 300.0,
                  restart_delay_s: float = 2.0, notify_url: Optional[str] = None,
                  clock: Callable[[], float] = time.time, sleeper: Callable[[float], None] = time.sleep,
-                 popen: Callable[..., Any] = subprocess.Popen):
+                 popen: Callable[..., Any] = subprocess.Popen, reexec: Optional[Callable[[], None]] = None):
         self.root, self.state_dir, self.cmd_for = root, state_dir, cmd_for
         self.max_crashes, self.window_s, self.stable_s = max_crashes, window_s, stable_s
         self.restart_delay_s = restart_delay_s
         self.notify_url = notify.check_url(notify_url)
         self.clock, self.sleeper, self.popen = clock, sleeper, popen
+        self.reexec = reexec          # 重啟時把守護自己也換成新版（exec 自己）；沒給就只重拉子行程
         self.crashes: List[float] = []
         self._child = None
         self._stop = False
@@ -181,6 +185,15 @@ class Supervisor:
             starts += 1
             code = self._child.wait()
             self._child = None
+            stopfile = os.path.join(self.root, STOP_FILE)
+            if os.path.exists(stopfile):
+                os.remove(stopfile)
+                return 0
+            if code == RESTART_CODE and not self._stop:
+                self.crashes = []
+                if self.reexec is not None:
+                    self.reexec()                  # 正常不會回來（exec）
+                continue
             if self._stop or code == 0:
                 return 0 if code in (0, -signal.SIGTERM) else code
             now = self.clock()
@@ -211,3 +224,50 @@ def default_cmd(config_path: str) -> Callable[[str], List[str]]:
 def install_signal_handlers(sup: Supervisor) -> None:
     signal.signal(signal.SIGTERM, sup.stop)
     signal.signal(signal.SIGINT, sup.stop)
+
+
+def pid_alive(root: str) -> Optional[int]:
+    """守護還在跑嗎：看 pid 檔，確認那個行程真的是 supervise。回 pid 或 None。"""
+    try:
+        with open(os.path.join(root, PID_FILE), encoding="utf-8") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"supervise" not in f.read():
+                return None
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def write_pid(root: str) -> None:
+    with open(os.path.join(root, PID_FILE), "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+
+
+def start_background(root: str, config_path: str) -> int:
+    """把守護叫起來（背景、自成一個工作階段）；輸出寫 <root>/supervisor.log。回 pid。"""
+    root, config_path = os.path.abspath(root), os.path.abspath(config_path)
+    if pid_alive(root):
+        raise GuardError("守護已經在跑了")
+    cur = _link(root, "current")
+    if not os.path.isdir(cur):
+        raise GuardError("沒有 current 版本，先 deploy 一個")
+    stopfile = os.path.join(root, STOP_FILE)
+    if os.path.exists(stopfile):
+        os.remove(stopfile)
+    log = open(os.path.join(root, "supervisor.log"), "ab")
+    p = subprocess.Popen([sys.executable, "-m", "jet", "supervise", "--root", root, "--config", config_path],
+                         cwd=os.path.realpath(cur), stdout=log, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    return p.pid
+
+
+def make_reexec(root: str, config_path: str) -> Callable[[], None]:
+    """守護自己換版：切到現在的 current 目錄，用同一個 pid exec 新版的 supervise。"""
+    root, config_path = os.path.abspath(root), os.path.abspath(config_path)
+
+    def go():
+        os.chdir(os.path.realpath(_link(root, "current")))
+        os.execv(sys.executable, [sys.executable, "-m", "jet", "supervise", "--root", root, "--config", config_path])
+    return go

@@ -38,6 +38,12 @@ python3 -m jet supervise --root $JET_HOME --config $JET_HOME/jet.json   # 長駐
 乾淨結束（退出碼 0）守護就跟著結束。收到 SIGTERM 會停止派新工作並正常結束。
 下次啟動時，上次沒做完的測試與批測一律作廢重來，已經推進 `main` 但來不及記帳的批會自動補記。
 
+**啟停不需要 kill**：
+- `jet start --root $JET_HOME --config …`：把守護叫起來（背景，輸出 `supervisor.log`，`supervisor.pid`）。
+- `jet stop --root $JET_HOME [--now] [--wait 秒]`：排隊器自己收尾退出，守護跟著停。預設不再派新工作、等手上的批測與自測做完；`--now` 立刻殺掉測試行程群組再退出（下次啟動自動接續）。
+- `jet restart [--now]`：同樣收尾後退出（退出碼 75），守護不算當掉，重新解析 `current` 並 exec 自己成新版，再拉起排隊器。所以「切 `current` → `jet restart`」就是完整換版。
+- `jet stop` 也會放一個 `<root>/STOP` 檔：就算排隊器已經掛了，守護下次看到子行程結束也不會再拉起。
+
 只想前景跑（除錯）：`python3 -m jet serve --config $JET_HOME/jet.json`。
 
 ## 4. 保活
@@ -73,7 +79,7 @@ WantedBy=multi-user.target
 cd $JET_HOME/releases && git clone <程式庫> v<新版>        # 或解壓
 python3 -m jet check-config $JET_HOME/jet.json              # 用新版檢查設定檔格式（在新版目錄下跑）
 python3 -m jet deploy --root $JET_HOME v<新版>              # previous←現行、current←新版
-pkill -TERM -f "jet serve"                                   # 守護會用新版拉起來
+python3 -m jet restart --config $JET_HOME/jet.json          # 排隊器自己收尾退出，守護（連守護自己）用新版重新拉起；不需要 kill
 python3 -m jet rollback --root $JET_HOME                    # 手動退版（current 與 previous 對調）
 ```
 
