@@ -700,3 +700,22 @@ class RecheckAndGuards(Base):
 
     def _paused(self):
         return bool(store.get_meta(self.con, "docs_direct_paused"))
+
+
+class StartedEvents(Base):
+    def test_started_events_emitted_with_card_commit_and_slot(self):
+        from jet import notify
+        self.mk(policy={"require_approval": False})
+        store.set_meta(self.con, "emit_machine_events", "1")
+        self.repo.add("a"); self.repo.add("b")
+        self.go(60, until=lambda: self.merged() == {"a", "b"})
+        st = self.con.execute("SELECT * FROM events WHERE kind='selftest_started' ORDER BY id").fetchall()
+        self.assertEqual({e["branch"] for e in st}, {"a", "b"})
+        e = notify._enrich(self.con, st[0])
+        p = notify.build_payload([e], 1.0)["events"][0]
+        self.assertEqual(p["kind"], "selftest_started")
+        self.assertTrue(p["run_id"] and p["cores"] and p["commit"])
+        bs = self.con.execute("SELECT * FROM events WHERE kind='batch_started' ORDER BY id").fetchall()
+        self.assertEqual({e["branch"] for e in bs}, {"a", "b"})
+        p = notify.build_payload([notify._enrich(self.con, bs[0])], 1.0)["events"][0]
+        self.assertEqual((p["batch_size"], p["pos"] in (1, 2)), (2, True))

@@ -904,6 +904,10 @@ class Scheduler:
                                 base_sha=self.main, head_sha=r["head_sha"]):
                 break
             store.apply_event(c, r["name"], Event.SELFTEST_START)
+            jr = next((j for j in self.jobs.values() if j.branch == r["name"] and j.kind == "selftest"), None)
+            if jr is not None:
+                store.emit(c, "selftest_started", r["name"], {"run_id": jr.run_id, "cores": ",".join(map(str, jr.cores))},
+                           commit_sha=r["head_sha"])
             in_use += self.cfg.selftest_cores
             slots += 1
 
@@ -1595,6 +1599,8 @@ class Scheduler:
             c.execute("INSERT INTO batch_members(batch_id,pos,branch,content_id,squash_sha) VALUES(?,?,?,?,?)",
                       (bid, i + 1, n, cid, res.prefixes[i]))
             store.apply_event(c, n, Event.BATCH_START)
+            store.emit(c, "batch_started", n, {"batch_id": bid, "pos": i + 1, "batch_size": len(members)},
+                       commit_sha=members[i][2])
         self.batch = ActiveBatch(bid, main, members, list(res.prefixes),
                                  ctx={r["name"]: (r["approved_sha"], r["retest"]) for r in cand})
 

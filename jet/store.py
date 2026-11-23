@@ -132,7 +132,7 @@ def add_event(con, kind, branch=None, detail=None):
 
 
 MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
-                 "superseded", "parent_blocked", "drop_checked")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
+                 "superseded", "parent_blocked", "drop_checked", "selftest_started", "batch_started")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
 
 
 def emit(con, kind, branch, detail: dict, commit_sha=None):
