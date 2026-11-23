@@ -114,6 +114,11 @@ def migrate(con: sqlite3.Connection) -> None:
     for col, typ in (("approved_sha", "TEXT"), ("retest", "INTEGER")):
         if col not in cols:
             con.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
+    cols = [r[1] for r in con.execute("PRAGMA table_info(runs)")]
+    for col, typ in (("workdir", "TEXT"), ("timeout_s", "REAL"), ("units", "INTEGER"),
+                     ("approved_sha", "TEXT"), ("retest", "INTEGER")):    # 換版接管要用的
+        if col not in cols:
+            con.execute(f"ALTER TABLE runs ADD COLUMN {col} {typ}")
     cols = [r[1] for r in con.execute("PRAGMA table_info(branches)")]
     for col, typ in (("approved_sha", "TEXT"), ("retest", "INTEGER")):
         if col not in cols:

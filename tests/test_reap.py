@@ -1,5 +1,6 @@
 """上一代遺留的測試行程：領頭已死、子行程還活著也要認得出來並清掉；別人的行程不碰。"""
 import os
+import sys
 import subprocess
 import tempfile
 import time
@@ -86,3 +87,25 @@ class LiveJobTest(unittest.TestCase):
                 kill_leftovers(found)
             finally:
                 subprocess.run(["pkill", "-9", "-f", "^sleep 60$"], capture_output=True)
+
+
+class ForeignBusyTest(unittest.TestCase):
+    def test_own_group_and_its_setsid_children_are_not_foreign(self):
+        from jet.cores import foreign_busy
+        cpus = sorted(os.sched_getaffinity(0))
+        if len(cpus) < 2:
+            self.skipTest("需要至少兩顆核")
+        c = cpus[-1]
+        # 領頭綁核，並讓它的孫行程自己 setsid（像引擎）：整串都應算我方
+        code = ("import os,subprocess,sys;os.sched_setaffinity(0,{%d});"
+                "subprocess.Popen(['setsid','sleep','30']);import time;time.sleep(30)" % c)
+        lead = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+        try:
+            time.sleep(0.5)
+            base = set(cpus)
+            self.assertIn(c, foreign_busy([c], set(), baseline=base))                  # 不報備就是外人
+            self.assertEqual(foreign_busy([c], {lead.pid}, baseline=base), set())      # 報備群組後連 setsid 的孫行程都不算
+        finally:
+            lead.kill()
+            lead.wait()
+            subprocess.run(["pkill", "-9", "-f", "^sleep 30$"], capture_output=True)

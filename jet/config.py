@@ -32,6 +32,7 @@ class Config:
     selftest_timeout_s: int = 600
     batch_timeout_s: int = 3600
     batch_max: int = 16
+    handover: bool = True              # jet restart 時測試不排空不殺，留給下一代主行程接管
     drain_max_s: float = 300           # 優雅停機／重啟最多等手上的工作多久，超過就立刻收（工作留給啟動復原重排）；0＝一直等
     points: List[int] = field(default_factory=lambda: [2, 4, 8, 16])
     double_fail_halt: int = 2
@@ -96,6 +97,7 @@ def parse(d: dict) -> Config:
         batch_timeout_s=lim.get("batch_timeout_s", 3600),
         batch_max=lim.get("batch_max", 16),
         drain_max_s=lim.get("drain_max_s", 300),
+        handover=lim.get("handover", True),
         points=lim.get("points", [2, 4, 8, 16]),
         double_fail_halt=lim.get("double_fail_halt", 2),
         baseline_history=lim.get("baseline_history", 5),
@@ -179,6 +181,8 @@ def _validate(c: Config) -> None:
         raise ConfigError("limits.baseline_history 必須 ≥ 1")
     if isinstance(c.drain_max_s, bool) or not isinstance(c.drain_max_s, (int, float)) or c.drain_max_s < 0:
         raise ConfigError("limits.drain_max_s 必須 ≥ 0（0＝一直等）")
+    if not isinstance(c.handover, bool):
+        raise ConfigError("limits.handover 必須是 true 或 false")
     if c.batch_max < 1:
         raise ConfigError("limits.batch_max 必須 ≥ 1")
     if sorted(c.points) != c.points or any(p < 1 for p in c.points):

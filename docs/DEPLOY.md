@@ -197,3 +197,13 @@ du -sh $JET_HOME/work/mirror.git; ls -la $JET_HOME/work/mirror.git/objects/pack 
 ## 11. 通知分批與送不出去的處理
 
 每個目的地可設 `max_events`（每次請求最多幾筆，預設 10）、`timeout_s`（預設 30 秒）。一批送不出去（逾時或對方回錯）就對半切、5 秒後再試，成功後再慢慢放大；切到單筆還失敗，就改送它後面的一筆來比對：後面的送得出去、它卻不行，才確定是它有問題，記下並跳過（`jet status` 會警示，並寫一筆 queue_error）；後面的也失敗就是對方整個壞了，不會跳過任何事件、照退避重試。連續失敗超過 10 分鐘發一筆 queue_error 並寫 log。`jet status` 不加 -v 就會顯示通知異常。
+
+## 12. 換版接管（jet restart 不排空、不殺測試）
+
+`jet restart`（不加 --now）時，舊主行程立刻退出，在跑的測試（自測、批測點、基準）照跑；新主行程啟動時把資料庫裡 `status=running` 的 run 接管下來：
+- 測試由啟動器包著跑（`jet/_launch.py --exit-file`）：領頭留著等指令結束，把 `{"v":1,"rc","signal","at"}` 原子寫進 `runs/<id>/exit.json`。新主行程看到群組結束＋exit.json 就收結果；群組還活著就繼續等，**逾時從原本的開跑時間算**；群組沒了又沒有 exit.json（被 SIGKILL、或舊版啟動器開的）才當 infra 重排。
+- 核池記帳接回來（不超賣）；批測重建成員與前綴 sha（成員內容跟組批時不同就不接，整批重排）；已經跑完的測點不記，下一輪重跑，進行中的測點接管。
+- 接管中的行程群組不會被啟動復原、`jet reap`、`jet doctor` 當孤兒（判斷看「最上層的親是不是 init」）。
+- `limits.handover=false` 可關掉，退回「等手上的做完（上限 drain_max_s）」。`jet stop` 與 `jet restart --now` 仍是排空／立刻停。
+
+仍做不到的情況：①換版前舊版啟動器開的測試（exec 版，沒有 exit.json）收不到退出碼，跑完會被當 infra 重排一次；②重啟當下那一步剛好在推 main，由原本的 pushing 復原處理（不是接管）；③已經跑完的批測點結果不保留，下一輪重跑；④exit.json 的 v 不是 1 時視同沒有（當 infra）。

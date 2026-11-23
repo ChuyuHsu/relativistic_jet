@@ -47,6 +47,14 @@ class Running:
     workdir: str = ""
 
 
+class _NoCtx:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return None
+
+
 @dataclass
 class ActiveBatch:
     id: int
@@ -129,29 +137,133 @@ class Scheduler:
 
     # ---------- 啟動復原 ----------
     def recover(self):
-        """上次中斷留下的半成品：殺掉遺留測試行程、工作作廢、批作廢、狀態退回上一步。
+        """啟動復原：上一代主行程留下的測試（行程群組還活著、或已經寫了 exit.json）接管下來繼續收結果；
+        接不了的才殺掉、作廢、狀態退回上一步。
         例外：已經推進 main 的批（status=pushing 而且終點已是 main 的祖先）照合入收尾。"""
         c = self.con
-        self._kill_leftovers()
+        adopted = self._adopt_runs() if hasattr(self.executor, "adopt") else {}
+        keep_pg = {j.handle.pgid for j in adopted.values()}
+        self._kill_leftovers(keep_pg)
         cl = getattr(self.repo, "cleanup_worktrees", None)
         if cl:
-            cl()
-        c.execute("UPDATE runs SET status='cancelled', finished_at=? WHERE status IN ('running','queued')",
+            try:
+                cl(keep=[j.workdir for j in adopted.values() if j.workdir])
+            except TypeError:
+                cl()
+        c.execute("UPDATE runs SET status='cancelled', finished_at=? WHERE status IN ('running','queued')"
+                  + (" AND id NOT IN (%s)" % ",".join(str(r) for r in adopted) if adopted else ""),
                   (self.clock(),))
         for b in c.execute("SELECT * FROM batches WHERE status='pushing'").fetchall():
             self._recover_pushing(b)
-        c.execute("UPDATE batches SET status='aborted', finished_at=? WHERE status IN ('testing','probing','pushing')",
-                  (self.clock(),))
+        keep_batch = self.batch.id if self.batch is not None else None
+        c.execute("UPDATE batches SET status='aborted', finished_at=? WHERE status IN ('testing','probing','pushing')"
+                  + (" AND id!=%d" % keep_batch if keep_batch is not None else ""), (self.clock(),))
+        live = {j.branch for j in adopted.values() if j.kind == "selftest"}
         for r in store.list_branches(c, S.SELFTESTING.value):
-            store.apply_event(c, r["name"], Event.RETRY)
+            if r["name"] not in live:
+                store.apply_event(c, r["name"], Event.RETRY)
+        members = {n for n, _, _ in self.batch.members} if self.batch is not None else set()
         for r in store.list_branches(c, S.BATCHING.value):
-            store.apply_event(c, r["name"], Event.BATCH_DEFERRED)
+            if r["name"] not in members:
+                store.apply_event(c, r["name"], Event.BATCH_DEFERRED)
 
-    def _kill_leftovers(self):
+    # ---------- 換版接管 ----------
+    def _timeout_for(self, kind: str) -> float:
+        return self.cfg.selftest_timeout_s if kind == "selftest" else self.cfg.batch_timeout_s
+
+    def _adopt_runs(self) -> Dict[int, Running]:
+        """資料庫裡 status=running 的工作，行程群組還活著（或 exit.json 已寫好）就接管：恢復核池記帳、
+        逾時從原本的開跑時間算、之後跟自己開的一樣輪詢收結果。回傳 run id → Running。"""
+        from . import cores as _cores
+        from .executor import exit_path_for
+        c = self.con
+        out: Dict[int, Running] = {}
+        restored: Dict[int, Optional[ActiveBatch]] = {}
+        exists = getattr(self.repo, "worktree_exists", lambda p: os.path.isdir(p))
+        for r in c.execute("SELECT * FROM runs WHERE status='running' AND pgid IS NOT NULL ORDER BY id").fetchall():
+            try:
+                cores = [int(x) for x in (r["cores"] or "").split(",") if x]
+                wd = r["workdir"]
+                if not cores or not wd or not exists(wd):
+                    continue
+                job = Job(layer=r["layer"], workdir=wd, cores=cores,
+                          timeout_s=int(r["timeout_s"] or self._timeout_for(r["kind"])),
+                          report_path=r["report_path"], log_path=r["log_path"])
+                alive = os.path.exists(exit_path_for(job)) or bool(_cores.group_members(r["pgid"]))
+                if not alive:
+                    continue
+                kind, branch, head = r["kind"], r["branch"], r["commit_sha"]
+                if kind == "selftest":
+                    row = store.get_branch(c, branch) if branch else None
+                    if row is None or row["state"] != S.SELFTESTING.value:
+                        continue
+                    head = row["head_sha"]
+                elif kind in ("point", "probe"):
+                    if r["batch_id"] not in restored:
+                        restored[r["batch_id"]] = self._restore_batch(r["batch_id"])
+                    if restored[r["batch_id"]] is None:
+                        continue
+                elif kind != "baseline":
+                    continue
+                if not self.pool.reserve(cores):
+                    continue
+                started = r["started_at"] or self.clock()
+                elapsed = max(self.clock() - started, 0.0)
+                h = self.executor.adopt(job, r["pgid"], job.timeout_s - elapsed, elapsed)
+                out[r["id"]] = Running(h, self.repo.adopt_worktree(wd) if hasattr(self.repo, "adopt_worktree") else _NoCtx(),
+                                       cores, r["id"], kind, branch, head, r["size"], r["batch_id"],
+                                       r["units"] or len(cores), r["approved_sha"], r["retest"], wd)
+            except Exception as e:                 # 接不起來的當沒接管，走舊辦法（殺掉重排）
+                log.warning("接管 run %s 失敗：%r", r["id"], e)
+        self.jobs.update(out)
+        bids = {j.batch_id for j in out.values() if j.batch_id is not None}
+        self.batch = None
+        for bid, ab in restored.items():
+            if ab is not None and bid in bids:
+                for j in out.values():
+                    if j.batch_id == bid:
+                        ab.launched.add((j.kind, j.size))
+                self.batch = ab
+        for rid in [rid for rid, j in out.items() if j.batch_id is not None and (self.batch is None or j.batch_id != self.batch.id)]:
+            j = self.jobs.pop(rid)
+            out.pop(rid)
+            self.pool.release(j.cores)                      # 只接一個批；多的當沒接管（下面殺掉）
+        if out:
+            log.info("換版接管：%d 個測試繼續跑（%s）", len(out), "、".join(f"#{rid} {j.kind}" for rid, j in out.items()))
+        return out
+
+    def _restore_batch(self, bid: int) -> Optional["ActiveBatch"]:
+        """用資料庫重建進行中的批；成員內容跟組批時不同（分支又被推了）就不接。已經跑完的測點不記，下一輪重跑。"""
+        c = self.con
+        b = c.execute("SELECT * FROM batches WHERE id=? AND status IN ('testing','probing')", (bid,)).fetchone()
+        if b is None:
+            return None
+        rows = c.execute("SELECT * FROM batch_members WHERE batch_id=? ORDER BY pos", (bid,)).fetchall()
+        if not rows:
+            return None
+        members, prefixes, ctx = [], [], {}
+        for m in rows:
+            br = store.get_branch(c, m["branch"])
+            if br is None or br["state"] != S.BATCHING.value or br["content_id"] != m["content_id"] or not m["squash_sha"]:
+                return None
+            members.append((m["branch"], m["content_id"], br["head_sha"]))
+            prefixes.append(m["squash_sha"])
+            ctx[m["branch"]] = (br["approved_sha"], br["retest"])
+        return ActiveBatch(bid, b["base_sha"], members, prefixes, ctx=ctx)
+
+    def handover(self):
+        """換版（jet restart）：把測試留給下一代主行程，自己什麼都不殺、不等。只放掉自己的暫時資源。"""
+        self._cls_close()
+        log.info("換版交接：%d 個測試留給下一代接管", len(self.jobs))
+
+    def _kill_leftovers(self, keep_pgids=()):
         import signal
         root = os.path.abspath(self.cfg.work_dir)
+        keep_pgids = set(keep_pgids)
         for r in self.con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL"):
             pg = r[0]
+            if pg in keep_pgids:
+                continue                                  # 被接管的工作不殺
             try:
                 # 保險：只殺工作目錄在我們 worktree 底下的群組（避免重開機後行程號被別人用走）
                 if pg > 1 and os.readlink(f"/proc/{pg}/cwd").startswith(root):
@@ -159,7 +271,7 @@ class Scheduler:
             except (OSError, ProcessLookupError):
                 pass
         # 領頭已死、子行程（例如遊戲引擎）還活著的群組，上面靠 /proc/<領頭> 認不到：直接用「工作目錄在我們底下」認
-        left = own_leftovers(root)
+        left = own_leftovers(root, keep_pgids)
         if left:
             log.warning("殺掉上一代遺留的測試行程 %d 個", kill_leftovers(left))
 
@@ -563,10 +675,10 @@ class Scheduler:
         ctx = self.repo.worktree(sha)
         wd = ctx.__enter__()
         cur = self.con.execute(
-            "INSERT INTO runs(kind,branch,batch_id,size,layer,commit_sha,base_sha,status,cores,started_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO runs(kind,branch,batch_id,size,layer,commit_sha,base_sha,status,cores,started_at,"
+            "workdir,timeout_s,units) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (kind, branch, batch_id, size, layer, sha, base_sha, "running",
-             ",".join(map(str, cores)), self.clock()))
+             ",".join(map(str, cores)), self.clock(), wd, timeout, ncores))
         rid = cur.lastrowid
         d = os.path.join(self.cfg.state_dir, "runs", str(rid))
         os.makedirs(d, exist_ok=True)
@@ -586,6 +698,8 @@ class Scheduler:
         self._start_fail = 0
         self.con.execute("UPDATE runs SET pgid=? WHERE id=?", (getattr(handle, "pgid", None), rid))
         row = store.get_branch(self.con, branch) if branch else None
+        if row is not None:      # 換版接管時要知道這次測的是哪個放行版本
+            self.con.execute("UPDATE runs SET approved_sha=?, retest=? WHERE id=?", (row["approved_sha"], row["retest"], rid))
         self.jobs[rid] = Running(handle, ctx, cores, rid, kind, branch, head_sha or sha, size, batch_id, ncores,
                                  row["approved_sha"] if row else None, row["retest"] if row else None, wd)
         return True

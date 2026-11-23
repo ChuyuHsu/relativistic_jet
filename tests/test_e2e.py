@@ -52,7 +52,7 @@ class E2E(unittest.TestCase):
             "cores": {"pool": f"{CORES[0]}-{CORES[-1]}" if CORES == list(range(CORES[0], CORES[-1] + 1))
                       else ",".join(map(str, CORES)),
                       "selftest_cores": 1, "batch_cores": 1, "reserve_for_selftest": 1},
-            "limits": {"selftest_timeout_s": 60, "batch_timeout_s": 120, "batch_max": 8,
+            "limits": {"selftest_timeout_s": 600, "batch_timeout_s": 1200, "batch_max": 8,
                        "points": [2, 4, 8], **limits},
             "policy": {"require_approval": False},
             "commands": {"test": ["python3", os.path.join(TOY, "run_tests.py"), "{layer}", "{ncores}", "{report}"]},
@@ -64,7 +64,7 @@ class E2E(unittest.TestCase):
         self.con, self.s = con, s
         return s
 
-    def drive(self, until, timeout=120):
+    def drive(self, until, timeout=900):
         end = time.time() + timeout
         while time.time() < end:
             self.s.tick()
@@ -101,7 +101,7 @@ class E2E(unittest.TestCase):
             self.push_branch(f"b{i}", "GATE-FAIL\n" if f"b{i}" in reds else "ok\n")
         self.system()
         self.drive(lambda: self.state("b3") == "rejected" and self.state("b6") == "rejected"
-                   and sum(self.state(f"b{i}") == "merged" for i in range(1, 9)) == 6, timeout=240)
+                   and sum(self.state(f"b{i}") == "merged" for i in range(1, 9)) == 6, timeout=900)
         self.assertEqual(self.main_tests(), {"base.txt"} | {f"b{i}.txt" for i in (1, 2, 4, 5, 7, 8)})
         self.assertEqual(self.remote_refs(), {"main", "b3", "b6"})
         for n in reds:

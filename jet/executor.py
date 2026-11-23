@@ -73,7 +73,7 @@ class ResourceLow(ExecutorError):
 class Handle:
     job: Job
     argv: List[str]
-    proc: "subprocess.Popen"
+    proc: Optional["subprocess.Popen"]    # 接管來的工作沒有（上一代主行程開的，不是我們的子行程）
     pgid: int
     started: float
     deadline: float
@@ -81,6 +81,27 @@ class Handle:
     result: Optional[JobResult] = None
     cpu_s: Optional[float] = None
     overloaded: bool = False
+
+    @property
+    def exit_path(self) -> str:
+        return exit_path_for(self.job)
+
+
+def exit_path_for(job: "Job") -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(job.log_path)), "exit.json")
+
+
+def read_exit(path: str) -> Optional[int]:
+    """啟動器寫的 exit.json 裡的退出碼；沒有或壞掉回 None。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        rc = d["rc"]
+        if isinstance(d.get("signal"), int) and not isinstance(d.get("signal"), bool):
+            rc = -d["signal"]                                       # 被訊號殺掉：跟直接 exec 時的退出碼寫法一致（負的訊號編號）
+        return rc if isinstance(rc, int) and not isinstance(rc, bool) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def mem_available_mb(meminfo: str = "/proc/meminfo") -> Optional[int]:
@@ -206,15 +227,17 @@ class Executor:
         for p in (job.log_path, job.report_path):
             os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
         # 舊報告會讓「沒寫報告的失敗」被誤判成另一輪的結果，先清掉
-        try:
-            os.unlink(job.report_path)
-        except FileNotFoundError:
-            pass
+        for stale in (job.report_path, exit_path_for(job)):
+            try:
+                os.unlink(stale)
+            except FileNotFoundError:
+                pass
         log = open(job.log_path, "wb")
         try:
             # fork 與 exec 之間不跑 Python（多執行緒行程裡 preexec_fn 可能卡死）：
             # exec 啟動器，由它在新行程裡綁核再 exec 真正的指令，指令從第一行起就只在專屬核上。
-            launch = [sys.executable, "-I", LAUNCHER, ",".join(str(c) for c in sorted(cores)), "--"] + argv
+            launch = [sys.executable, "-I", LAUNCHER, "--exit-file", exit_path_for(job),
+                      ",".join(str(c) for c in sorted(cores)), "--"] + argv
             proc = subprocess.Popen(
                 launch, cwd=job.workdir, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True, close_fds=True)
@@ -227,11 +250,35 @@ class Executor:
         self._live.add(h)
         return h
 
+    def adopt(self, job: Job, pgid: int, remaining_s: float, elapsed_s: float = 0.0) -> Handle:
+        """接管上一代主行程開的工作：行程群組還活著，或已經寫了 exit.json。逾時從原本的開跑時間算（remaining_s）。"""
+        now = time.monotonic()
+        h = Handle(job=job, argv=[], proc=None, pgid=pgid, started=now - max(elapsed_s, 0.0),
+                   deadline=now + max(remaining_s, 0.0))
+        self._live.add(h)
+        return h
+
+    def _poll_adopted(self, handle: Handle) -> Optional[JobResult]:
+        rc = read_exit(handle.exit_path)
+        if rc is not None:
+            self._sweep(handle, signal.SIGKILL, wait_s=5.0)        # 領頭寫完檔走了，留下的孫行程一律清掉
+            return self._finish(handle, None, rc=rc)
+        if not _cores.group_members(handle.pgid):                  # 群組沒了、又沒留下 exit.json（被 SIGKILL、或舊版啟動器）：不知道結果
+            return self._finish(handle, None, rc=-1)
+        if time.monotonic() >= handle.deadline:
+            handle.cpu_s = _cores.group_cpu_seconds(handle.pgid)
+            handle.overloaded = self._was_overloaded(handle, handle.cpu_s)
+            self._terminate(handle)
+            return self._finish(handle, "timeout")
+        return None
+
     # ------------------------------------------------------------ 收結果
     def poll(self, handle: Handle) -> Optional[JobResult]:
         """還在跑回 None；結束（含逾時被殺）回結果，之後每次都回同一份。"""
         if handle.result is not None:
             return handle.result
+        if handle.proc is None:
+            return self._poll_adopted(handle)
         try:
             exited = os.waitid(os.P_PID, handle.pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
         except ChildProcessError:
@@ -262,8 +309,12 @@ class Executor:
         return self._finish(handle, "cancelled")
 
     # ------------------------------------------------------------ 內部
-    def _finish(self, h: Handle, forced: Optional[str]) -> JobResult:
-        rc = h.proc.wait()   # 回收領頭行程（群組清空後才呼叫，所以不會卡住）
+    def _finish(self, h: Handle, forced: Optional[str], rc: Optional[int] = None) -> JobResult:
+        if h.proc is not None:
+            rc = h.proc.wait()   # 回收領頭行程（群組清空後才呼叫，所以不會卡住）
+            fromfile = read_exit(h.exit_path)
+            if fromfile is not None and forced is None:
+                rc = fromfile
         dur = time.monotonic() - h.started
         if h.log is not None:
             h.log.close()

@@ -111,6 +111,8 @@ class Server:
         if req.get("mode") == "now":
             if sched is not None and hasattr(sched, "shutdown"):
                 sched.shutdown()
+        elif req.get("restart") and getattr(self.cfg, "handover", False) and hasattr(sched, "handover"):
+            sched.handover()                              # 換版接管：測試照跑、不等不殺，下一代主行程接手
         else:
             if sched is not None and hasattr(sched, "draining"):
                 sched.draining = True

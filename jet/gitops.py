@@ -72,6 +72,20 @@ class Repo(Protocol):
         """刪已合入的分支；sha 對不上就不刪。"""
 
 
+class _Worktree:
+    """worktree 的離開動作。不用 generator：排隊器換版交接時直接退出，generator 被回收會觸發 finally 把
+    還在跑的測試的目錄刪掉；這個物件沒有終結動作，退出時什麼都不做。"""
+
+    def __init__(self, repo: "GitRepo", path: str):
+        self.repo, self.path = repo, path
+
+    def __enter__(self) -> str:
+        return self.path
+
+    def __exit__(self, *a) -> None:
+        self.repo._remove_worktree(self.path)
+
+
 class GitRepo:
     def __init__(self, remote: str, work_dir: str, main: str = "main",
                  branch_patterns: Sequence[str] = ("*",), timeout_s: float = 900,
@@ -289,26 +303,36 @@ class GitRepo:
         return StackResult(kept, prefixes)
 
     # ---- worktree ----
-    @contextlib.contextmanager
-    def worktree(self, sha: str) -> Iterator[str]:
+    def worktree(self, sha: str) -> "_Worktree":
         if not self._has(sha):
             raise GitError(f"副本裡沒有這個提交：{sha[:12]}")
         os.makedirs(self.wt_root, exist_ok=True)
         path = os.path.join(self.wt_root, uuid.uuid4().hex[:12])
         self._git("worktree", "add", "--detach", "-q", path, sha)
-        try:
-            yield path
-        finally:
-            self._git("worktree", "remove", "--force", path, check=False)
-            if os.path.exists(path):
-                shutil.rmtree(path, ignore_errors=True)
-            self._git("worktree", "prune", check=False)
+        return _Worktree(self, path)
 
-    def cleanup_worktrees(self) -> int:
-        """啟動時清掉上次當掉留下的 worktree，回傳清掉幾個。"""
+    def adopt_worktree(self, path: str) -> "_Worktree":
+        """接管上一代留下、測試還在用的 worktree（之後離開時照常清掉）。"""
+        return _Worktree(self, path)
+
+    def worktree_exists(self, path: str) -> bool:
+        p = os.path.abspath(path)
+        return p.startswith(self.wt_root + os.sep) and os.path.isdir(p)
+
+    def _remove_worktree(self, path: str) -> None:
+        self._git("worktree", "remove", "--force", path, check=False)
+        if os.path.exists(path):
+            shutil.rmtree(path, ignore_errors=True)
+        self._git("worktree", "prune", check=False)
+
+    def cleanup_worktrees(self, keep: Sequence[str] = ()) -> int:
+        """啟動時清掉上次當掉留下的 worktree，回傳清掉幾個。keep＝被接管的工作還在用的目錄，不動。"""
         n = 0
+        keep_set = {os.path.abspath(k) for k in keep}
         if os.path.isdir(self.wt_root):
             for d in os.listdir(self.wt_root):
+                if os.path.abspath(os.path.join(self.wt_root, d)) in keep_set:
+                    continue
                 shutil.rmtree(os.path.join(self.wt_root, d), ignore_errors=True)
                 n += 1
         self._git("worktree", "prune", check=False)

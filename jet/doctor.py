@@ -16,6 +16,19 @@ from .gitops import MIN_GIT
 Check = Tuple[str, str, str]   # (狀態, 名稱, 說明)
 
 
+def _own_pgids(cfg) -> set:
+    """資料庫裡狀態是 running 的測試行程群組（唯讀查；查不到就當沒有）。"""
+    try:
+        from . import ops, maintenance
+        con = ops.open_readonly(maintenance.db_path(cfg.state_dir))
+        try:
+            return {r[0] for r in con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL")}
+        finally:
+            con.close()
+    except Exception:
+        return set()
+
+
 def _git_version() -> Optional[Tuple[int, int]]:
     try:
         out = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10).stdout
@@ -124,7 +137,7 @@ def run_checks(cfg: config.Config, remote_timeout: float = 60,
         if missing:
             add("fail", "核池", f"池裡有這台機器上不能用的核：{missing[:8]}")
         else:
-            busy = sorted(foreign_busy(cfg.pool, set()))
+            busy = sorted(foreign_busy(cfg.pool, _own_pgids(cfg)))     # 排隊器自己正在跑的測試不算外人
             if busy:
                 add("warn", "核池", f"{len(cfg.pool)} 顆核都存在，但現在有外人行程綁在 {busy[:8]}…（共 {len(busy)} 顆），派工會避開")
             else:

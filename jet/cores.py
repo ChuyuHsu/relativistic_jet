@@ -38,6 +38,14 @@ class CorePool:
     def release(self, cores: Iterable[int]) -> None:
         self.busy.difference_update(cores)
 
+    def reserve(self, cores: Iterable[int]) -> bool:
+        """接管上一代的工作：把指定的核記成忙。核不在池裡、或已經有人用就不接（回 False，什麼都不改）。"""
+        cores = set(cores)
+        if not cores or not cores <= set(self.all) or cores & self.busy:
+            return False
+        self.busy.update(cores)
+        return True
+
     def free_count(self) -> int:
         return len(self.all) - len(self.busy)
 
@@ -105,6 +113,18 @@ class PhysicalPool(CorePool):
     def release(self, cores: Iterable[int]) -> None:
         for c in cores:
             self.busy.difference_update(self._unit_of.get(c, (c,)))
+
+    def reserve(self, cores: Iterable[int]) -> bool:
+        cores = set(cores)
+        if not cores or not cores <= set(self.all):
+            return False
+        whole: Set[int] = set()
+        for c in cores:
+            whole |= set(self._unit_of.get(c, (c,)))          # 兄弟執行緒一起占住
+        if whole & self.busy:
+            return False
+        self.busy.update(whole)
+        return True
 
     def free_count(self) -> int:
         return len(self._free_units())
@@ -223,8 +243,21 @@ def own_leftovers(root: str, keep_pgids: Iterable[int] = (), proc_root: str = "/
     keep = set(keep_pgids)
     me = os.getpid()
     cand: Dict[int, Tuple[ProcInfo, str]] = {}
-    for p in scan_procs(proc_root):
-        if p.pid == me or p.state in ("Z", "X") or p.flags & PF_KTHREAD or p.pgrp in keep or p.sid in keep:
+    procs = scan_procs(proc_root)
+    by_pid = {p.pid: p for p in procs}
+
+    def protected(p: ProcInfo) -> bool:
+        """自己或任何祖先屬於受保護的群組（被接管的工作）：整串都不碰，包含自己 setsid 脫離群組的子行程。"""
+        q, hops = p, 0
+        while q is not None and hops < 64:
+            if q.pgrp in keep or q.sid in keep:
+                return True
+            q = by_pid.get(q.ppid)
+            hops += 1
+        return False
+
+    for p in procs:
+        if p.pid == me or p.state in ("Z", "X") or p.flags & PF_KTHREAD or (keep and protected(p)):
             continue
         try:
             cwd = os.readlink(f"{proc_root}/{p.pid}/cwd")
@@ -284,10 +317,23 @@ def foreign_busy(cores: Iterable[int], own_pgids: Set[int], *, baseline: Optiona
     base = default_baseline() if baseline is None else set(baseline)
     me = os.getpid()
     busy: Set[int] = set()
-    for p in (scan_procs() if procs is None else procs):
+    plist = scan_procs() if procs is None else procs
+    by_pid = {q.pid: q for q in plist} if own_pgids else {}
+
+    def ours(p: ProcInfo) -> bool:
+        """自己或祖先在我方群組：測試行程自己 setsid 脫離群組的子孫（例如引擎）也算我方。"""
+        q, hops = p, 0
+        while q is not None and hops < 64:
+            if q.pgrp in own_pgids or q.sid in own_pgids:
+                return True
+            q = by_pid.get(q.ppid)
+            hops += 1
+        return False
+
+    for p in plist:
         if p.pid == me or p.state in ("Z", "X") or p.flags & PF_KTHREAD:
             continue
-        if p.pgrp in own_pgids or p.sid in own_pgids:
+        if own_pgids and ours(p):
             continue
         try:
             aff = set(os.sched_getaffinity(p.pid))
