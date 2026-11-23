@@ -424,3 +424,14 @@ test('信箱：claim 每收件串一則、領了不重給、5 分鐘沒 ack 再�
   assert.equal((await (await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' })).json()).messages.length, 0);   // ack 後不再給
   assert.equal((await call(e, 'POST', '/api/outbox/claim', { actor: 'x' }, 'bad')).status, 401);
 });
+
+test('信箱 pending：HOOK／READ／TOKEN 都能查，不改狀態；領走後變 0', async () => {
+  const e = mkenv({ READ_TOKEN: 'rd' }); await approved(e, 'c1', 'th1'); await ev(e, 'c1', { kind: 'tested_red', approved_sha: SHA });
+  const g = tk => call(e, 'GET', '/api/outbox/pending', undefined, tk);
+  assert.equal((await g('bad')).status, 401);
+  for (const tk of ['h', 'rd', 't']) { const r = await (await g(tk)).json(); assert.deepEqual([r.pending, r.latest_id > 0], [1, true]); }
+  assert.equal((await (await g('h')).json()).pending, 1);                         // 查詢不改狀態
+  assert.equal((await call(e, 'POST', '/api/outbox/pending', {}, 'h')).status, 405);
+  await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' });
+  assert.deepEqual(await (await g('h')).json(), { pending: 0, latest_id: 0 });
+});

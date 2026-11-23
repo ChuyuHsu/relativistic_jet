@@ -187,3 +187,11 @@ export async function outboxAck(req, env) {
   const r = await env.DB.prepare(`UPDATE outbox SET sent_at=? WHERE sent_at IS NULL AND n IN (${ids.map(() => '?').join(',')})`).bind(now(), ...ids).run();
   return json({ acked: r.meta.changes });
 }
+
+// 只讀：現在領得到幾筆（沒 ack 且沒被領走，或領走超過 5 分鐘沒 ack）與其中最大的信箱編號。給「有信才叫醒」的哨兵用，不改任何狀態。
+export async function outboxPending(req, env) {
+  if (req.method !== 'GET') return json({ error: 'GET only' }, 405);
+  if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
+  const r = await env.DB.prepare('SELECT count(*) AS n, COALESCE(max(n),0) AS m FROM outbox WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(now() - CLAIM_TTL).first();
+  return json({ pending: r.n, latest_id: r.m });
+}
