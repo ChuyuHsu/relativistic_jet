@@ -171,7 +171,10 @@ export async function handle(req, env, ctx) {
         return no('版本沒變。被排隊器退回要重測請用 retest；被審查退回請改好再送審新版本');
       }
       if (!await upd(`submitted_commit=?,submitted_at=?,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,${APPROVAL_CLEAR},${QUEUE_CLEAR}`, String(body.commit), now())) return lost();
-      await notify(db, list(env.REVIEW_THREADS), c, 'review_requested', String(body.commit).slice(0, 12));
+      // 把上次被退回的原因帶進審查通知：審查要先確認它真的改掉再放行（送審會清掉 rejected_reason，所以從紀錄找最近一筆審查退回）
+      const lastRej = c.rejected_reason ? { note: `審查退回：${c.rejected_reason}` } : await db.prepare("SELECT note FROM events WHERE card_id=? AND note LIKE '審查退回：%' ORDER BY n DESC LIMIT 1").bind(c.id).first();
+      const prev = lastRej ? `｜上次退回原因（請確認已改掉才放行）：${String(lastRej.note).replace(/^審查退回：/, '').slice(0, 300)}` : '';
+      await notify(db, list(env.REVIEW_THREADS), c, 'review_requested', String(body.commit).slice(0, 12) + prev);
       return done(`送審 ${String(body.commit).slice(0, 12)}`);
     }
     if (act === 'reject') {

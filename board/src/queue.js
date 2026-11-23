@@ -253,7 +253,7 @@ export async function autoFlush(env) { return env.FIRE_ENABLED === '1' ? flush(e
 const NEXT = {
   drop_rejected: '要放棄請先把內容接過去（接手的卡要包含缺的檔），或跟總指揮說真的不要（帶 discard_reason）。卡已回到原階段。',
   drop_discarded: '請事後看一眼：卡號、不在 main 的改動筆數與放棄原因都在上面。',
-  review_requested: '請看 git diff 審查；通過就在看板對這張卡 approve（帶審過的 commit），要改就 reject 並寫原因。',
+  review_requested: '請看 git diff 審查（detail 若帶「上次退回原因」，先確認那一點真的改掉）；通過就在看板對這張卡 approve（帶審過的 commit），要改就 reject 並寫原因。',
   review_rejected: '審查退回：請依原因修改，改好 push 後對這張卡 submit 新版本。',
   tested_red: '自測紅：請看紅項修好，push 後 submit 新版本（若只是環境問題，請審查者 retest）。',
   rejected: '被排隊器退回：看原因修好 push 後 submit 新版本；沒改程式只想重跑，請審查者 retest。',

@@ -741,3 +741,15 @@ test('放棄理由要寫清楚：只寫卡號或太短的 400；已放棄的卡�
   // 已合併的卡不能補寫
   assert.equal((await call(e, 'PATCH', '/api/cards/nope', { discard_reason: '內容已在 main：逐檔比對 0 檔不同' })).status, 404);
 });
+
+test('重送審時，審查通知帶上次退回原因', async () => {
+  const e = { ...mkenv(), REVIEW_THREADS: 'rv' };
+  await claim(e, 'q1', 'th'); await act(e, 'q1', 'submit', { commit: SHA, actor: 'w' });
+  await call(e, 'POST', '/api/cards/q1/reject', { actor: 'rev', reason: '常數 MOVE_EPS 與父類撞名，請改名' });
+  const SHA2 = 'b'.repeat(40);
+  await act(e, 'q1', 'submit', { commit: SHA2, actor: 'w' });
+  const rows = (await e.DB.prepare("SELECT detail FROM outbox WHERE kind='review_requested' ORDER BY rowid").all()).results;
+  assert.equal(rows.length, 2);
+  assert.ok(!rows[0].detail.includes('上次退回'));
+  assert.match(rows[1].detail, /上次退回原因.*MOVE_EPS 與父類撞名/);
+});
