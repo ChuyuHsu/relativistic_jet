@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS branches(
 );
 CREATE INDEX IF NOT EXISTS branches_state ON branches(state);
 
+CREATE TABLE IF NOT EXISTS tracked(    -- 登記制：只管這張表裡的分支（設定 git.scope="tracked"）
+  branch TEXT PRIMARY KEY,
+  parent TEXT,                         -- 登記時帶的父分支（分支第一次被掃到時套用）
+  parent_applied INTEGER NOT NULL DEFAULT 0,
+  at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS approvals(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   branch TEXT NOT NULL, content_id TEXT NOT NULL,

@@ -15,6 +15,7 @@ class Config:
     remote: str
     main_branch: str = "main"
     branch_patterns: List[str] = field(default_factory=lambda: ["*"])
+    scope: str = "all"              # all＝符合樣式的都管；tracked＝只管登記過的
     fetch_interval_s: float = 15
     git_timeout_s: float = 900
     fetch_timeout_s: float = 3600
@@ -71,6 +72,7 @@ def parse(d: dict) -> Config:
         remote=_need(git, "remote", str),
         main_branch=git.get("main", "main"),
         branch_patterns=git.get("branch_patterns", ["*"]),
+        scope=git.get("scope", "all"),
         fetch_interval_s=git.get("fetch_interval_s", 15),
         git_timeout_s=git.get("timeout_s", 900),
         fetch_timeout_s=git.get("fetch_timeout_s", 3600),
@@ -136,6 +138,8 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.fetch_interval_s／timeout_s／fetch_timeout_s 必須 > 0")
     if not c.branch_patterns or not all(isinstance(x, str) for x in c.branch_patterns):
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
+    if c.scope not in ("all", "tracked"):
+        raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
     if c.batch_max < 1:
         raise ConfigError("limits.batch_max 必須 ≥ 1")
     if sorted(c.points) != c.points or any(p < 1 for p in c.points):

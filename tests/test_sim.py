@@ -20,7 +20,7 @@ class Sim:
         self.r = random.Random(seed)
         r = self.r
         self.cfg = config.parse({
-            "git": {"remote": "x"}, "paths": {"state_dir": os.path.join(tmp, "st")},
+            "git": {"remote": "x", "scope": r.choice(["all", "tracked"])}, "paths": {"state_dir": os.path.join(tmp, "st")},
             "cores": {"pool": f"0-{r.choice([5, 11, 31])}", "selftest_cores": 1, "batch_cores": 1,
                       "reserve_for_selftest": r.choice([0, 2, 4])},
             "limits": {"batch_max": r.choice([2, 4, 8, 16]), "double_fail_halt": r.choice([2, 3])},
@@ -37,6 +37,11 @@ class Sim:
                 raise MainMoved()
             orig(sha, expect)
             # 核心斷言：推上去的提交沒有「相對推之前 main」的新紅項，而且確實有過綠的測試紀錄
+            names = self.repo.stack_names_of(sha) if hasattr(self.repo, "stack_names_of") else []
+            if self.cfg.scope == "tracked":
+                for n in names:
+                    if not store.is_tracked(self.con, n):
+                        self.violations.append(f"推 main 帶了沒登記的分支 {n}")
             new_red = self.repo.reds_of(sha, "gate") - self.repo.reds_of(expect, "gate")
             if new_red:
                 self.violations.append(f"推 main 帶新紅 {sha} {new_red}")
@@ -72,6 +77,24 @@ class Sim:
                     pass
                 self.pending_parent.remove((n, par))
         names = list(repo.branches)
+        if self.cfg.scope == "tracked":                  # 登記制：隨機登記、取消登記（取消時子孫要先取消）
+            if names and r.random() < 0.3 * p:
+                n = r.choice(names)
+                par = None
+                if r.random() < 0.3:
+                    cand = [m for m in store.tracked_names(self.con) if m != n]
+                    par = r.choice(cand) if cand else None
+                try:
+                    store.track(self.con, n, par, "sim")
+                except store.TrackError:
+                    pass
+            if r.random() < 0.05 * p:
+                tr = sorted(store.tracked_names(self.con))
+                if tr:
+                    try:
+                        store.untrack(self.con, r.choice(tr), "sim")
+                    except store.TrackError:
+                        pass
         if names and r.random() < 0.25 * p:
             n = r.choice(names)
             if store.get_branch(self.con, n):
@@ -110,6 +133,12 @@ class SimTest(unittest.TestCase):
                     sim.s.tick()
                 sim.ff_fail = 0.0
                 store.set_paused(sim.con, False, "sim")
+                if sim.cfg.scope == "tracked":
+                    for n in list(sim.repo.branches):
+                        try:
+                            store.track(sim.con, n, None, "sim")
+                        except store.TrackError:
+                            pass
                 for n in list(sim.repo.branches):
                     if store.get_branch(sim.con, n):
                         store.approve(sim.con, n, "sim")

@@ -65,6 +65,9 @@ class FakeRepo:
     def worktree(self, sha):
         yield sha
 
+    def stack_names_of(self, sha):
+        return sha.rsplit('>', 1)[1].split('+') if '>' in sha else []
+
     def is_ancestor(self, a, b):
         return b == a or b.startswith(a + ">")
 

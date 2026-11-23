@@ -391,3 +391,88 @@ class ManyCulprits(Base):
             self.repo.add(f"b{i}", gate_reds={"r"})
         self.go(120, until=lambda: all(self.state(f"b{i}") == "rejected" for i in range(1, 5)))
         self.assertEqual(self.repo.ff_log, [])
+
+
+class TrackedScope(Base):
+    def mk_t(self, **kw):
+        return self.mk(git={"scope": "tracked"}, policy={"require_approval": False}, **kw)
+
+    def test_untracked_branches_ignored(self):
+        self.mk_t()
+        self.repo.add("a"); self.repo.add("b")
+        store.track(self.con, "a")
+        self.go(40, until=lambda: self.state("a") == "merged")
+        self.assertIsNone(self.state("b"))                      # 沒登記的完全不理
+        self.assertEqual(self.repo.main, "m0>a")
+
+    def test_track_later_picks_up(self):
+        self.mk_t()
+        self.repo.add("a")
+        self.go(5)
+        self.assertEqual(store.list_branches(self.con), [])
+        store.track(self.con, "a")
+        self.go(40, until=lambda: self.state("a") == "merged")
+
+    def test_track_idempotent_and_events(self):
+        self.mk_t()
+        self.assertTrue(store.track(self.con, "a")["created"])
+        self.assertFalse(store.track(self.con, "a")["created"])
+        self.assertTrue(store.untrack(self.con, "a"))
+        self.assertFalse(store.untrack(self.con, "a"))
+        kinds = [r[0] for r in self.con.execute("SELECT kind FROM events ORDER BY id")]
+        self.assertEqual(kinds, ["tracked", "untracked"])
+        self.assertEqual(self.con.execute("SELECT count(*) FROM events WHERE resolved_at IS NULL").fetchone()[0], 0)
+
+    def test_untrack_cancels_selftest_and_clears_queue(self):
+        self.mk_t(delay=3)
+        self.repo.add("a"); self.repo.add("q")
+        store.track(self.con, "a"); store.track(self.con, "q")
+        self.go(60, until=lambda: self.state("a") == "selftesting")
+        store.untrack(self.con, "a")
+        self.go(2)
+        self.assertIsNone(self.state("a"))
+        self.assertEqual([j for j in self.s.jobs.values() if j.branch == "a"], [])
+        self.assertGreaterEqual(len(self.ex.cancelled), 1)
+        self.go(80, until=lambda: self.state("q") == "merged")  # 其他的照常
+
+    def test_untrack_queued_and_batching(self):
+        self.mk_t(delay=2)
+        for n in "abc":
+            self.repo.add(n); store.track(self.con, n)
+        self.go(80, until=lambda: self.state("a") == "batching")
+        store.untrack(self.con, "b")
+        self.go(80, until=lambda: self.merged() == {"a", "c"})
+        self.assertIsNone(self.state("b"))
+        self.assertNotIn("b", self.repo.main)
+
+    def test_approve_untracked_does_nothing(self):
+        self.mk_t()
+        self.repo.add("a")
+        self.go(3)
+        with self.assertRaises(store.NoSuchBranch):
+            store.approve(self.con, "a", "t")                   # 沒登記就沒有這條分支
+        self.go(10)
+        self.assertEqual(self.ex.started and [j.layer for j in self.ex.started if j.layer != "gate"], [])
+
+    def test_track_with_parent(self):
+        self.mk_t()
+        self.repo.add("p"); self.repo.add("c")
+        with self.assertRaises(store.TrackError):
+            store.track(self.con, "c", "p")                     # 父沒登記
+        store.track(self.con, "p"); store.track(self.con, "c", "p")
+        self.go(60, until=lambda: self.merged() == {"p", "c"})
+        self.assertEqual(self.repo.main, "m0>p+c")
+        with self.assertRaises(store.TrackError):
+            store.track(self.con, "x", "x")
+
+    def test_untrack_parent_with_children_refused(self):
+        self.mk_t()
+        store.track(self.con, "p"); store.track(self.con, "c", "p")
+        with self.assertRaises(store.TrackError):
+            store.untrack(self.con, "p")
+        store.untrack(self.con, "c"); store.untrack(self.con, "p")
+
+    def test_all_mode_unchanged(self):
+        self.mk(policy={"require_approval": False})
+        self.repo.add("a")
+        self.go(40, until=lambda: self.state("a") == "merged")

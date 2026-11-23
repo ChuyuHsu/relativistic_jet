@@ -95,6 +95,13 @@ def emit(con, kind, branch, detail: dict, commit_sha=None):
                 (kind, branch, json.dumps(detail, ensure_ascii=False, sort_keys=True), t, t, commit_sha))
 
 
+def add_info_event(con, kind, branch=None, detail=None):
+    """資訊型事件（tracked／untracked）：記錄用，不算待辦、不通知。"""
+    t = now()
+    con.execute("INSERT INTO events(kind,branch,detail,at,notified_at,resolved_at) VALUES(?,?,?,?,?,?)",
+                (kind, branch, detail, t, t, t))
+
+
 def audit(con, actor, action, args=None):
     con.execute("INSERT INTO audit(at,actor,action,args) VALUES(?,?,?,?)",
                 (now(), actor, action, json.dumps(args, ensure_ascii=False) if args is not None else None))
@@ -166,3 +173,66 @@ def set_paused(con, paused: bool, by="?"):
 
 def is_paused(con) -> bool:
     return get_meta(con, "paused", "0") == "1"
+
+
+# ---- 登記制（git.scope = "tracked"）----
+class TrackError(Exception):
+    """登記／取消登記的條件不符（介面回 400／409）。"""
+
+
+def is_tracked(con, branch) -> bool:
+    return _row(con, "SELECT 1 FROM tracked WHERE branch=?", branch) is not None
+
+
+def tracked_names(con) -> set:
+    return {r[0] for r in con.execute("SELECT branch FROM tracked")}
+
+
+def list_tracked(con) -> List[dict]:
+    out = []
+    for r in con.execute("SELECT t.branch, t.parent, t.at, b.state FROM tracked t "
+                         "LEFT JOIN branches b ON b.name=t.branch ORDER BY t.at, t.branch"):
+        out.append({"branch": r["branch"], "parent": r["parent"], "at": r["at"], "state": r["state"]})
+    return out
+
+
+def track(con, branch: str, parent: Optional[str] = None, by="?") -> dict:
+    """登記一條分支（冪等）。可帶父分支：父必須也登記過，或已合入。回 {created, branch, parent}。"""
+    if not isinstance(branch, str) or not branch.strip():
+        raise TrackError("branch 不能空")
+    if parent is not None:
+        if parent == branch:
+            raise TrackError("父分支不能是自己")
+        merged = _row(con, "SELECT 1 FROM branches WHERE name=? AND state='merged'", parent)
+        if not is_tracked(con, parent) and merged is None:
+            raise TrackError(f"父分支 {parent} 沒有登記（先登記父分支）")
+        if merged is not None:
+            parent = None                       # 父已合入＝普通分支
+        p = parent
+        while p is not None:                    # 登記表裡的父鏈不能成環
+            if p == branch:
+                raise TrackError("父分支不能成環")
+            r = _row(con, "SELECT parent FROM tracked WHERE branch=?", p)
+            p = r["parent"] if r else None
+    existing = _row(con, "SELECT parent FROM tracked WHERE branch=?", branch)
+    if existing is None:
+        con.execute("INSERT INTO tracked(branch,parent,parent_applied,at) VALUES(?,?,0,?)", (branch, parent, now()))
+        add_info_event(con, "tracked", branch, f"parent={parent}" if parent else None)
+        audit(con, by, "track", {"branch": branch, "parent": parent})
+        return {"created": True, "branch": branch, "parent": parent}
+    if parent is not None and parent != existing["parent"]:    # 重複登記帶了不同的父：更新
+        con.execute("UPDATE tracked SET parent=?, parent_applied=0 WHERE branch=?", (parent, branch))
+        audit(con, by, "track", {"branch": branch, "parent": parent})
+    return {"created": False, "branch": branch, "parent": parent or existing["parent"]}
+
+
+def untrack(con, branch: str, by="?") -> bool:
+    """取消登記（冪等）。回傳本來有沒有登記。正在跑的自測、排隊、批測由排隊器下一輪處理掉。"""
+    if _row(con, "SELECT 1 FROM tracked WHERE parent=?", branch) is not None:
+        raise TrackError(f"{branch} 還有登記著的子分支，先取消子分支")
+    existed = is_tracked(con, branch)
+    if existed:
+        con.execute("DELETE FROM tracked WHERE branch=?", (branch,))
+        add_info_event(con, "untracked", branch)
+        audit(con, by, "untrack", {"branch": branch})
+    return existed

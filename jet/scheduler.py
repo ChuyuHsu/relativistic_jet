@@ -163,10 +163,10 @@ class Scheduler:
 
     def _note_error(self, where: str, msg: str):
         """錯誤一律寫日誌；同一個訊息只發一次待辦事件，不洗版。"""
-        log.error("%s：%s", where, msg)
         self._put("last_error", {"at": self.clock(), "where": where, "message": msg})
         if msg != self._last_err_msg:
             self._last_err_msg = msg
+            log.error("%s：%s", where, msg)
             store.add_event(self.con, "queue_error", None, f"{where}：{msg}"[:500])
 
     def _fetch_sync(self):
@@ -263,8 +263,14 @@ class Scheduler:
     # ---------- 掃 Git ----------
     def _scan(self):
         remote = self.repo.list_branches()
+        outside = 0
+        if self.cfg.scope == "tracked":                      # 登記制：沒登記的完全不理
+            tr = store.tracked_names(self.con)
+            outside = sum(1 for n in remote if n not in tr)
+            remote = {n: s for n, s in remote.items() if n in tr}
         before = {r["name"]: r["head_sha"] for r in store.list_branches(self.con)}
-        stats = {"at": self.clock(), "remote": len(remote), "new": 0, "changed": 0, "dropped": 0,
+        stats = {"at": self.clock(), "scope": self.cfg.scope, "outside_scope": outside,
+                 "remote": len(remote), "new": 0, "changed": 0, "dropped": 0,
                  "main": self.main[:12]}
         for name, sha in remote.items():
             if name not in before:
@@ -283,6 +289,8 @@ class Scheduler:
             if row["name"] not in remote and row["state"] != S.MERGED.value:
                 stats["dropped"] += 1
                 self._drop(row)
+        if self.cfg.scope == "tracked":
+            self._apply_tracked_parents()
         stats["tracked"] = self.con.execute("SELECT count(*) FROM branches").fetchone()[0]
         prev = store.get_meta(self.con, "obs_scan")
         self._put("scan", stats)
@@ -290,8 +298,27 @@ class Scheduler:
             log.info("掃描：遠端 %d 條（新 %d、更新 %d、消失 %d），追蹤中 %d 條，main %s",
                      stats["remote"], stats["new"], stats["changed"], stats["dropped"],
                      stats["tracked"], stats["main"])
-        if stats["remote"] == 0 and stats["tracked"] == 0:
+        if stats["remote"] == 0 and stats["tracked"] == 0 and self.cfg.scope == "all":
             self._note_error("掃描", "遠端沒有符合 git.branch_patterns 的分支（樣式設定對嗎？用 jet doctor 檢查）")
+
+    def _apply_tracked_parents(self):
+        """登記時帶的父分支：等父分支也被掃到之後套用一次（之後的父變動走 /set-parent）。"""
+        for t in self.con.execute("SELECT branch, parent FROM tracked WHERE parent_applied=0").fetchall():
+            row = store.get_branch(self.con, t["branch"])
+            if row is None:
+                continue
+            if t["parent"] is None:
+                self.con.execute("UPDATE tracked SET parent_applied=1 WHERE branch=?", (t["branch"],))
+                continue
+            p = store.get_branch(self.con, t["parent"])
+            if p is None:
+                continue                                        # 父還沒被掃到，下一輪再來
+            if p["state"] != S.MERGED.value:
+                try:
+                    store.set_parent(self.con, t["branch"], t["parent"], "tracked")
+                except ValueError:                              # 跟人工設的父分支成環：以人工的為準
+                    pass
+            self.con.execute("UPDATE tracked SET parent_applied=1 WHERE branch=?", (t["branch"],))
 
     def _base_for(self, row) -> str:
         if row is not None and row["parent"]:
