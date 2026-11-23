@@ -147,6 +147,22 @@ class GitRepo:
         if not m or (int(m.group(1)), int(m.group(2))) < MIN_GIT:
             raise GitError(f"git 版本太舊（需要 ≥ {MIN_GIT[0]}.{MIN_GIT[1]}）：{out.strip()}")
 
+    @staticmethod
+    def _git_at_least(major: int, minor: int) -> bool:
+        try:
+            out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+        except OSError:
+            return False
+        m = re.search(r"(\d+)\.(\d+)", out)
+        return bool(m) and (int(m.group(1)), int(m.group(2))) >= (major, minor)
+
+    def _attr(self, commit: str) -> List[str]:
+        """合併時的 .gitattributes 取自這個提交的樹（bare 鏡像預設不讀樹裡的 .gitattributes，union 之類的 merge 驅動不會生效，
+        同一檔兩邊各附加幾列就被判撞檔）。需要 git ≥ 2.40；更舊的版本維持原行為。"""
+        if getattr(self, "_attr_ok", None) is None:
+            self._attr_ok = self._git_at_least(2, 40)
+        return ["--attr-source=" + commit] if self._attr_ok else []
+
     def _has(self, sha: str) -> bool:
         return self._git("cat-file", "-e", sha + "^{commit}", check=False).returncode == 0
 
@@ -222,7 +238,7 @@ class GitRepo:
     # ---- 合併（不碰工作目錄） ----
     def _merge_tree(self, tip: str, branch_sha: str, mb: str) -> Optional[str]:
         """以 mb 為共同祖先，把 branch 的改動套到 tip 上；回傳結果 tree，撞檔回 None。"""
-        r = self._git("merge-tree", "--write-tree", f"--merge-base={mb}", tip, branch_sha, check=False)
+        r = self._git(*self._attr(tip), "merge-tree", "--write-tree", f"--merge-base={mb}", tip, branch_sha, check=False)
         if r.returncode == 0:
             return r.stdout.split()[0]
         if r.returncode == 1:
@@ -241,7 +257,7 @@ class GitRepo:
         """把 branch 合進 target 試試看（不寫任何 ref）。回傳 (全部已包含, 差異檔清單)。
         已包含＝無衝突、而且合出來的 tree 跟 target 的 tree 完全相同（也就是合了什麼都不變）。"""
         ttree = self._out("rev-parse", f"{target}^{{tree}}")
-        r = self._git("merge-tree", "--write-tree", "--name-only", "--no-messages", target, branch_sha, check=False)
+        r = self._git(*self._attr(target), "merge-tree", "--write-tree", "--name-only", "--no-messages", target, branch_sha, check=False)
         if r.returncode not in (0, 1):                     # 例如沒有共同祖先：直接比兩邊的檔案
             out = self._git("diff", "--name-only", "-z", target, branch_sha).stdout
             return False, sorted(f for f in out.split("\0") if f)

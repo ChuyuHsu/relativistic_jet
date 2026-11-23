@@ -159,6 +159,26 @@ class Conflicts(Base):
         self.assertTrue(self.repo.conflicts_with(s, self.repo.main_sha()))
 
 
+class ConflictsUnionAttr(Base):
+    def test_union_attribute_in_tree_is_honored_in_bare_mirror(self):
+        """樹裡 .gitattributes 的 merge=union 在 bare 鏡像也要生效：兩邊各在尾端附加不同列不算撞檔。"""
+        if not GitRepo._git_at_least(2, 40):
+            self.skipTest("git < 2.40 沒有 --attr-source")
+        self.write(".gitattributes", "b.txt merge=union\n")
+        self.commit("加 union 屬性")
+        sh(self.dev, "push", "-q", "origin", "main")
+        self.repo.fetch()
+        s = self.make("f", {"b.txt": "bbb\nmine\n"})
+        sh(self.dev, "checkout", "-q", "main")
+        self.write("b.txt", "bbb\ntheirs\n")
+        self.commit("m")
+        sh(self.dev, "push", "-q", "origin", "main")
+        self.repo.fetch()
+        self.assertFalse(self.repo.conflicts_with(s, self.repo.main_sha()))
+        res = self.repo.stack(self.repo.main_sha(), [("f", s)])
+        self.assertEqual(res.kept, [0])
+
+
 def items(*pairs):
     return [(n, s) for n, s in pairs]
 
