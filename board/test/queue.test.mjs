@@ -608,3 +608,18 @@ test('放棄查驗事件沒帶 card、card 的 branch 欄是空的：用推導�
   const r = await (await hook(e, [{ id: 'dn:1', kind: 'drop_checked', branch: 'dev/old-2', unmerged: false, covered: true }])).json();
   assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'Old-2'), 'dropped');
 });
+
+test('放棄待查太久沒結果通知管理者一次；舊一輪的查驗結果不會套到新一輪', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' }); await claim(e, 'c1', 'th1'); await act(e, 'c1', 'submit', { commit: SHA });
+  await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', discard_reason: 'x' });
+  assert.equal((await stuckCheck(e)).notified, 0);
+  await e.DB.prepare('UPDATE cards SET dropping_at=dropping_at-3600').run();
+  assert.equal((await stuckCheck(e)).notified, 1);
+  assert.equal((await stuckCheck(e)).notified, 0);                                         // 同一輪不重複
+  const old = (await getCard(e, 'c1')).dropping_at;
+  // 預載後、送出前有人開了新一輪：UPDATE 條件帶 dropping_at，舊一輪的結果落空
+  const real = e.DB.batch.bind(e.DB);
+  e.DB.batch = async l => { await e.DB.prepare("UPDATE cards SET dropping_at=? WHERE id='c1'").bind(old + 100).run(); return real(l); };
+  await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, dropping_at: old });
+  assert.equal(await stageOf(e, 'c1'), 'dropping');
+});

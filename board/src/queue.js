@@ -97,7 +97,7 @@ export async function handleHook(req, env, ctx) {
         const ok = !card.superseded_by ? true : (!unmerged || covered);
         if (ok) {
           // 預載到送出之間若有人取消放棄或改掉，條件不成立就整組不寫（UPDATE 帶條件；events／outbox 用同條件的 EXISTS）
-          q("UPDATE cards SET status='dropped',drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL AND status!='dropped'", unmerged ? 1 : 0, T, T, card.id);
+          q("UPDATE cards SET status='dropped',drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at=? AND status!='dropped'", unmerged ? 1 : 0, T, T, card.id, card.dropping_at);
           Object.assign(card, { status: 'dropped', drop_unmerged: unmerged ? 1 : 0, drop_checked_at: T, updated_at: T });
           logEv(card.id, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND drop_checked_at=?`, card.id, T]);
           const dg = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND drop_checked_at=?`, card.id, T];
@@ -107,7 +107,7 @@ export async function handleHook(req, env, ctx) {
         } else {   // 放棄不成立：回到原階段，通知負責串與管理者
           const why = `這張卡還有改動不在 main，也不在 ${card.superseded_by} 裡${mc ? `（缺 ${mc} 個檔）` : ''}${missing ? `，缺的檔：${missing}` : ''}`;
           const owner = card.owner_thread || '';
-          q('UPDATE cards SET dropping_at=NULL,superseded_by=NULL,discard_reason=NULL,drop_unmerged=1,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at IS NOT NULL', T, T, card.id);
+          q('UPDATE cards SET dropping_at=NULL,superseded_by=NULL,discard_reason=NULL,drop_unmerged=1,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at=?', T, T, card.id, card.dropping_at);
           Object.assign(card, { dropping_at: null, superseded_by: null, discard_reason: null, drop_unmerged: 1, drop_checked_at: T, updated_at: T });
           const rg = ['SELECT 1 FROM cards WHERE id=? AND dropping_at IS NULL AND drop_checked_at=?', card.id, T];
           logEv(card.id, `放棄沒成立：${why}`, rg);
@@ -222,6 +222,15 @@ export async function stuckCheck(env) {
     const st = stageOf(c);
     if (!['developing', 'rejected', 'reviewing'].includes(st)) continue;
     const detail = `${{ developing: '開發中', rejected: '退回', reviewing: '審查中' }[st]}超過 ${hours} 小時沒動靜（負責串 ${c.owner_thread || '無'}）`;
+    for (const o of owners) await env.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind(o, c.id, c.branch, 'stuck', detail, t).run();
+    await env.DB.prepare('UPDATE cards SET stuck_notified_at=? WHERE id=?').bind(t, c.id).run();
+    n++;
+  }
+  // 放棄待查太久沒結果（排隊器沒回、或回的格式不全）：通知管理者一次（新的一輪才會再通知）
+  const dm = Number(env.DROP_STUCK_MIN ?? 30);
+  const dr = (await env.DB.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped' AND dropping_at<? AND (stuck_notified_at IS NULL OR stuck_notified_at<dropping_at)").bind(t - dm * 60).all()).results;
+  for (const c of dr) {
+    const detail = `放棄待查超過 ${dm} 分鐘還沒有查驗結果（排隊器沒回、或回的格式不全，請看 hook_log）`;
     for (const o of owners) await env.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind(o, c.id, c.branch, 'stuck', detail, t).run();
     await env.DB.prepare('UPDATE cards SET stuck_notified_at=? WHERE id=?').bind(t, c.id).run();
     n++;
