@@ -19,8 +19,7 @@ class JudgeTest(unittest.TestCase):
 
     def test_adjacent_red(self):
         v = judge(4, {2: GREEN, 4: RED})
-        self.assertEqual(v.state, "probe")
-        self.assertEqual(v.probe, [3])
+        self.assertEqual((v.state, v.merge_upto, v.culprit), ("done", 2, None))   # 先合乾淨的前 2 條
         v = judge(4, {2: GREEN, 4: RED}, {3: RED})
         self.assertEqual((v.merge_upto, v.culprit), (2, 3))
         v = judge(4, {2: GREEN, 4: RED}, {3: GREEN})
@@ -39,7 +38,9 @@ class JudgeTest(unittest.TestCase):
     def test_two_culprits_one_per_round(self):
         # 16 條，第 3、10 條紅：點 2 綠、4/8/16 紅 → 查 3
         r = {2: GREEN, 4: RED, 8: RED, 16: RED}
-        self.assertEqual(judge(16, r).probe, [3])
+        v0 = judge(16, r)                      # 已知前 2 條綠：先合，不等查兇手
+        self.assertEqual((v0.state, v0.merge_upto, v0.culprit), ("done", 2, None))
+        self.assertEqual(judge(16, {4: RED, 8: RED, 16: RED, 2: RED}).probe, [1])   # 第一點就紅：沒有可先合的，照舊逐條查
         v = judge(16, r, {3: RED})
         self.assertEqual((v.merge_upto, v.culprit), (2, 3))
 

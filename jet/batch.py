@@ -45,6 +45,9 @@ def judge(n: int, results: Dict[int, str], probes: Optional[Dict[int, str]] = No
     cands = list(range(g + 1, r))
     probes = probes or {}
     if cands:
+        if g > 0 and any(probes.get(c, PENDING) == PENDING for c in cands):
+            # 已證明乾淨的前 g 條先合進 main（不等兇手找出來）；其餘回隊伍最前面，下一批再測
+            return Verdict("done", merge_upto=g)
         if any(probes.get(c, PENDING) == PENDING for c in cands):
             return Verdict("probe", probe=cands)
         red_c = [c for c in cands if probes[c] == RED]
