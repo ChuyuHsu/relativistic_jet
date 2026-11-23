@@ -257,6 +257,22 @@ class StateEvents(CF):
         self.assertTrue(store.is_approved(self.con, "a", self.row("a")["content_id"]))
         self.go(until=lambda: self.merged() == {"a"})
 
+    def test_unresolvable_approved_sha_that_is_remote_tip_or_before_first_scan_is_not_superseded(self):
+        """重啟後放行版本的內容 id 暫時算不出來：放行版本就是遠端現在的頭、或本程序還沒掃過遠端，都不能發 superseded、不能撤放行。"""
+        self.mk()
+        self.repo.add("a"); self.appr("a")
+        self.go(until=lambda: self.state("a") in ("selftest_green", "queued", "batching"))
+        row = self.row("a")
+        self.repo.content_id = lambda sha, base: (_ for _ in ()).throw(RuntimeError("物件暫時取不到"))
+        for tips in (None, {"a": "a-9"}):                         # ①重啟後沒掃過 ②放行版本＝遠端頭（資料庫的頭還是舊的）
+            self.s._tips = tips; self.s._unres.clear(); self.s._unres_since.clear()
+            t = [1000.0]
+            self.s.clock = lambda: t[0]
+            for _ in range(10):
+                t[0] += 100                                      # 遠超過寬限
+                self.assertEqual(self.s._judge_approved(row, "a-9"), "unknown")
+        self.assertEqual(self.events("superseded", "a"), [])
+
     def test_rejected_then_pure_rebase_goes_back_with_same_approved_sha(self):
         self.mk()
         self.repo.add("a", conflict_main=True); self.appr("a")

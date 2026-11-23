@@ -26,8 +26,8 @@ from .states import Event, State
 
 log = logging.getLogger("jet")
 S = State
-UNKNOWN_GRACE_S = 120         # 放行版本解不出來（遠端拿不到）超過這麼久就當「內容不同」
 MAX_OVERLOAD_RETRY = 2        # 超載造成的逾時最多重排幾次，再逾時就當是測試自己慢
+UNKNOWN_GRACE_S = 120         # 掃過遠端後，放行版本（不是現在的頭）還解不出來超過這麼久，才當「內容不同」
 
 
 @dataclass
@@ -119,6 +119,7 @@ class Scheduler:
         self._entries: Optional[Dict[str, dict]] = None    # 清單最後一次成功的內容（依分支名）
         self._src_err_last: Optional[str] = None
         self._unres_since: Dict[Tuple[str, str], float] = {}
+        self._tips: Optional[Dict[str, str]] = None        # 本程序最近一次成功掃到的遠端分支頭（沒掃過是 None）
         self._unres: Dict[Tuple[str, str], float] = {}     # 解不出來的放行版本：稍後再試
         self._repulled = False                             # 這一輪是不是已經重拉過清單
         self._repull_ok = False
@@ -462,6 +463,7 @@ class Scheduler:
     # ---------- 掃 Git ----------
     def _scan(self):
         remote = self.repo.list_branches()
+        self._tips = dict(remote)
         outside = 0
         if self.cfg.scope == "tracked":                      # 登記制：沒登記的完全不理
             tr = store.tracked_names(self.con)
@@ -1345,6 +1347,12 @@ class Scheduler:
                 except Exception:
                     self._unres[(name, ap)] = now
             if cid is None:
+                # 這些情況一律 unknown（不撤放行、不發 superseded）：①本程序還沒成功掃過遠端（重啟後物件、清單都還沒到）；
+                # ②放行版本就是遠端現在的頭（只是資料庫裡的頭還沒跟上，內容 id 暫時算不出來）。
+                # 只有「掃過遠端、放行版本不是現在的頭、又一直拿不到」才算內容不同（被新提交蓋掉）。
+                if self._tips is None or self._tips.get(name) == ap:
+                    self._unres_since.pop((name, ap), None)
+                    return "unknown"
                 since = self._unres_since.setdefault((name, ap), now)
                 return "no" if now - since >= UNKNOWN_GRACE_S else "unknown"
         return "yes" if cid == row["content_id"] else "no"
