@@ -4,7 +4,7 @@
 
 ## 1. 需求
 
-Linux、Python ≥ 3.10、git ≥ 2.38、能讀寫目標 Git 遠端（推 `main`、刪已合入分支）。
+Linux、Python ≥ 3.9、git ≥ 2.38、能讀寫目標 Git 遠端（推 `main`、刪已合入分支）。
 不需要安裝套件：`git clone` 之後直接跑。
 
 ## 2. 目錄配置（建議）
