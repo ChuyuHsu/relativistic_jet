@@ -34,6 +34,7 @@
 
 看板只存事實，狀態是從事實算出來的，不另外存一份：
 
+- **列表端點（BD-02）**：`GET /api/cards` 預設只回進行中的卡（`open`／`claimed`／`waiting` 與放棄待查）；`?all=1` 回全部，`?stage=a,b` 指名階段（含 `merged`、`dropped`），`?status=` 照舊。`GET /api/stats` 回 `{stages:{<階段>:張數}, total}`。排隊器只用 `/api/queue/desired`，不受影響。
 - `status`：`open`／`claimed`／`merged`（已進 main；排隊器的 `merged` 事件寫入，輪詢掃不到）／`dropped`
 - `owner`：誰領的
 - `branch`、`parent`（父卡）

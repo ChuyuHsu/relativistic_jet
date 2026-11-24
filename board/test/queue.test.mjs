@@ -954,3 +954,21 @@ test('BD-01：事件表有 card_id 索引；migrate_015 把舊的已合併卡改
   for (const stmt of readFileSync(new URL('../migrate_015.sql', import.meta.url), 'utf8').split(';').map(s => s.replace(/--.*$/gm, '').trim()).filter(Boolean)) await e.DB.prepare(stmt).run();
   assert.equal((await e.DB.prepare("SELECT status FROM cards WHERE id='OLD'").first()).status, 'merged');
 });
+
+test('BD-02：列表預設只回進行中的卡；?all=1、?stage=merged,dropped 取歷史；父卡已合併仍補得到', async () => {
+  const e = mkenv();
+  await approved(e, 'P'); await claim(e, 'K', 'a', { parent: 'P' });
+  await claim(e, 'D'); await drop(e, 'D');
+  await call(e, 'POST', '/api/cards', { id: 'O', title: 'o' });
+  await ev(e, 'P', { kind: 'merged', approved_sha: SHA });
+  const ids = async q => (await (await call(e, 'GET', '/api/cards' + q)).json()).map(c => c.id).sort();
+  assert.deepEqual(await ids(''), ['K', 'O']);
+  assert.deepEqual(await ids('?all=1'), ['D', 'K', 'O', 'P']);
+  assert.deepEqual(await ids('?stage=merged'), ['P']);
+  assert.deepEqual(await ids('?stage=merged,dropped'), ['D', 'P']);
+  assert.deepEqual(await ids('?stage=new,developing'), ['K', 'O']);
+  const k = (await (await call(e, 'GET', '/api/cards')).json()).find(c => c.id === 'K');
+  assert.deepEqual([k.parent_stage, k.waiting_parent], ['merged', false]);                  // 父卡不在列表裡，用 IN 補查
+  const st = await (await call(e, 'GET', '/api/stats')).json();
+  assert.deepEqual([st.stages.merged, st.stages.dropped, st.stages.developing, st.stages.new, st.total], [1, 1, 1, 1, 4]);
+});

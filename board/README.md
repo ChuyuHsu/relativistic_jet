@@ -6,7 +6,7 @@
 完整的狀態流轉規格在 `docs/CARD_FLOW.md`（本元件與排隊器兩邊都以它為準）；這裡只列看板的實作要點。
 
 - **卡片與分支一對一，分支名領卡時由看板給**：`<BRANCH_PREFIX><卡號小寫>`（`BRANCH_PREFIX` 預設 `dev/`），領卡後不變；還卡後重領拿到同一條。呼叫端不能自己填。
-- **只存事實，狀態算出來**：儲存的只有 `status`（`open`／`claimed`／`dropped`）、負責人、分支、父卡、送審版本、放行版本、審查退回原因、`retest` 計數，以及排隊器最近回報的 `phase`／`last_result`。對外看 **`stage`**：`new` 剛開卡、`developing` 開發中、`reviewing` 審查中、`selftesting` 審查通過自測中、`batching` 自測完畢批測中、`merged` 已合併、`rejected` 退回、`dropped` 放棄；`GET /api/cards?stage=reviewing,rejected` 可過濾。退回的卡多一個 `rejected` 物件：`{source:"review"|"queue", halted, reason, failed_items}`。
+- **只存事實，狀態算出來**：儲存的只有 `status`（`open`／`claimed`／`merged`／`dropped`）、負責人、分支、父卡、送審版本、放行版本、審查退回原因、`retest` 計數，以及排隊器最近回報的 `phase`／`last_result`。對外看 **`stage`**：`new` 剛開卡、`developing` 開發中、`reviewing` 審查中、`selftesting` 審查通過自測中、`batching` 自測完畢批測中、`merged` 已合併、`rejected` 退回、`dropped` 放棄；`GET /api/cards?stage=reviewing,rejected` 可過濾。**列表預設只回進行中的卡**（`open`／`claimed`／`waiting` 與放棄待查），不含已合併與已放棄；要歷史帶 `?all=1`，或 `?stage=merged`、`?stage=dropped`、`?status=`。`GET /api/stats` 回各階段張數 `{stages:{…}, total}`（網頁頁首用）。退回的卡多一個 `rejected` 物件：`{source:"review"|"queue", halted, reason, failed_items}`。
 - **動作**（轉移表以外一律 409 並回現在的 `stage`；同一動作重送結果一樣）：
   `POST /api/cards/<id>/submit {commit,actor}` 送審（`developing`／`reviewing`／`selftesting`／`batching`／`rejected` 可用；新版本會清放行、審查退回與排隊器結果，並叫醒 `REVIEW_THREADS`）·
   `approve {commit,actor}` 放行（只有 `reviewing`；版本必須等於送審的（前綴比對，≥7 碼）；放行的人不能是領卡的人）·
