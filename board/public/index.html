@@ -130,10 +130,10 @@ function draw(){
     const tot=cnt(ks);
     if(!tot)return '';
     const isOpen=open[name]===undefined?def:open[name];
-    return `<details class="grp" data-g="${name}" data-k="${ks.join(',')}" ${isOpen?'open':''}><summary>${name}<span class="n">${tot}</span></summary>${isOpen?subs(ks):''}</details>`;
+    return `<details class="grp" data-g="${name}" data-k="${ks.join(',')}"${isOpen?' data-r="1"':''} ${isOpen?'open':''}><summary>${name}<span class="n">${tot}</span></summary>${isOpen?subs(ks):''}</details>`;
   }).join('')||'<div class="m">沒有卡</div>';
 }
-list.addEventListener('toggle',e=>{const d=e.target;if(d.dataset&&d.dataset.g){let o={};try{o=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(x){}o[d.dataset.g]=d.open;try{localStorage.setItem('rg',JSON.stringify(o))}catch(x){}if(d.open)ensureHist((d.dataset.k||'').split(','))}},true);
+list.addEventListener('toggle',e=>{const d=e.target;if(d.dataset&&d.dataset.g){let o={};try{o=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(x){}o[d.dataset.g]=d.open;try{localStorage.setItem('rg',JSON.stringify(o))}catch(x){}if(d.open){ensureHist((d.dataset.k||'').split(','));if(d.dataset.r!=='1')draw()}}},true);
 function panel(cls,h,body){redp.innerHTML=`<div class="card st ${cls}"><span class="dot"></span><div style="min-width:0;flex:1"><h2>${h}</h2>${body}</div></div>`}
 function redDraw(w){
   const L=w.red_items||[];
