@@ -560,3 +560,13 @@ class DropCheckContentTest(DropCheckTest):
         self.to_main({"b.txt": "other\n"})
         r = self.chk("x", "y")
         self.assertTrue(r["covered"])
+
+    def test_revert_to_pre_branch_version_is_missing(self):
+        self.to_main({"b.txt": "old\n"})
+        self.to_main({"b.txt": "current\n"})
+        self.branch("x", {"b.txt": "old\n"})                    # 分支故意把檔還原成開分支之前的舊版
+        self.to_main({"c.txt": "other\n"})                       # main 沒有還原
+        r = self.chk("x")
+        self.assertFalse(r["covered"])
+        self.assertTrue(r["unmerged"])
+        self.assertEqual(r["missing_files"], ["b.txt"])
