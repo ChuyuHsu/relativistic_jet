@@ -98,6 +98,7 @@ class GitRepo:
         self.work_dir = os.path.abspath(work_dir)
         self.mirror = os.path.join(self.work_dir, "mirror.git")
         self.wt_root = os.path.join(self.work_dir, "wt")
+        self.squashed_tips: frozenset = frozenset()    # 已合入（squash）的分支當時的尖端，由排隊器每輪更新
         self._check_version()
         os.makedirs(self.work_dir, exist_ok=True)
         if not os.path.isdir(self.mirror):
@@ -211,6 +212,20 @@ class GitRepo:
             raise GitError("兩個提交沒有共同祖先")
         return r.stdout.strip().split()[0]
 
+    def _merge_base_for(self, branch_sha: str, base_sha: str) -> str:
+        """分支跟 base 的共同祖先；疊卡的父卡被 squash 進 main 時，要改用「父卡的舊尖端」（squashed_tips）。
+        squash 後 main 上只有一個內容相同的新提交，普通 merge-base 會退回父卡開出來之前，三方合併就把父卡的改動
+        當成兩邊各改一次（子卡又動到同一處就撞檔）。做法：分支上、不在 base 裡的提交（新→舊）中，第一個是已合入分支的
+        舊尖端的，就當共同祖先；沒有就照舊用 merge-base。"""
+        tips = self.squashed_tips
+        if tips:
+            r = self._git("rev-list", "--topo-order", branch_sha, f"^{base_sha}", check=False)
+            if r.returncode == 0:
+                for c in r.stdout.split():
+                    if c in tips:
+                        return c
+        return self._merge_base(branch_sha, base_sha)
+
     def _is_ancestor(self, a: str, b: str) -> bool:
         return self._git("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
 
@@ -257,7 +272,7 @@ class GitRepo:
         子分支相對 main 重算，父分支那段已在 main 裡、不會算進去，指紋與當初相對父分支時相同。
         套不上去（撞檔）時退回直接看 merge-base..分支 的差；這和不撞時的算法不同，同一份內容可能算出
         不同指紋，結果是放行失效、要重新確認——偏安全的方向。"""
-        mb = self._merge_base(branch_sha, base_sha)
+        mb = self._merge_base_for(branch_sha, base_sha)
         tree = self._merge_tree(base_sha, branch_sha, mb)
         if tree is not None:
             diff = self._git("diff", "--no-color", "--no-ext-diff", base_sha, tree).stdout
@@ -285,7 +300,7 @@ class GitRepo:
         raise GitError(f"merge-tree 失敗（{r.returncode}）：{r.stderr.strip()[:400]}")
 
     def conflicts_with(self, branch_sha: str, base_sha: str) -> bool:
-        mb = self._merge_base(branch_sha, base_sha)
+        mb = self._merge_base_for(branch_sha, base_sha)
         return self._merge_tree(base_sha, branch_sha, mb) is None
 
     def _ref_sha(self, branch: str) -> Optional[str]:
@@ -381,7 +396,7 @@ class GitRepo:
                 if mb is None or self._is_ancestor(mb, c):
                     mb = c
             if mb is None:
-                mb = self._merge_base(b, base_sha)
+                mb = self._merge_base_for(b, tip)
             tree = self._merge_tree(tip, b, mb)
             if tree is None:
                 continue

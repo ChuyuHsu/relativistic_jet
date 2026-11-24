@@ -405,6 +405,7 @@ class Scheduler:
         self._check_pool()
         if not self._maybe_fetch():
             return
+        self._sync_squashed_tips()
         self.main = self.repo.main_sha()
         self._repulled = False
         self._source_step()
@@ -1623,9 +1624,20 @@ class Scheduler:
         store.apply_event(c, r["name"], Event.DOCS_MERGED, merged_sha=new)
         self._after_merge([r["name"]], new, None, main_before=main)
 
+    SQUASHED_TIPS_MAX = 300
+
+    def _sync_squashed_tips(self):
+        """把最近已合入分支的舊尖端交給 git 層：疊卡的父卡 squash 進 main 後，子卡只重放「父卡舊尖端..子卡」那一段。"""
+        if not hasattr(self.repo, "squashed_tips"):
+            return
+        rows = self.con.execute("SELECT head_sha FROM branches WHERE state=? ORDER BY updated_at DESC LIMIT ?",
+                                (S.MERGED.value, self.SQUASHED_TIPS_MAX)).fetchall()
+        self.repo.squashed_tips = frozenset(r[0] for r in rows if r[0])
+
     def _after_merge(self, names, new_main, failed: Optional[Set[str]], main_before: str):
         """合入後：基準、刪分支、子分支脫離、撞檔檢查。"""
         c = self.con
+        self._sync_squashed_tips()
         for n in names:
             row = store.get_branch(c, n)
             c.execute("UPDATE branches SET parent=NULL WHERE parent=?", (n,))
