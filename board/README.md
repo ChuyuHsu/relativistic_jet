@@ -45,7 +45,23 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 
 - **清理與額度防呆（BD-04）**：`hook_seen`（排隊器事件去重）記 `at`，每 10 分鐘的整理刪 7 天前的（7 天內重送仍去重）；資料庫額度（讀取／寫入列數）用完時，所有端點回 **503 `{"error":"d1_quota"}`**（帶 `retry-after`），不再讓 Cloudflare 回 1101。升級要跑 `migrate_017.sql`。
 
-升級已部署的資料庫：依序各跑一次 `migrate_001.sql`～`migrate_005.sql`，再跑 `schema.sql`。測試：`cd board && npm test`（Node 22，不需安裝套件）。
+**升級與部署一律用 `board/deploy.sh`**（`bash deploy.sh`）：讀 `meta.schema_version`，依序補跑還沒跑過的 `migrate_NNN.sql`（每支跑完記版本）→ `wrangler deploy` → 印出 Version ID → 打一次 `/api/workflow` 驗證（要設 `BOARD_URL`、`READ_TOKEN`，沒設會明講跳過）。空資料庫會直接跑 `schema.sql`；第一次用在「手動跑過 migration、還沒有 schema_version」的舊資料庫時，要用 `--baseline <N>` 指定它現在跑到第幾支（例如 `--baseline 14`），不帶會拒絕；`--dry-run` 只列出會跑哪些。新增 migration 時 `schema.sql` 末尾的 `schema_version` 要同步改成最大編號（有測試守著）。測試：`cd board && npm test`（Node 22，不需安裝套件）。
+
+## 讀取量（D1 `rows_read`）
+
+看板被輪詢，所以成本要看「每次輪詢讀幾列」，不是看卡有幾張。每次看板改版前後都要量一次、把前十名貼在這裡：
+
+```sh
+npx wrangler d1 insights task-board --remote --sort-type sum --sort-by reads --limit 10   # 依讀取列數排序的前十名查詢
+```
+
+判讀：看「讀取列數合計」與「執行次數」兩欄，`列數 ÷ 次數` 太大的是缺索引或掃全表（用 `EXPLAIN QUERY PLAN` 確認）；次數多的是被輪詢的端點。閒置時每次輪詢應該只讀 1 列（`meta.rev`，BD-03），讀取量跟「變動次數」成正比。
+
+| 日期 | 版本 | 前十名查詢與讀取列數 | 一天合計 | 備註 |
+| --- | --- | --- | --- | --- |
+| （BD-01 上線前） | | | | 待部署串填 |
+| （BD-01 上線後） | | | | 待部署串填 |
+| （BD-03 上線後） | | | | 待部署串填 |
 
 ## 信箱（收信端自己來領）
 
