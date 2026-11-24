@@ -222,8 +222,11 @@ export async function handle(req, env, ctx) {
       if (stage !== 'reviewing') return no();
       if (!sameCommit(String(body.commit), c.submitted_commit)) return no(`放行的版本與送審的版本不同（送審 ${c.submitted_commit.slice(0, 12)}），送審後可能又有新版本`);
       if (c.owner && actor === c.owner) return no('放行的人不能是領卡的人');
-      if (!await upd(`approved_commit=?,approved_by=?,approved_at=?,${QUEUE_CLEAR}`, String(body.commit), actor, now())) return lost();
-      return done(`放行 ${String(body.commit).slice(0, 12)}`);
+      // 排隊器要完整 hash 才認：放行帶短 hash 時，若送審的是完整 hash 且前綴對得上，就存送審的完整版；兩邊都是短的就拒收
+      const fullHash = String(body.commit).length >= 40 ? String(body.commit) : (c.submitted_commit && c.submitted_commit.length >= 40 ? c.submitted_commit : null);
+      if (!fullHash) return json({ error: '放行要帶完整的提交 hash（40 碼）：排隊器不認短 hash，短的會讓卡默默卡住', stage }, 400);
+      if (!await upd(`approved_commit=?,approved_by=?,approved_at=?,${QUEUE_CLEAR}`, fullHash, actor, now())) return lost();
+      return done(`放行 ${fullHash.slice(0, 12)}`);
     }
     if (act === 'revoke') {
       if (stage === 'reviewing') return json(view(c));
