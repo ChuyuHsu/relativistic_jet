@@ -6,7 +6,7 @@ export const STAGES = ['new', 'developing', 'reviewing', 'selftesting', 'batchin
 export function stageOf(c) {
   if (c.status === 'dropped') return 'dropped';
   if (c.status === 'waiting') return 'waiting_parent';   // 等待父卡（接手卡）進 main：還沒結案，接手卡合併後才轉放棄
-  if (c.phase === 'merged') return 'merged';
+  if (c.phase === 'merged' || c.status === 'merged') return 'merged';
   if (c.dropping_at) return 'dropping';
   if (c.status === 'open') return 'new';
   if (c.rejected_reason) return 'rejected';

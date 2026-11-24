@@ -34,7 +34,7 @@
 
 看板只存事實，狀態是從事實算出來的，不另外存一份：
 
-- `status`：`open`／`claimed`／`dropped`
+- `status`：`open`／`claimed`／`merged`（已進 main；排隊器的 `merged` 事件寫入，輪詢掃不到）／`dropped`
 - `owner`：誰領的
 - `branch`、`parent`（父卡）
 - `submitted_sha`：送審的版本

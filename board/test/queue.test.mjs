@@ -929,3 +929,28 @@ test('放行要完整 hash：送審是完整的，放行帶短前綴就補成完
   assert.equal(bad.status, 400); assert.match((await bad.json()).error, /完整/);
   assert.equal((await getCard(e, 'h2')).stage, 'reviewing');
 });
+
+test('BD-01：合併後 status 變 merged，不在 desired／卡住提醒的掃描範圍，父卡已合併的子卡仍省略 parent', async () => {
+  const e = mkenv();
+  await approved(e, 'P'); await claim(e, 'K', 'a', { parent: 'P' });
+  await ev(e, 'P', { kind: 'merged', approved_sha: SHA });
+  const row = await e.DB.prepare("SELECT status,phase FROM cards WHERE id='P'").first();
+  assert.deepEqual([row.status, row.phase], ['merged', 'merged']);
+  assert.equal((await e.DB.prepare("SELECT count(*) n FROM cards WHERE status='claimed'").first()).n, 1);   // 只剩真的在動的 K
+  const d = await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json();
+  assert.deepEqual(d, [{ branch: 'dev/k', priority: 100, retest: 0 }]);                                    // P 不在、K 不帶 parent
+  assert.equal(await stageOf(e, 'P'), 'merged');
+  assert.equal((await call(e, 'PATCH', '/api/cards/P', { status: 'dropped', discard_reason: '測試用：已合併的卡不能放棄' })).status, 409);
+  assert.equal((await ev(e, 'P', { kind: 'tested_green', approved_sha: SHA }).then(r => r.json())).stale, 1);   // 已合併後的過期事件丟掉
+  assert.equal((await ev(e, 'P', { kind: 'merged', approved_sha: SHA }).then(r => r.json())).applied, 1);       // merged 事實重送仍接受
+});
+
+test('BD-01：事件表有 card_id 索引；migrate_015 把舊的已合併卡改成 merged', async () => {
+  const e = mkenv();
+  const idx = (await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='events_card'").first());
+  assert.ok(idx);
+  await claim(e, 'OLD'); await e.DB.prepare("UPDATE cards SET phase='merged' WHERE id='OLD'").run();
+  const { readFileSync } = await import('node:fs');
+  for (const stmt of readFileSync(new URL('../migrate_015.sql', import.meta.url), 'utf8').split(';').map(s => s.replace(/--.*$/gm, '').trim()).filter(Boolean)) await e.DB.prepare(stmt).run();
+  assert.equal((await e.DB.prepare("SELECT status FROM cards WHERE id='OLD'").first()).status, 'merged');
+});
