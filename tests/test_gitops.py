@@ -570,3 +570,72 @@ class DropCheckContentTest(DropCheckTest):
         self.assertFalse(r["covered"])
         self.assertTrue(r["unmerged"])
         self.assertEqual(r["missing_files"], ["b.txt"])
+
+
+class SquashedParentTest(Base):
+    """JET-06：疊卡的父卡（多提交）被 squash 進 main 後，子卡、孫卡只重放自己那一段，不撞檔。"""
+
+    def lines(self, **ch):
+        return "".join((ch.get(f"l{i}") or f"line {i}\n") for i in range(1, 31))
+
+    def setUp(self):
+        super().setUp()
+        sh(self.dev, "checkout", "-q", "-B", "p", "origin/main")
+        self.write("a.txt", self.lines(l5="P5\n"))
+        self.commit("p1")
+        self.write("a.txt", self.lines(l5="P5\n", l6="P6\n"))
+        self.commit("p2")
+        sh(self.dev, "push", "-q", "-f", "origin", "p")
+        sh(self.dev, "checkout", "-q", "-B", "c", "p")                 # 子卡接在父卡尖端上，改到父卡改過的那幾行
+        self.write("a.txt", self.lines(l5="P5\n", l6="C6\n", l7="C7\n"))
+        self.commit("c1")
+        sh(self.dev, "push", "-q", "-f", "origin", "c")
+        sh(self.dev, "checkout", "-q", "-B", "g", "c")
+        self.write("a.txt", self.lines(l5="P5\n", l6="C6\n", l7="G7\n"))
+        self.commit("g1")
+        sh(self.dev, "push", "-q", "-f", "origin", "g")
+        self.repo.fetch()
+        self.heads = self.repo.list_branches()
+
+    def squash_to_main(self, branch, content):
+        sh(self.dev, "checkout", "-q", "main")
+        sh(self.dev, "pull", "-q", "origin", "main")
+        self.write("a.txt", content)
+        self.commit(f"squash {branch}")
+        sh(self.dev, "push", "-q", "origin", "main")
+        self.repo.fetch()
+
+    def test_child_conflicts_without_tips_and_not_with(self):
+        self.squash_to_main("p", self.lines(l5="P5\n", l6="P6\n"))
+        main = self.repo.main_sha()
+        self.assertTrue(self.repo.conflicts_with(self.heads["c"], main))        # 舊行為：撞檔
+        self.repo.squashed_tips = frozenset([self.heads["p"]])
+        self.assertFalse(self.repo.conflicts_with(self.heads["c"], main))
+        r = self.repo.stack(main, [("c", self.heads["c"])])
+        self.assertEqual(r.kept, [0])
+
+    def test_content_id_same_as_relative_to_parent(self):
+        before = self.repo.content_id(self.heads["c"], self.heads["p"])         # 相對父卡算的放行指紋
+        self.squash_to_main("p", self.lines(l5="P5\n", l6="P6\n"))
+        self.repo.squashed_tips = frozenset([self.heads["p"]])
+        self.assertEqual(self.repo.content_id(self.heads["c"], self.repo.main_sha()), before)
+
+    def test_chain_child_then_grandchild(self):
+        self.squash_to_main("p", self.lines(l5="P5\n", l6="P6\n"))
+        self.repo.squashed_tips = frozenset([self.heads["p"]])
+        self.squash_to_main("c", self.lines(l5="P5\n", l6="C6\n", l7="C7\n"))
+        self.repo.squashed_tips = frozenset([self.heads["p"], self.heads["c"]])
+        main = self.repo.main_sha()
+        self.assertFalse(self.repo.conflicts_with(self.heads["g"], main))
+        r = self.repo.stack(main, [("g", self.heads["g"])])
+        self.assertEqual(r.kept, [0])
+
+    def test_real_conflict_still_detected(self):
+        self.squash_to_main("p", self.lines(l5="P5\n", l6="OTHER\n"))           # main 上同一行被別人改過
+        self.repo.squashed_tips = frozenset([self.heads["p"]])
+        self.assertTrue(self.repo.conflicts_with(self.heads["c"], self.repo.main_sha()))
+
+    def test_unrelated_branch_unaffected(self):
+        s = self.make("u", {"b.txt": "u\n"})
+        self.repo.squashed_tips = frozenset([self.heads["p"]])
+        self.assertFalse(self.repo.conflicts_with(s, self.repo.main_sha()))
