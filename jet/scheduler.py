@@ -317,11 +317,28 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
             self._note_error("核池", f"可用{'實體' if hasattr(self.pool, 'units') else ''}核只有 {n} 顆，單一工作要 {need} 顆，派不出工作"
                              + (f"（兄弟執行緒不在池裡而被排除的核：{ex[:16]}）" if ex else ""))
 
+    FETCH_RETRIES = 2          # fetch 失敗先原地重試幾次（偶發的連線限制、金鑰暫時驗不過），都失敗才記錯誤、發警示
+    FETCH_RETRY_WAIT_S = 5
+
+    def _fetch_retrying(self):
+        """git fetch；失敗先隔幾秒原地重試 FETCH_RETRIES 次，最後一次的錯誤才往上丟。"""
+        for i in range(self.FETCH_RETRIES + 1):
+            try:
+                self.repo.fetch()
+                if i:
+                    log.info("fetch 第 %d 次重試成功", i)
+                return
+            except Exception as e:
+                if i >= self.FETCH_RETRIES:
+                    raise
+                log.warning("fetch 失敗（%s），%d 秒後重試", str(e)[:200], self.FETCH_RETRY_WAIT_S)
+                time.sleep(self.FETCH_RETRY_WAIT_S)
+
     def _fetch_sync(self):
         t0 = time.time()
         self._put("fetch", {"state": "running", "started_at": t0})
         try:
-            self.repo.fetch()
+            self._fetch_retrying()
         except Exception as e:
             self._put("fetch", {"state": "error", "started_at": t0, "finished_at": time.time(), "error": str(e)})
             self._note_error("fetch 失敗", str(e))
@@ -335,7 +352,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
     def _fetch_worker(self, t0):
         """背景執行緒只做 git fetch，不碰資料庫（sqlite 連線不跨執行緒）；結果交給主執行緒記錄。"""
         try:
-            self.repo.fetch()
+            self._fetch_retrying()
             self._fetch_res = (True, None, t0, time.time())
         except Exception as e:
             self._fetch_res = (False, str(e), t0, time.time())
