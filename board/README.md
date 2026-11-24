@@ -47,6 +47,8 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 
 **升級與部署一律用 `board/deploy.sh`**（`bash deploy.sh`）：讀 `meta.schema_version`，依序補跑還沒跑過的 `migrate_NNN.sql`（每支跑完記版本）→ `wrangler deploy` → 印出 Version ID → 打一次 `/api/workflow` 驗證（要設 `BOARD_URL`、`READ_TOKEN`，沒設會明講跳過）。**查詢失敗或輸出解析不了一律非零退出，不寫入、不部署**（絕不把正式庫誤判成空的）；全新空資料庫要明確加 `--init` 才會跑 `schema.sql` 建表，沒加就拒絕；第一次用在「手動跑過 migration、還沒有 schema_version」的舊資料庫時，要用 `--baseline <N>` 指定它現在跑到第幾支（例如 `--baseline 14`），不帶會拒絕，採用 baseline 時會立刻寫進 `meta`；`--dry-run` 只列出會跑哪些、不寫。**目前正式庫的實況要由部署串確認後才決定 baseline**：前幾批是手動跑的（015、016，接著 018），017 還沒跑，所以版本不是單純一個數字——第一次用 `deploy.sh` 前，部署串先手動補跑 017 與 019，再用 `--baseline 19`。新增 migration 時 `schema.sql` 末尾的 `schema_version` 要同步改成最大編號（有測試守著）。測試：`cd board && npm test`（Node 22，不需安裝套件）。
 
+**寫程式的注意：條件式寫入不要用 `meta.changes` 判斷有沒有改到，要用 `RETURNING` 的列數**（`UPDATE … RETURNING id` 再數 `.all().results.length`）。`rev` 觸發器會讓 D1 回報的 `changes` 把觸發器改的列也算進去（一次更新變成 2），拿它判斷會把贏家當成輸家。測試用的假 D1（`test/faked1.mjs`）已照這個行為算，漏掉會立刻紅。
+
 ## 讀取量（D1 `rows_read`）
 
 看板被輪詢，所以成本要看「每次輪詢讀幾列」，不是看卡有幾張。每次看板改版前後都要量一次、把前十名貼在這裡：
