@@ -1062,3 +1062,15 @@ test('BD-06：已放行超過 10 分鐘卻不在快照裡：發一次 queue_erro
   await snap(e, []); await snap(e, []);
   assert.equal((await pending(e)).filter(x => x.kind === 'queue_error' && x.card_id === 'c1').length, 1);
 });
+
+test('BD-06：快照補上接手卡的 merged 時，等它的卡一樣自動結案並收到 waiting_done', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'boss' });
+  await approved(e, 'B'); await claim(e, 'A', 'dev-a');
+  await call(e, 'PATCH', '/api/cards/A', { status: 'dropped', superseded_by: 'B', discard_reason: '測試用：改由 B 接手這張卡的內容' });
+  await ev(e, 'A', { kind: 'drop_checked', unmerged: true, covered: true });
+  assert.equal(await stageOf(e, 'A'), 'waiting_parent');
+  await snap(e, [{ branch: 'dev/b', state: 'merged', approved_sha: SHA, retest: 0 }]);
+  assert.equal(await stageOf(e, 'B'), 'merged');
+  assert.equal(await stageOf(e, 'A'), 'dropped');
+  assert.ok((await pending(e)).some(x => x.kind === 'waiting_done' && x.card_id === 'A'));
+});

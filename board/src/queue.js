@@ -69,6 +69,21 @@ export async function handleHook(req, env, ctx) {
     : q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', id, T, source, note);
   const hl = (e, outcome) => { logged = true; q('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)', T, JSON.stringify(e).slice(0, 600), outcome); };
   const groups = [], hotNew = new Set();
+  // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串；接龍（A 等 B、B 等 C）一路結案到底。merged 事件與快照對帳共用
+  const closeWaiting = async card => {
+      const seen = new Set([card.id]), todo = [card.id];
+      while (todo.length) {
+        const via = todo.shift();
+        for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(via).all()).results) {
+          if (seen.has(k.id)) continue;
+          seen.add(k.id); todo.push(k.id);
+          const g = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T];
+          q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
+          logEv(k.id, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），等待結束：轉放棄（結案）`, g);
+          post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），這張卡已結案`, g);
+        }
+      }
+  };
   for (const e of events) {
     cur = []; const a0 = applied;
     await (async () => {
@@ -150,7 +165,7 @@ export async function handleHook(req, env, ctx) {
           if (c.phase_at && c.phase_at > snapAt) continue;
           const was = c.phase || '無';
           patch(c, { phase: st, phase_at: T, updated_at: T });
-          if (st === 'merged') patch(c, { status: 'merged' });
+          if (st === 'merged') { patch(c, { status: 'merged' }); await closeWaiting(c); }   // 與 merged 事件相同：等它的卡一起結案
           logEv(c.id, `快照對帳：階段 ${was} → ${st}`);
           if (st === 'rejected') post([c.owner_thread || ''], c, 'rejected', c.branch, '排隊器快照顯示這張卡已被退回（進度事件被當成過期丟掉了），請看自測結果');
           else if (st === 'halted') post(admins.length ? admins : [c.owner_thread || ''], c, 'halted', c.branch, '排隊器快照顯示這條分支暫停');
@@ -236,20 +251,7 @@ export async function handleHook(req, env, ctx) {
         patch(card, { last_result: JSON.stringify(res) });
       }
       logEv(card.id, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`);
-      if (kind === 'merged') {   // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串；接龍（A 等 B、B 等 C）一路結案到底
-        const seen = new Set([card.id]), todo = [card.id];
-        while (todo.length) {
-          const via = todo.shift();
-          for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(via).all()).results) {
-            if (seen.has(k.id)) continue;
-            seen.add(k.id); todo.push(k.id);
-            const g = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T];
-            q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
-            logEv(k.id, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），等待結束：轉放棄（結案）`, g);
-            post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），這張卡已結案`, g);
-          }
-        }
-      }
+      if (kind === 'merged') await closeWaiting(card);
       // 通知：被排隊器退回、內容變了 → 領卡的開發者；暫停、父卡擋住 → 管理者
       if (ADMIN_KINDS.has(kind)) post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
       else if (ATTENTION.has(kind)) post([card.owner_thread || ''], card, kind, branch, detail);
