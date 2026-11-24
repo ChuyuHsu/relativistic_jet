@@ -12,7 +12,7 @@ const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red
 // 需要人處理、要叫醒負責串的種類
 const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);   // → 領卡的開發者
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者
-const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
+const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  waiting_done: '接手卡已進 main，等待中的卡已結案',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
 // 一批事件在記憶體裡依序處理（卡片狀態用預載的副本，邊處理邊更新），所有寫入收成語句，最後用 D1 batch 一次送出
 // （每個事件的語句整組同進同出，不跨 batch 切開）：一批 50 筆只有幾次往返，一組失敗不會留下做一半的事件。
@@ -103,10 +103,17 @@ export async function handleHook(req, env, ctx) {
         const ok = !card.superseded_by ? true : (!unmerged || covered);
         if (ok) {
           // 預載到送出之間若有人取消放棄或改掉，條件不成立就整組不寫（UPDATE 帶條件；events／outbox 用同條件的 EXISTS）
-          q("UPDATE cards SET status='dropped',drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at=? AND status!='dropped'", unmerged ? 1 : 0, T, T, card.id, card.dropping_at);
-          Object.assign(card, { status: 'dropped', drop_unmerged: unmerged ? 1 : 0, drop_checked_at: T, updated_at: T });
-          logEv(card.id, `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND drop_checked_at=?`, card.id, T]);
-          const dg = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND drop_checked_at=?`, card.id, T];
+          // 接手卡還沒進 main：不算放棄，進「等待父卡」，接手卡合併後才轉放棄
+          let sup = card.superseded_by ? byId.get(card.superseded_by) : null;
+          if (card.superseded_by && !sup) { sup = await db.prepare('SELECT * FROM cards WHERE id=?').bind(card.superseded_by).first(); if (sup) byId.set(sup.id, sup); }
+          const waiting = !!(sup && sup.phase !== 'merged' && sup.status !== 'dropped');
+          const fin = waiting ? 'waiting' : 'dropped';
+          q("UPDATE cards SET status=?,dropping_at=?,drop_unmerged=?,drop_checked_at=?,updated_at=? WHERE id=? AND dropping_at=? AND status!='dropped'", fin, waiting ? null : card.dropping_at, unmerged ? 1 : 0, T, T, card.id, card.dropping_at);
+          Object.assign(card, { status: fin, dropping_at: waiting ? null : card.dropping_at, drop_unmerged: unmerged ? 1 : 0, drop_checked_at: T, updated_at: T });
+          logEv(card.id, waiting ? `放棄查驗通過，但接手卡 ${card.superseded_by} 還沒進 main：進等待父卡，接手卡合併後自動結案` : `放棄查驗通過（${unmerged ? `有改動不在 main，缺 ${mc} 個檔` : '沒有漏掉的改動'}）`, [`SELECT 1 FROM cards WHERE id=? AND status=? AND drop_checked_at=?`, card.id, fin, T]);
+          const dg = [`SELECT 1 FROM cards WHERE id=? AND status=? AND drop_checked_at=?`, card.id, fin, T];
+          if (fin === 'dropped') for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(card.id).all()).results)   // 等的接手卡也被放棄了：要人決定
+            post(admins.length ? admins : [k.owner_thread || ''], k, 'parent_blocked', k.branch, `接手卡 ${card.id} 被放棄，等待中的 ${k.id} 要改接別張卡`, dg);
           const kids = (await db.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(card.id).all()).results;   // 子卡被擋住，通知管理者
           for (const k of kids) post(admins.length ? admins : [k.owner_thread || ''], k, 'parent_blocked', k.branch, `父卡 ${card.id} 被放棄，請改接別張卡或直接接 main`, dg);
           if (unmerged && !card.superseded_by) post(admins.length ? admins : [''], card, 'drop_discarded', card.branch, `缺 ${mc} 個檔${missing ? `：${missing}` : ''}；放棄原因：${card.discard_reason}`, dg);
@@ -142,6 +149,13 @@ export async function handleHook(req, env, ctx) {
         patch(card, { last_result: JSON.stringify(res) });
       }
       logEv(card.id, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`);
+      if (kind === 'merged') {   // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串
+        for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(card.id).all()).results) {
+          q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
+          logEv(k.id, `接手卡 ${card.id} 已進 main，等待結束：轉放棄（結案）`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T]);
+          post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${card.id} 已進 main，這張卡已結案`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T]);
+        }
+      }
       // 通知：被排隊器退回、內容變了 → 領卡的開發者；暫停、父卡擋住 → 管理者
       if (ADMIN_KINDS.has(kind)) post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
       else if (ATTENTION.has(kind)) post([card.owner_thread || ''], card, kind, branch, detail);

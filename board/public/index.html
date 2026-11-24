@@ -15,8 +15,8 @@ h1{font-size:20px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 </style></head><body>
 <h1>任務看板</h1><div class="v"><button data-v="g" class="on">關係圖</button><button data-v="l">列表</button></div><div id="gv"></div><div id="lv" hidden><div class="tabs" id="tabs"></div><div id="list">載入中…</div></div>
 <script>
-const S={new:'剛開卡',developing:'開發中',reviewing:'審查中',selftesting:'審查通過自測中',batching:'自測完畢批測中',merged:'已合併',rejected:'退回',dropping:'放棄待查',dropped:'放棄'};
-const COL={new:'#8e8e93',developing:'#0a84ff',reviewing:'#bf5af2',selftesting:'#ff9f0a',batching:'#e08a00',merged:'#30a05a',rejected:'#ff453a',dropping:'#8e6a3c',dropped:'#636366'};
+const S={new:'剛開卡',developing:'開發中',reviewing:'審查中',selftesting:'審查通過自測中',batching:'自測完畢批測中',merged:'已合併',rejected:'退回',waiting_parent:'等待父卡',dropping:'放棄待查',dropped:'放棄'};
+const COL={new:'#8e8e93',developing:'#0a84ff',reviewing:'#bf5af2',selftesting:'#ff9f0a',batching:'#e08a00',merged:'#30a05a',rejected:'#ff453a',waiting_parent:'#c9a227',dropping:'#8e6a3c',dropped:'#636366'};
 let cards=[],cur='reviewing',view='g',sel=null,showDone=false;
 try{view=localStorage.getItem('rv')||'g'}catch(e){}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));

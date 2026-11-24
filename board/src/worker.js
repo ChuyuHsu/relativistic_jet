@@ -30,7 +30,7 @@ const view = c => {
       ? { source: 'review', reason: c.rejected_reason, by: c.rejected_by }
       : { source: 'queue', halted: c.phase === 'halted', reason: result ? result.detail : null, failed_items: result ? result.failed_items : null };
   }
-  const dropped = ['dropping', 'dropped'].includes(stage) ? { superseded_by: c.superseded_by ?? null, discard_reason: c.discard_reason ?? null, unmerged: c.drop_unmerged == null ? null : !!c.drop_unmerged, checked_at: c.drop_checked_at ?? null } : null;
+  const dropped = ['dropping', 'dropped', 'waiting_parent'].includes(stage) ? { superseded_by: c.superseded_by ?? null, discard_reason: c.discard_reason ?? null, unmerged: c.drop_unmerged == null ? null : !!c.drop_unmerged, checked_at: c.drop_checked_at ?? null } : null;
   return { ...c, last_result: undefined, result, stage, rejected, dropped };
 };
 const CLEAR_REVIEW = 'submitted_commit=NULL,submitted_at=NULL,rejected_reason=NULL,rejected_by=NULL,rejected_at=NULL,approved_commit=NULL,approved_by=NULL,approved_at=NULL';
@@ -73,6 +73,7 @@ async function badParent(db, id, parent) {
 // 放棄理由要寫清楚：只寫卡號或太短的不算（要寫被哪張取代、哪個提交已在 main、或哪項定案撤掉）
 function reasonProblem(why) {
   const t = String(why || '').trim();
+  if (/父卡|等[^，。；]{0,8}合併|等待/.test(t)) return '放棄理由不能是「等父卡／等待合併」這類：還在等的卡請帶 superseded_by（接手卡），接手卡進 main 前會列在「等待父卡」，進 main 後自動結案；放棄只給真的不再需要的卡';
   if (t.length < 10 || /^[A-Za-z0-9_.\/-]+$/.test(t)) return 'discard_reason 要寫清楚為什麼這張卡本身不再需要（被哪張取代、哪個提交已在 main、或哪項定案撤掉）；只寫卡號或太短的不算，父卡放棄也不是理由';
   return null;
 }
@@ -273,6 +274,10 @@ export async function handle(req, env, ctx) {
     }
     if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
     const resend = body.status === 'dropped' && Object.keys(body).every(k => ['status', 'actor', 'superseded_by', 'discard_reason', 'note'].includes(k));
+    if (stageOf(c) === 'waiting_parent') {   // 等待父卡：等接手卡進 main 自動結案；只允許重送放棄（回現況）
+      if (body.status === 'dropped' && resend) return json(view(c));
+      return json({ error: '等待父卡中（接手卡還沒進 main），接手卡進 main 後自動結案', stage: 'waiting_parent' }, 409);
+    }
     if (stageOf(c) === 'dropping' && !resend) return json({ error: '放棄待查中，等排隊器查完才能動這張卡', stage: 'dropping' }, 409);   // 待查中一律不能改（重送放棄請求除外，見下）
     const sets = [], vals = [];
     if ('branch' in body) return json({ error: '分支名由看板給定，領卡後不會變' }, 400);

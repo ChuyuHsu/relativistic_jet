@@ -551,10 +551,10 @@ test('放棄防呆：drop_checked——covered 才放棄，否則回原階段並
   assert.ok(box.some(b => b.owner_thread === 'th1') && box.some(b => b.owner_thread === 'adm') && /a\.gd、b\.gd/.test(box[0].detail));
   await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c2' });
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: true });
-  const ok = await getCard(e, 'c1'); assert.equal(ok.stage, 'dropped'); assert.equal(ok.dropped.unmerged, true);
+  const ok = await getCard(e, 'c1'); assert.equal(ok.stage, 'waiting_parent'); assert.equal(ok.dropped.unmerged, true);   // 接手卡 c2 還沒進 main
   // 過期／重複的查驗結果不動卡
   assert.equal((await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: false })).json()).stale, 1);
-  assert.equal((await getCard(e, 'c1')).stage, 'dropped');
+  assert.equal((await getCard(e, 'c1')).stage, 'waiting_parent');
   // 只帶 discard_reason：一律放棄；有漏的通知總指揮
   await claim(e, 'd1', 'thd'); await act(e, 'd1', 'submit', { commit: SHA });
   await call(e, 'PATCH', '/api/cards/d1', { status: 'dropped', discard_reason: '方向作廢：定案已撤掉這項功能' });
@@ -584,14 +584,14 @@ test('放棄防呆補強：待查中擋改欄位；晚到的上一輪查驗結�
   assert.equal(late2.stale, 1); assert.equal(await stageOf(e, 'c1'), 'dropping');
   const cur = (await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json()).drop_checks[0];
   await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: true, target: br('c3'), dropping_at: cur.dropping_at });
-  assert.equal(await stageOf(e, 'c1'), 'dropped');
+  assert.equal(await stageOf(e, 'c1'), 'waiting_parent');   // 接手卡 c3 還沒進 main：等待父卡，不算放棄
 });
 
 test('放棄防呆：接手分支還不存在時 target 是 main，仍算對得上這一輪', async () => {
   const e = mkenv(); await claim(e, 'c1', 'th1'); await call(e, 'POST', '/api/cards', { id: 'c9', title: 'c9' });
   await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped', superseded_by: 'c9' });
   const r = await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: false, covered: true, target: 'main' })).json();
-  assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'c1'), 'dropped');
+  assert.equal(r.applied, 1); assert.equal(await stageOf(e, 'c1'), 'waiting_parent');
 });
 
 test('desired 唯讀：TOKEN 也能讀，壞權杖 401', async () => {
@@ -752,4 +752,22 @@ test('重送審時，審查通知帶上次退回原因', async () => {
   assert.equal(rows.length, 2);
   assert.ok(!rows[0].detail.includes('上次退回'));
   assert.match(rows[1].detail, /上次退回原因.*MOVE_EPS 與父類撞名/);
+});
+
+test('等待父卡：接手卡沒進 main 先列等待父卡，接手卡合併後自動結案並通知；理由寫等父卡會 400', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await claim(e, 'w1', 'thw'); await claim(e, 'w2', 'th2');
+  await act(e, 'w2', 'submit', { commit: SHA, actor: 'w' }); await act(e, 'w2', 'approve', { commit: SHA, actor: 'rev' });
+  for (const bad of ['等父卡合併後再做這張', '父卡還沒進 main 先放著', '等 w2 合併再說吧']) assert.equal((await call(e, 'PATCH', '/api/cards/w1', { status: 'dropped', discard_reason: bad })).status, 400);
+  await call(e, 'PATCH', '/api/cards/w1', { status: 'dropped', superseded_by: 'w2' });
+  await ev(e, 'w1', { kind: 'drop_checked', unmerged: true, covered: true });
+  assert.equal(await stageOf(e, 'w1'), 'waiting_parent');
+  assert.equal((await call(e, 'PATCH', '/api/cards/w1', { title: 'x' })).status, 409);
+  const d = await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json();
+  assert.equal(d.drop_checks.length, 0); assert.ok(!d.cards.some(c => c.branch === br('w1')));
+  await ev(e, 'w2', { kind: 'merged', commit: SHA, approved_sha: SHA });
+  assert.equal(await stageOf(e, 'w2'), 'merged');
+  assert.equal(await stageOf(e, 'w1'), 'dropped');
+  const box = (await e.DB.prepare("SELECT owner_thread FROM outbox WHERE kind='waiting_done'").all()).results.map(r => r.owner_thread);
+  assert.ok(box.includes('thw') && box.includes('adm'));
 });

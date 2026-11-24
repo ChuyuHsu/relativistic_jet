@@ -139,6 +139,7 @@
 - 排隊器查完回 `drop_checked` 事件（第 7 節）。帶 `superseded_by` 的：沒有不在 main 的改動、或接手的卡全都涵蓋（`covered`）才轉 `dropped`；否則放棄不成立，卡回到原階段，通知負責串與管理者（附缺的檔）。只帶 `discard_reason` 的：一律轉 `dropped`；有不在 main 的改動時另發通知給管理者（卡號、原因、缺的檔數），事後看一眼。
 - 卡片回傳 `dropped:{superseded_by, discard_reason, unmerged, checked_at}`（`dropping`、`dropped` 時才有）。
 - 只帶 `discard_reason`（沒帶 `superseded_by`）時，理由至少 10 個字、不能只是卡號，要寫被哪張取代、哪個提交已在 main、或哪項定案撤掉；父卡放棄不是理由，看板也不會因父卡放棄而連帶放棄子卡（只通知管理者、子卡被擋）。已放棄的卡只允許 `PATCH {actor, discard_reason}` 補寫理由這一欄（同樣檢查），其他欄位與狀態仍是 409。
+- **等待父卡**（`waiting_parent`，儲存值 `status=waiting`）：放棄帶 `superseded_by`、排隊器查驗通過，但接手卡還沒進 main（也沒被放棄）時，卡不算放棄，改進「等待父卡」；不進排隊清單、不能改。接手卡的 `merged` 事件進來時自動轉 `dropped`（結案）並通知負責串與管理者（`waiting_done`）；接手卡若被放棄，通知管理者（`parent_blocked`）要改接。放棄列表只放真的結案的卡：`discard_reason` 含「父卡」「等…合併」「等待」一律 400，請改帶 `superseded_by`。
 
 ## 5. 四條一定要守的規則
 
