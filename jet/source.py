@@ -98,9 +98,17 @@ def parse_payload(data):
     return parse_list(data), drops
 
 
-def http_fetch_full(url: str, token_file: Optional[str], timeout: float):
+NOT_MODIFIED = object()      # 條件式讀取回 304：沿用上次的清單
+
+
+def http_fetch_full(url: str, token_file: Optional[str], timeout: float, etag: Optional[str] = None,
+                    etag_out: Optional[list] = None):
+    """拉清單。帶 etag 就送 If-None-Match；對方回 304 傳回 NOT_MODIFIED。
+    etag_out 若給一個 list，會把這次 200 回應的 etag 放進去（沒有就清空），讓呼叫端記住。"""
     # 有些代管平台會擋 urllib 預設的 User-Agent（回 403），所以自己報名字
     headers = {"Accept": "application/json", "User-Agent": "relativistic-jet"}
+    if etag:
+        headers["If-None-Match"] = etag
     if token_file:
         try:
             headers["Authorization"] = "Bearer " + read_token(token_file)
@@ -112,14 +120,20 @@ def http_fetch_full(url: str, token_file: Optional[str], timeout: float):
             if r.status != 200:
                 raise SourceError(f"對方回 {r.status}")
             body = r.read(8 << 20)
+            new_etag = r.headers.get("ETag")
     except urllib.error.HTTPError as e:
+        if e.code == 304 and etag:
+            return NOT_MODIFIED
         raise SourceError(f"對方回 {e.code}")
     except (urllib.error.URLError, OSError) as e:
         raise SourceError(f"連不上：{getattr(e, 'reason', e)}")
     try:
-        return parse_payload(json.loads(body.decode("utf-8")))
+        res = parse_payload(json.loads(body.decode("utf-8")))
     except ValueError as e:
         raise SourceError(f"不是合法的 JSON：{e}")
+    if etag_out is not None:
+        etag_out[:] = [new_etag] if new_etag else []
+    return res
 
 
 def http_fetch(url: str, token_file: Optional[str], timeout: float) -> List[dict]:
@@ -134,7 +148,10 @@ class SourcePoller:
                  clock: Callable[[], float] = time.time, threaded: bool = True):
         check_bearer_url(url) if token_file else None
         self.url, self.token_file, self.poll_s, self.timeout = url, token_file, poll_seconds, timeout
-        self._fetcher = fetcher or (lambda: http_fetch_full(self.url, self.token_file, self.timeout))
+        self._fetcher = fetcher or self._http_conditional
+        self._etag: Optional[str] = None         # 上次 200 回應的 etag（看板不支援就一直是 None）
+        self._last_payload = None                # 上次成功的 (清單, 放棄查核)，304 時沿用
+        self._unconditional = False              # True＝這次不帶 If-None-Match（推 main 前的確認）
         self.clock, self.threaded = clock, threaded
         self.entries: Optional[List[dict]] = None
         self.ok_at: Optional[float] = None       # 最後一次成功的時間
@@ -146,6 +163,17 @@ class SourcePoller:
         self._thread: Optional[threading.Thread] = None
         self._res = None
 
+    def _http_conditional(self):
+        """預設拉法：記住上次的 etag，下次帶 If-None-Match；304 回 NOT_MODIFIED。"""
+        out: list = []
+        use = None if self._unconditional or self._last_payload is None else self._etag
+        res = http_fetch_full(self.url, self.token_file, self.timeout, etag=use, etag_out=out)
+        if res is NOT_MODIFIED:
+            return res
+        self._etag = out[0] if out else None
+        self._last_payload = res
+        return res
+
     def _work(self):
         try:
             self._res = (True, self._fetcher())
@@ -156,6 +184,9 @@ class SourcePoller:
         """收結果；回傳新出現的錯誤訊息（給主行程發事件），沒有就 None。"""
         ok, val = self._res
         self._res = None
+        if ok and val is NOT_MODIFIED:               # 304：沿用上次清單，只更新最後成功時間，不當新資料
+            self.ok_at, self.error = self.clock(), None
+            return None
         if ok:
             if isinstance(val, tuple):               # (清單, 放棄查核)
                 val, self.drops = val[0], val[1]
@@ -195,7 +226,11 @@ class SourcePoller:
                 return "上一次拉取還沒回來"
             self._thread = None
             self._take()
-        self._work()
+        self._unconditional = True                   # 推 main 前那一次維持無條件讀取
+        try:
+            self._work()
+        finally:
+            self._unconditional = False
         self._take()
         return self.error
 
