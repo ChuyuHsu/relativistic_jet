@@ -84,6 +84,15 @@ export async function handleHook(req, env, ctx) {
         if (e.loop && (e.loop.state === 'green' || e.loop.last_result === 'green')) q("DELETE FROM meta WHERE key='main_red'");
         applied++; return;
       }
+      if (kind === 'loop_perf') {   // 背景測試一輪的效能量測：{main_sha, perf:{kind, wall_s, cores, cpu_util, items, top:[{item,secs}]}}；留最近 200 輪，給優化參考
+        const p = e.perf && typeof e.perf === 'object' ? e.perf : null;
+        const num = v => (v == null || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
+        if (!p || num(p.wall_s) == null) { stale++; hl(e, 'loop_perf 要帶 perf.wall_s（數字）'); return; }
+        const top = (Array.isArray(p.top) ? p.top : []).slice(0, 30).map(x => ({ item: String((x && (x.item ?? x.item_id ?? x.name)) ?? x).slice(0, 120), secs: num(x && x.secs) ?? 0 }));
+        q('INSERT INTO loop_perf(at,main_sha,kind,wall_s,cores,cpu_util,items,top) VALUES(?,?,?,?,?,?,?,?)', T, e.main_sha ? String(e.main_sha).slice(0, 40) : null, p.kind ? String(p.kind).slice(0, 40) : null, num(p.wall_s), num(p.cores), num(p.cpu_util), num(p.items), JSON.stringify(top));
+        q('DELETE FROM loop_perf WHERE n NOT IN (SELECT n FROM loop_perf ORDER BY n DESC LIMIT 200)');
+        applied++; return;
+      }
       if (kind === 'loop_red' || kind === 'loop_green') {   // 背景循環在 main 上紅／恢復綠：只記錄 main 紅狀態（顯示用），不開卡；開卡在 loop_culprit
         if (kind === 'loop_green') { q("DELETE FROM meta WHERE key='main_red'"); q("DELETE FROM meta WHERE key='triage'"); }
         else q("INSERT INTO meta(key,value,updated_at) VALUES('main_red',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify({ since: e.since ?? T, main_sha: e.main_sha ? String(e.main_sha).slice(0, 40) : null, failed_items: Array.isArray(e.failed_items) ? e.failed_items.slice(0, 20) : null, detail: e.detail ? String(e.detail).slice(0, 300) : null }).slice(0, 3000), T);

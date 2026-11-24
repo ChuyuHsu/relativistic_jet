@@ -271,3 +271,7 @@
 - 管理者回報：`POST /api/triage`（TOKEN）`{actor, main_sha?, verdict:"suspects"|"unknown", suspects:[{branch, commit?, reason?}], note?}`；`main_sha` 帶了就要對得上（409）；`suspects` 至少一個；沒有待判斷的紅燈回 404。
 - 排隊器讀：`GET /api/queue/desired?with=drop_checks` 的頂層多一個 `loop_suspect:{main_sha, branch}`（總指揮回報了 suspects 才有，與 `cards`、`drop_checks` 同層；多個嫌疑時給第一個）；也可 `GET /api/triage`（HOOK_TOKEN／READ_TOKEN／TOKEN）回 `{triage}`，`status` 為 `pending`（等人）、`answered`（已回報，看 `verdict`／`suspects`）、`resolved`（已送 `loop_culprit`）。排隊器讀到 `suspects` 只對嫌疑跑一次驗證，確認後照舊送 `loop_culprit` 開急修卡；`unknown` 就自己二分。
 - 送 `loop_culprit` 會把這筆標成 `resolved`；`loop_green` 清掉。
+
+### 背景測試效能（loop_perf）
+
+排隊器每輪背景測試結束送事件 `loop_perf`：`{kind, id, main_sha, perf:{kind, wall_s, cores, cpu_util, items, top:[{item, secs}]}}`（`perf.wall_s` 必填；`top` 是最慢的項目）。看板留最近 200 輪（`loop_perf` 表，`migrate_012.sql`）。`GET /api/perf?n=30`（TOKEN 或 READ_TOKEN）回 `{runs:[新到舊], slowest:[{item, runs, avg_s, max_s, last_s}]}`，`slowest` 是這 n 輪裡各項目的平均、最慢與最近耗時排行。看板頁首的「背景測試效能」區塊顯示每輪總耗時長條（滑過看時間與 CPU）、最新一輪的耗時／CPU／核數／項數，以及最慢項目排行。

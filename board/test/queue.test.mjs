@@ -893,3 +893,15 @@ test('/api/workflow：main 紅項與誰在修（急修卡、嫌疑分支）', as
   w = await (await call(e, 'GET', '/api/workflow')).json();
   assert.deepEqual(w.red_items, []);
 });
+
+test('背景測試效能：loop_perf 存下、/api/perf 回各輪與最慢項目排行', async () => {
+  const e = mkenv();
+  assert.deepEqual(await (await call(e, 'GET', '/api/perf')).json(), { runs: [], slowest: [] });
+  assert.equal((await (await hook(e, [{ id: 'p0', kind: 'loop_perf', main_sha: 'a', perf: {} }])).json()).stale, 1);
+  await hook(e, [{ id: 'p1', kind: 'loop_perf', main_sha: 'aaa', perf: { kind: 'full', wall_s: 600, cores: 16, cpu_util: 0.5, items: 100, top: [{ item: 'slow_a', secs: 100 }, { item: 'slow_b', secs: 50 }] } }]);
+  await hook(e, [{ id: 'p2', kind: 'loop_perf', main_sha: 'bbb', perf: { kind: 'full', wall_s: 500, cores: 16, cpu_util: 40, items: 100, top: [{ item_id: 'slow_a', secs: 60 }, { item: 'slow_c', secs: 70 }] } }]);
+  const p = await (await call(e, 'GET', '/api/perf')).json();
+  assert.equal(p.runs.length, 2); assert.equal(p.runs[0].main_sha, 'bbb');   // 新的在前
+  assert.deepEqual(p.slowest.map(s => [s.item, s.avg_s, s.max_s, s.last_s, s.runs]), [['slow_a', 80, 100, 60, 2], ['slow_c', 70, 70, 70, 1], ['slow_b', 50, 50, 50, 1]]);
+  assert.equal((await call(e, 'GET', '/api/perf', undefined, 'bad')).status, 401);
+});
