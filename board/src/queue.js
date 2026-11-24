@@ -68,7 +68,7 @@ export async function handleHook(req, env, ctx) {
     ? q(`INSERT INTO events(card_id,at,actor,note) SELECT ?,?,?,? WHERE EXISTS(${guard[0]})`, id, T, source, note, ...guard.slice(1))
     : q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', id, T, source, note);
   const hl = (e, outcome) => { logged = true; q('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)', T, JSON.stringify(e).slice(0, 600), outcome); };
-  const groups = [];
+  const groups = [], hotNew = new Set();
   for (const e of events) {
     cur = []; const a0 = applied;
     await (async () => {
@@ -92,9 +92,10 @@ export async function handleHook(req, env, ctx) {
       if (kind === 'loop_culprit') {   // 背景循環 bisect 出兇手（事件帶兇手分支名）：自動開一張急修卡（priority 0、area hotfix），通知兇手卡的負責串與管理者；同一個 id 只開一次
         const hid = String(e.hotfix_id || `HOTFIX-${String(e.main_sha || e.culprit_commit || e.commit || e.id || T).slice(0, 8)}`).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
         const cul = (e.culprit_card && byId.get(String(e.culprit_card))) || (e.culprit_branch && byBranch.get(String(e.culprit_branch))) || (branch && byBranch.get(branch)) || null;
-        if (await db.prepare('SELECT 1 FROM cards WHERE id=?').bind(hid).first()) { stale++; hl(e, `急修卡 ${hid} 已存在`); return; }
+        if (hotNew.has(hid) || await db.prepare('SELECT 1 FROM cards WHERE id=?').bind(hid).first()) { stale++; hl(e, `急修卡 ${hid} 已存在`); return; }
         const items = Array.isArray(e.failed_items) ? e.failed_items.slice(0, 20).map(x => String((x && x.item) || (x && x.name) || x)).join('、') : '';
         const bodyText = `背景循環在 main ${String(e.main_sha || '').slice(0, 12)} 測出紅項${items ? '：' + items : ''}。兇手提交 ${String(e.culprit_commit || '不明').slice(0, 12)}${cul ? `（來自卡 ${cul.id}）` : ''}。${e.detail ? String(e.detail).slice(0, 500) : ''}`.slice(0, 1500);
+        hotNew.add(hid);   // 同一批裡重複的急修卡 id：資料庫還查不到前一筆，用這個擋
         applied++;
         q("INSERT INTO cards(id,title,body,area,priority,parent,owner_thread,created_at,updated_at) VALUES(?,?,?,'hotfix',0,NULL,?,?,?)", hid, `急修：main 紅燈${cul ? '（' + cul.id + '）' : ''}`, bodyText, cul?.owner_thread ?? null, T, T);
         q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', hid, T, source, '建立（背景循環紅燈自動開卡）');

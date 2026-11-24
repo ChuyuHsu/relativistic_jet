@@ -812,6 +812,8 @@ test('流程模式與背景循環：workflow_status 回報、/api/workflow 讀�
   assert.equal(r2.applied, 0); assert.equal(r2.stale, 1);
   w = await (await call(e, 'GET', '/api/workflow')).json();
   assert.deepEqual(w.open_hotfix.map(x => x.id), ['HOTFIX-deadbeef']);
+  const dupBatch = await (await hook(e, [{ id: 'r2a', kind: 'loop_culprit', main_sha: 'aaaabbbbcccc', culprit_card: 'cul' }, { id: 'r2b', kind: 'loop_culprit', main_sha: 'aaaabbbbcccc', culprit_card: 'cul' }])).json();   // 同批兩筆同 id：只開一次、不整批回滾
+  assert.equal(dupBatch.applied, 1); assert.equal(dupBatch.stale, 1);
   // 兇手分支名（事件的 branch）也認得
   await claim(e, 'cul2', 'thcul2');
   await hook(e, [{ id: 'r3', kind: 'loop_culprit', branch: br('cul2'), main_sha: 'feedface00', failed_items: ['t1'] }]);
