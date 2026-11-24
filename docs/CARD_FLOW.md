@@ -34,7 +34,8 @@
 
 看板只存事實，狀態是從事實算出來的，不另外存一份：
 
-- `status`：`open`／`claimed`／`dropped`
+- **列表端點（BD-02）**：`GET /api/cards` 預設只回進行中的卡（`open`／`claimed`／`waiting` 與放棄待查）；`?all=1` 回全部，`?stage=a,b` 指名階段（含 `merged`、`dropped`），`?status=` 照舊。`GET /api/stats` 回 `{stages:{<階段>:張數}, total}`。排隊器只用 `/api/queue/desired`，不受影響。
+- `status`：`open`／`claimed`／`merged`（已進 main；排隊器的 `merged` 事件寫入，輪詢掃不到）／`dropped`
 - `owner`：誰領的
 - `branch`、`parent`（父卡）
 - `submitted_sha`：送審的版本
@@ -164,6 +165,15 @@
 
 排隊器只管清單上的分支；只有帶 `approved_sha` 的才會自測。`retest` 比上次看到的大，就把這條分支的退回與暫停清掉，從待自測重來。
 
+### 條件式讀取：版本號 `rev` 與 304（BD-03，給排隊器 JET-04 用）
+
+- 看板在 `meta` 存一筆 `rev`（整數字串）。資料庫觸發器在 `cards` 新增／修改／刪除、`meta` 裡 `rev` 以外的鍵變動、`loop_perf` 新增時把它加一，所以不管哪條寫入路徑都不會漏。
+- 這幾個 GET 端點的 200 回應帶 `etag: W/"<rev>"` 與 `cache-control: no-cache`：`/api/queue/desired`（含 `?with=drop_checks`）、`/api/cards`、`/api/stats`、`/api/workflow`、`/api/perf`。
+- 輪詢時帶上次拿到的 etag（`If-None-Match`），或網址加 `?rev=<上次的版本號>`：版本沒變回 **304、空 body**，看板只讀 `rev` 一列；版本變了回 200 與新 etag。權杖照樣先驗，沒權杖或權杖錯一律 401（不能靠 304 探測）。
+- etag 用的是「產生答案之前」讀到的版本，產生中途有寫入只會讓下一次多拉一次，不會拿到舊資料。
+- 相容：舊版排隊器不帶 `If-None-Match`／`rev`，行為與以前完全一樣（多一個 etag 標頭）。看板還沒跑 `migrate_016.sql`（沒有 `rev`）時不帶 etag、照常回答。
+- 排隊器建議做法：記住上次的 etag；收到 304 就沿用上次的清單、本輪不重算；收到 200 才更新。
+
 ## 7. 排隊器回報給看板的事件
 
 每筆帶：分支、事件種類、分支當時的版本、依據的 `approved_sha`、`retest`、原因、紅項清單、時間、事件編號（看板用來去重）。
@@ -185,6 +195,25 @@
 | 合併 | 已合併 | `merged` |
 
 排隊器自己的問題（當機、暫停、機器異常）不是任何一張卡的事件，另外通知管理者，卡片狀態不動。
+
+### `state_snapshot`（排隊器現況快照，BD-06）
+
+進度事件有可能被看板當成過期丟掉（放行版本或重測次數對不上、事件先後顛倒），卡就會一直停在舊階段。排隊器定期（建議每 300 秒，JET-02）送一份「現況快照」，看板照它對帳：
+
+```json
+{"id": "<事件編號，不重複>", "kind": "state_snapshot", "at": <快照取樣的 unix 秒，可省略>,
+ "branches": [{"branch": "dev/x", "state": "selftesting", "commit": "<分支現在的提交>", "approved_sha": "<排隊器手上的放行版本>", "retest": 0}]}
+```
+
+- `branches` 是排隊器管理中的每一條分支（最多 500 筆）；`state` 是排隊器的分支狀態名（與一般事件的 `state`／`to` 同一套，小寫英文與底線）。
+- **對帳規則**（只看已認領、已放行、沒在放棄待查、`phase` 還不是 `merged` 的卡）：
+  - 快照有這條分支，且 `approved_sha`（前綴比對）與 `retest` 都跟看板上的卡對得上、`state` 不同於卡的 `phase`、卡的 `phase_at` 不比快照的 `at` 新：照快照把 `phase` 改過去，記一則「快照對帳」事件；改成 `rejected` 通知領卡串、`halted` 通知管理者、`merged` 同時把 `status` 寫成 `merged`。
+  - `approved_sha` 或 `retest` 對不上（卡已重新送審、重測）：不採用，不覆蓋。
+  - 卡已放行超過 10 分鐘，快照裡卻沒有它：發一則 `queue_error` 給管理者，同一個放行版本只發一次。
+- **快照必須與一般事件走同一條有序的送出佇列**，排在先前的 `merged` 等事件之後。否則分支合併後被刪、`merged` 事件還在待送批次裡，快照先到，就會對已放行超過 10 分鐘的卡誤發「不在快照裡」的 `queue_error`。
+- **等父卡、等空位的已放行分支也都要列在 `branches` 裡**（只要排隊器還在管它）；漏列就會被當成「不在快照裡」。
+- 快照對帳改成 `merged` 時，與一般 `merged` 事件做一樣的事：等這張卡（當接手卡）的「等待父卡」卡自動結案並通知（`waiting_done`），接龍到底。
+- 快照不改 `last_result`；送不出去不影響排隊器調度，下一份會補上。舊版排隊器不送快照，行為不變。
 
 ### `drop_checked`（放棄待查的結果）
 

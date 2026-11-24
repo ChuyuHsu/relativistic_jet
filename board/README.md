@@ -6,7 +6,7 @@
 完整的狀態流轉規格在 `docs/CARD_FLOW.md`（本元件與排隊器兩邊都以它為準）；這裡只列看板的實作要點。
 
 - **卡片與分支一對一，分支名領卡時由看板給**：`<BRANCH_PREFIX><卡號小寫>`（`BRANCH_PREFIX` 預設 `dev/`），領卡後不變；還卡後重領拿到同一條。呼叫端不能自己填。
-- **只存事實，狀態算出來**：儲存的只有 `status`（`open`／`claimed`／`dropped`）、負責人、分支、父卡、送審版本、放行版本、審查退回原因、`retest` 計數，以及排隊器最近回報的 `phase`／`last_result`。對外看 **`stage`**：`new` 剛開卡、`developing` 開發中、`reviewing` 審查中、`selftesting` 審查通過自測中、`batching` 自測完畢批測中、`merged` 已合併、`rejected` 退回、`dropped` 放棄；`GET /api/cards?stage=reviewing,rejected` 可過濾。退回的卡多一個 `rejected` 物件：`{source:"review"|"queue", halted, reason, failed_items}`。
+- **只存事實，狀態算出來**：儲存的只有 `status`（`open`／`claimed`／`merged`／`dropped`）、負責人、分支、父卡、送審版本、放行版本、審查退回原因、`retest` 計數，以及排隊器最近回報的 `phase`／`last_result`。對外看 **`stage`**：`new` 剛開卡、`developing` 開發中、`reviewing` 審查中、`selftesting` 審查通過自測中、`batching` 自測完畢批測中、`merged` 已合併、`rejected` 退回、`dropped` 放棄；`GET /api/cards?stage=reviewing,rejected` 可過濾。**列表預設只回進行中的卡**（`open`／`claimed`／`waiting` 與放棄待查），不含已合併與已放棄；要歷史帶 `?all=1`，或 `?stage=merged`、`?stage=dropped`、`?status=`。`GET /api/stats` 回各階段張數 `{stages:{…}, total}`（網頁頁首用）。退回的卡多一個 `rejected` 物件：`{source:"review"|"queue", halted, reason, failed_items}`。
 - **動作**（轉移表以外一律 409 並回現在的 `stage`；同一動作重送結果一樣）：
   `POST /api/cards/<id>/submit {commit,actor}` 送審（`developing`／`reviewing`／`selftesting`／`batching`／`rejected` 可用；新版本會清放行、審查退回與排隊器結果，並叫醒 `REVIEW_THREADS`）·
   `approve {commit,actor}` 放行（只有 `reviewing`；版本必須等於送審的（前綴比對，≥7 碼）；放行的人不能是領卡的人）·
@@ -15,7 +15,7 @@
   `retest {actor}` 重測（只有被排隊器退回含暫停的卡；`retest` 加一、清排隊器結果、放行保留，回 `selftesting`；被審查退回的 409）·
   `PATCH /api/cards/<id> {"status":"open"}` 還卡（`developing`／`reviewing`／`rejected`；清負責人與送審放行結果，分支保留）·
   `{"status":"dropped"}` 放棄（除已合併外任何階段）。`merged`、`dropped` 是結局，任何動作都 409。
-- **排隊器該管哪些分支與放行，由它定時來拉** `GET /api/queue/desired`（`Authorization: Bearer $HOOK_TOKEN` 或 `$READ_TOKEN`）：回所有「已領、未合併、未放棄」的卡 `[{"branch","parent"?,"approved_sha"?,"retest"}]`；`parent` 是父卡的分支（父卡已合併就省略），`approved_sha` 只在已放行時有。出錯一律回非 200，不會回空清單。
+- **排隊器該管哪些分支與放行，由它定時來拉** `GET /api/queue/desired`（`Authorization: Bearer $HOOK_TOKEN` 或 `$READ_TOKEN`）：回所有「已領、未合併、未放棄」的卡 `[{"branch","parent"?,"approved_sha"?,"retest"}]`；`parent` 是父卡的分支（父卡已合併就省略），`approved_sha` 只在已放行時有。出錯一律回非 200，不會回空清單。**帶 `If-None-Match`（或 `?rev=`）時，版本沒變回 304**（只讀 `meta.rev` 一列），見 `docs/CARD_FLOW.md` 的「條件式讀取」；`/api/cards`、`/api/stats`、`/api/workflow`、`/api/perf` 同樣。升級要跑 `migrate_016.sql`（加 `rev` 與觸發器）。
 - **結果由排隊器推回來** `POST /hooks/queue`（`Authorization: Bearer $HOOK_TOKEN`），body `{"events":[{"id","kind","branch","commit","approved_sha","retest","detail","from","to","failed_items"}]}`。依 branch 對到卡後：**過期回報不算數**——卡片沒放行或已放棄，或事件的 `approved_sha`／`retest` 跟卡片現在的不符，一律丟掉（回 200，`stale` 計數，不改卡）；以事件編號去重。有效事件更新 `phase`（取 `state`／`to`，沒有就依 kind：`pushed→pending`、`tested_green→selftest_green`、`tested_red／rejected／conflict→rejected`、`queued`、`merged`、`halted→halted`）與 `last_result`（kind、commit、detail、from、to、failed_items；`GET /api/cards/<id>` 與 `/tests` 回它）。`superseded`（內容變了）清掉送審、放行與結果，回 `developing`。`parent_blocked`（父卡擋住）只註記。
 - **父卡資訊**：`GET /api/cards` 與單卡讀取，有父卡的卡多帶 `parent_stage`（父卡現在的階段，不存在回 `missing`）、`waiting_parent`（父卡還沒合併＝子卡就算放行也要等）、`parent_blocked`（父卡被放棄或不存在，需改接）。父卡被放棄時，已領的子卡會通知管理者改它的父卡；改父卡用 `PATCH parent`（可改成別張卡或清空，放行保留；拒絕自己、不存在、已放棄、循環）。網頁看板的子卡會顯示父卡是誰、是否在等父卡。
 - **通知**（攢 `WAKE_BATCH_S`，預設 120 秒，同一對象合成一則，每小時最多 `WAKE_MAX_PER_HOUR` 次，失敗保留重送；沒設 `ROUTINE_ID`／`ROUTINE_KEY` 就靜默略過）：送審→`REVIEW_THREADS`；審查退回、被排隊器退回（測試紅、撞檔）、內容變了→領卡的串；暫停、父卡擋住、排隊器自己出問題、卡住太久（開發中／審查中／退回超過 `STUCK_HOURS`，預設 6 小時，有新動靜前不重複）→`ADMIN_THREADS`。合併不通知。cron 每分鐘檢查一次。
@@ -40,6 +40,8 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 3. `wrangler d1 execute task-board --remote --file=schema.sql`
 4. 機密全用 `wrangler secret put`（自己想長亂碼，不要貼進聊天）：`TOKEN`（寫入）、`READ_TOKEN`（只讀，選配）、`HOOK_TOKEN`（排隊器用）、`ROUTINE_KEY`（叫醒用，選配）。設定（非機密）：`BRANCH_PREFIX`、`ROUTINE_ID`、`WAKE_BATCH_S`、`WAKE_MAX_PER_HOUR`、`REVIEW_THREADS`（送審時要叫醒的審查串 id，逗號分隔）、`ADMIN_THREADS`（卡住提醒對象）、`STUCK_HOURS`。串 id 屬於各專案私有設定，放本機的 `wrangler.local.toml`，不提交。
 5. `wrangler deploy`，網址就是看板。
+
+- **串號轉址（BD-07）**：`POST /api/redirect {from,to,actor}`（寫入權杖）登記「舊串→新串」，同時把未結案（open／claimed／waiting）卡片的 `owner_thread` 改成最終的新串；`GET /api/redirect` 列出。信箱 `outbox/claim` 領信時沿轉址鏈解析收件串（最多 10 跳，繞圈停在環前；登記時會繞圈直接 409），環境變數 `REVIEW_THREADS`／`ADMIN_THREADS` 裡的舊串號與舊信也經過同一個解析。重開串時只要打一次 redirect。升級要跑 `migrate_018.sql`。
 
 升級已部署的資料庫：依序各跑一次 `migrate_001.sql`～`migrate_005.sql`，再跑 `schema.sql`。測試：`cd board && npm test`（Node 22，不需安裝套件）。
 

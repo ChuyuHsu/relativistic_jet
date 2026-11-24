@@ -69,6 +69,21 @@ export async function handleHook(req, env, ctx) {
     : q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', id, T, source, note);
   const hl = (e, outcome) => { logged = true; q('INSERT INTO hook_log(at,body,outcome) VALUES(?,?,?)', T, JSON.stringify(e).slice(0, 600), outcome); };
   const groups = [], hotNew = new Set();
+  // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串；接龍（A 等 B、B 等 C）一路結案到底。merged 事件與快照對帳共用
+  const closeWaiting = async card => {
+      const seen = new Set([card.id]), todo = [card.id];
+      while (todo.length) {
+        const via = todo.shift();
+        for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(via).all()).results) {
+          if (seen.has(k.id)) continue;
+          seen.add(k.id); todo.push(k.id);
+          const g = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T];
+          q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
+          logEv(k.id, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），等待結束：轉放棄（結案）`, g);
+          post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），這張卡已結案`, g);
+        }
+      }
+  };
   for (const e of events) {
     cur = []; const a0 = applied;
     await (async () => {
@@ -123,6 +138,40 @@ export async function handleHook(req, env, ctx) {
         q("INSERT INTO cards(id,title,body,area,priority,parent,owner_thread,created_at,updated_at) VALUES(?,?,?,'hotfix',0,NULL,?,?,?)", hid, `急修：main 紅燈${cul ? '（' + cul.id + '）' : ''}`, bodyText, cul?.owner_thread ?? null, T, T);
         q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', hid, T, source, '建立（背景循環紅燈自動開卡）');
         post([...new Set([cul?.owner_thread || '', ...(admins.length ? admins : [])])], { id: hid }, 'loop_culprit', null, `急修卡 ${hid}：${bodyText}`.slice(0, 500));
+        return;
+      }
+      if (kind === 'state_snapshot') {   // 排隊器現況快照：{at?, branches:[{branch,state,commit,approved_sha,retest}]}；補回被當成過期丟掉的進度事件（BD-06）
+        const arr = Array.isArray(e.branches) ? e.branches.slice(0, 500) : null;
+        if (!arr) { stale++; hl(e, 'state_snapshot 要帶 branches 陣列'); return; }
+        const snap = new Map(arr.filter(b => b && typeof b === 'object' && b.branch).map(b => [String(b.branch), b]));
+        const snapAt = Number(e.at) || T;
+        const cands = (await db.prepare("SELECT * FROM cards WHERE status='claimed' AND approved_commit IS NOT NULL AND dropping_at IS NULL AND branch IS NOT NULL AND IFNULL(phase,'')!='merged'").all()).results;
+        let fixed = 0;
+        for (const c of cands) {
+          const b = snap.get(c.branch);
+          if (!b) {   // 已放行超過 10 分鐘卻不在快照裡：排隊器沒在管它。同一個放行版本只提醒一次
+            if (!c.approved_at || T - c.approved_at < 600) continue;
+            const note = `快照對帳：放行版本 ${String(c.approved_commit).slice(0, 8)} 已超過 10 分鐘仍不在排隊器快照裡`;
+            if (await db.prepare('SELECT 1 FROM events WHERE card_id=? AND note=?').bind(c.id, note).first()) continue;
+            logEv(c.id, note);
+            post(admins.length ? admins : [''], c, 'queue_error', c.branch, `${note}（階段：${c.phase || '無'}），請查排隊器有沒有漏掉這條分支`.slice(0, 500));
+            fixed++; continue;
+          }
+          const st = typeof b.state === 'string' && /^[a-z_]{3,20}$/.test(b.state) ? b.state : null;
+          // 放行版本與重測次數對不上＝這份快照講的是別的版本（卡已重新送審、重測），不採用；卡的階段比快照新也不覆蓋
+          if (!st || st === c.phase) continue;
+          if (!b.approved_sha || !sameCommit(String(b.approved_sha), c.approved_commit)) continue;
+          if (b.retest != null && Number(b.retest) !== c.retest) continue;
+          if (c.phase_at && c.phase_at > snapAt) continue;
+          const was = c.phase || '無';
+          patch(c, { phase: st, phase_at: T, updated_at: T });
+          if (st === 'merged') { patch(c, { status: 'merged' }); await closeWaiting(c); }   // 與 merged 事件相同：等它的卡一起結案
+          logEv(c.id, `快照對帳：階段 ${was} → ${st}`);
+          if (st === 'rejected') post([c.owner_thread || ''], c, 'rejected', c.branch, '排隊器快照顯示這張卡已被退回（進度事件被當成過期丟掉了），請看自測結果');
+          else if (st === 'halted') post(admins.length ? admins : [c.owner_thread || ''], c, 'halted', c.branch, '排隊器快照顯示這條分支暫停');
+          fixed++;
+        }
+        if (fixed) applied++;
         return;
       }
       let card = branch ? byBranch.get(branch) : null;
@@ -194,6 +243,7 @@ export async function handleHook(req, env, ctx) {
       // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
       const to = kind === 'superseded' ? null : e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
       if (to) patch(card, { phase: to, phase_at: T, updated_at: T });
+      if (to === 'merged' && card.status === 'claimed') patch(card, { status: 'merged' });   // 已進 main：離開 claimed，輪詢與卡住提醒不再掃到它
       if (!['approved', 'revoked', 'superseded', 'parent_blocked'].includes(kind)) {   // 放行是看板自己的欄位；父卡擋住只是註記，都不覆蓋「最新結果」
         let fi = Array.isArray(e.failed_items) && e.failed_items.length ? e.failed_items.slice(0, 50).map(f => (f && typeof f === 'object' && typeof f.summary === 'string' && f.summary.length > 1200) ? { ...f, summary: f.summary.slice(0, 1200) } : f) : null;
         if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && e.commit && prev.commit === e.commit) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的
@@ -201,20 +251,7 @@ export async function handleHook(req, env, ctx) {
         patch(card, { last_result: JSON.stringify(res) });
       }
       logEv(card.id, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`);
-      if (kind === 'merged') {   // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串；接龍（A 等 B、B 等 C）一路結案到底
-        const seen = new Set([card.id]), todo = [card.id];
-        while (todo.length) {
-          const via = todo.shift();
-          for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(via).all()).results) {
-            if (seen.has(k.id)) continue;
-            seen.add(k.id); todo.push(k.id);
-            const g = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T];
-            q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
-            logEv(k.id, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），等待結束：轉放棄（結案）`, g);
-            post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），這張卡已結案`, g);
-          }
-        }
-      }
+      if (kind === 'merged') await closeWaiting(card);
       // 通知：被排隊器退回、內容變了 → 領卡的開發者；暫停、父卡擋住 → 管理者
       if (ADMIN_KINDS.has(kind)) post(admins.length ? admins : [card.owner_thread || ''], card, kind, branch, detail);
       else if (ATTENTION.has(kind)) post([card.owner_thread || ''], card, kind, branch, detail);
@@ -348,6 +385,15 @@ const NEXT = {
 };
 const CLAIM_TTL = 300;
 
+// 串號轉址：沿鏈解析（最多 10 跳；遇到繞圈就停在繞圈前的最後一個）
+export function resolveThread(map, id) {
+  let cur = id; const seen = new Set([cur]);
+  for (let i = 0; i < 10 && map.has(cur); i++) { const nx = map.get(cur); if (seen.has(nx)) break; seen.add(nx); cur = nx; }
+  return cur;
+}
+export async function loadRedirects(db) {
+  return new Map((await db.prepare('SELECT from_thread,to_thread FROM thread_redirect').all()).results.map(r => [r.from_thread, r.to_thread]));
+}
 export async function outboxClaim(req, env) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
   const body = await req.json().catch(() => ({}));
@@ -356,7 +402,9 @@ export async function outboxClaim(req, env) {
   const db = env.DB, t = now(), token = `${t}-${crypto.randomUUID()}`;
   await db.prepare('UPDATE outbox SET claimed_at=?,claim_id=? WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(t, token, t - CLAIM_TTL).run();
   const rows = (await db.prepare('SELECT * FROM outbox WHERE sent_at IS NULL AND claim_id=? ORDER BY n').bind(token).all()).results;
-  const fallback = list(env.ADMIN_THREADS)[0] || '';
+  const redir = await loadRedirects(db);
+  const fallback = resolveThread(redir, list(env.ADMIN_THREADS)[0] || '');
+  for (const r of rows) if (r.owner_thread) r.owner_thread = resolveThread(redir, r.owner_thread);   // 收件串一律經過轉址（環境變數與舊卡上的串號也一樣）
   // 同一個收件串、同一張卡的通知只留最新一則（舊的已被新的取代，直接標成已送）：壓低發信量。沒有卡號的通知不合併。
   const latest = new Map(), stale = [];
   for (const r of rows) {
@@ -372,7 +420,7 @@ export async function outboxClaim(req, env) {
   // 沒輪到的不是丟掉，只是把領取標記放掉，下一次 claim 再給（claimed_at 清空，不用等 5 分鐘）。
   const minGap = Math.max(0, Number(body.min_gap_s) || 0), maxMsg = Number.isInteger(body.max_messages) && body.max_messages > 0 ? body.max_messages : Infinity;
   const lastSent = new Map();
-  if (minGap > 0) for (const r of (await db.prepare('SELECT owner_thread, max(sent_at) AS t FROM outbox WHERE sent_at IS NOT NULL GROUP BY owner_thread').all()).results) lastSent.set(r.owner_thread || fallback, r.t);
+  if (minGap > 0) for (const r of (await db.prepare('SELECT owner_thread, max(sent_at) AS t FROM outbox WHERE sent_at IS NOT NULL GROUP BY owner_thread').all()).results) lastSent.set(resolveThread(redir, r.owner_thread) || fallback, Math.max(r.t, lastSent.get(resolveThread(redir, r.owner_thread) || fallback) ?? 0));
   const held = [];
   let given = 0;
   for (const [to, items] of [...groups].sort((a, b) => Math.min(...a[1].map(i => i.at)) - Math.min(...b[1].map(i => i.at)))) {

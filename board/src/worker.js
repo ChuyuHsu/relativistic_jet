@@ -1,8 +1,8 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck, housekeeping } from './queue.js';
+import { loadRedirects, resolveThread, handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck, housekeeping } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
-// 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
+// 卡片自己只管前段與結局：open 空、claimed 已認領、merged 已合併、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
 // 排隊器自己定時來拉 /api/queue/desired 取得該管哪些分支與放行；看板不主動連排隊器。
 const STATUSES = ['open', 'claimed', 'dropped'];
@@ -45,11 +45,12 @@ const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 async function withParent(db, cards, pool) {
   const need = cards.filter(c => c.parent);
   if (!need.length) return cards;
-  let by;
-  if (pool) by = new Map(pool.map(r => [r.id, r]));
-  else {
-    const ids = [...new Set(need.map(c => c.parent))];
-    by = new Map((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results.map(r => [r.id, r]));
+  const by = new Map((pool || []).map(r => [r.id, r]));
+  // 父卡不在手上的（例如已合併、列表預設不回）用 IN 補查，一次最多 80 個
+  const ids = [...new Set(need.map(c => c.parent))].filter(id => !by.has(id));
+  for (let i = 0; i < ids.length; i += 80) {
+    const ch = ids.slice(i, i + 80);
+    for (const r of (await db.prepare(`SELECT * FROM cards WHERE id IN (${ch.map(() => '?').join(',')})`).bind(...ch).all()).results) by.set(r.id, r);
   }
   return cards.map(c => {
     if (!c.parent) return c;
@@ -58,17 +59,24 @@ async function withParent(db, cards, pool) {
   });
 }
 
-// 回應快取（Cache API，每個機房各自存幾秒）：輪詢的人很多，同一份答案算一次就好。權杖在快取前已檢查，快取鍵只有網址。
-async function cached(req, ctx, ttl, produce) {
-  if (typeof caches === 'undefined' || !ctx || req.method !== 'GET') return produce();
-  const key = new Request(new URL(req.url).toString(), { method: 'GET' });
-  try { const hit = await caches.default.match(key); if (hit) return hit; } catch { /* 沒快取就照算 */ }
+// 列表的 SQL 預篩：每個階段對到哪些 status／欄位（最後仍用 stageOf 精確比對）
+const STAGE_SQL = { merged: "(status='merged' OR phase='merged')", dropped: "status='dropped'", waiting_parent: "status='waiting'", dropping: 'dropping_at IS NOT NULL' };
+const ACTIVE_SQL = "(status IN ('open','claimed','waiting') OR (dropping_at IS NOT NULL AND status NOT IN ('dropped','merged')))";   // 預設：進行中（不含已合併、已放棄）
+const sqlForStages = ss => ss.length ? `(${[...new Set(ss.map(x => STAGE_SQL[x] ?? "status IN ('open','claimed')"))].join(' OR ')})` : ACTIVE_SQL;
+
+// 版本號條件式讀取（BD-03）：meta.rev 由資料庫觸發器在任何卡片、流程狀態、效能表變動時加一。
+// 輪詢的人帶 If-None-Match 或 ?rev=，版本沒變就只讀 rev 一列、回 304；回應的 etag 用「產生答案之前」讀到的版本，
+// 產生中途有寫入也只會讓下一次多拉一次，不會拿到舊資料。權杖必須在呼叫前已檢查。
+async function revGate(req, env, produce) {
+  let r;
+  try { r = await env.DB.prepare("SELECT value FROM meta WHERE key='rev'").first(); } catch { return json({ error: '看板內部錯誤' }, 500); }
+  const rev = r ? String(r.value) : null;
+  if (rev == null) return produce();   // 還沒跑 migrate_016：不支援，照常回答
+  const etag = `W/"${rev}"`;
+  const inm = req.headers.get('if-none-match'), q = new URL(req.url).searchParams.get('rev');
+  if ((inm && inm.split(',').some(x => x.trim() === etag || x.trim() === `"${rev}"`)) || q === rev) return new Response(null, { status: 304, headers: { etag, 'cache-control': 'no-cache' } });
   const res = await produce();
-  if (res.status === 200) {
-    const copy = new Response(res.clone().body, res);
-    copy.headers.set('cache-control', `public, max-age=${ttl}`);
-    ctx.waitUntil(caches.default.put(key, copy).catch(() => {}));
-  }
+  if (res.status === 200) { const h = new Headers(res.headers); h.set('etag', etag); h.set('cache-control', 'no-cache'); return new Response(res.body, { status: 200, headers: h }); }
   return res;
 }
 
@@ -144,27 +152,24 @@ async function desired(req, env) {
   } catch { return json({ error: '看板內部錯誤' }, 500); }
 }
 
-// 網頁輪詢才帶 v：讀取權杖驗過後快取 10 秒；指令稿直接讀（不帶 v）永遠是最新
 export async function handle(req, env, ctx) {
-  if (req.method === 'GET' && typeof caches !== 'undefined') {
-    const u = new URL(req.url);
-    if (u.searchParams.has('v') && ['/api/cards', '/api/workflow', '/api/perf'].includes(u.pathname)) {
-      if (!bearerIs(req, env.TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
-      return cached(req, ctx, 10, () => handleInner(req, env, ctx));
-    }
-  }
   return handleInner(req, env, ctx);
 }
-async function handleInner(req, env, ctx) {
+const GATED = new Set(['/api/cards', '/api/workflow', '/api/stats', '/api/perf']);   // 帶 etag、版本沒變回 304 的讀取端點
+async function handleInner(req, env, ctx, gated = false) {
   const url = new URL(req.url);
   const path = url.pathname;
   const db = env.DB;
+  if (!gated && req.method === 'GET' && GATED.has(path)) {
+    if (!bearerIs(req, env.TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
+    return revGate(req, env, () => handleInner(req, env, ctx, true));
+  }
   if (path === '/hooks/queue') return handleHook(req, env, ctx);
   const write = req.method !== 'GET';
   // 排隊器拉清單：HOOK_TOKEN 或 READ_TOKEN；其餘寫入要 TOKEN，讀取要 TOKEN 或 READ_TOKEN
   if (path === '/api/queue/desired') {
     if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
-    return cached(req, ctx, 5, () => desired(req, env));   // 排隊器輪詢：5 秒內同一份答案
+    return revGate(req, env, () => desired(req, env));   // 排隊器輪詢：版本沒變回 304
   }
   if (path === '/api/outbox/pending') return outboxPending(req, env);
   if (path === '/api/triage' && req.method === 'GET') {   // 排隊器讀：目前的紅燈判斷（含總指揮的回報）
@@ -194,14 +199,42 @@ async function handleInner(req, env, ctx) {
   }
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
-    const status = url.searchParams.get('status');
-    const rows = status
-      ? await db.prepare('SELECT * FROM cards WHERE status=? ORDER BY priority,created_at').bind(status).all()
-      : await db.prepare('SELECT * FROM cards ORDER BY priority,created_at').all();
-    let out = (await withParent(db, rows.results.map(view), status ? null : rows.results));
-    const sf = url.searchParams.get('stage');
-    if (sf) { const want = new Set(sf.split(',')); out = out.filter(c => want.has(c.stage)); }
+    // 預設只回進行中的卡（open／claimed／waiting 與放棄待查）；?all=1 回全部；?stage=merged,dropped 指名歷史；?status= 照舊
+    const sp = url.searchParams, status = sp.get('status'), all = sp.get('all') === '1';
+    const want = sp.get('stage') ? sp.get('stage').split(',').filter(Boolean) : [];
+    let sql = 'SELECT * FROM cards', args = [];
+    if (status) { sql += ' WHERE status=?'; args = [status]; }
+    else if (!all) sql += ' WHERE ' + sqlForStages(want);
+    const rows = await db.prepare(sql + ' ORDER BY priority,created_at').bind(...args).all();
+    let out = (await withParent(db, rows.results.map(view), rows.results));
+    if (want.length) { const w = new Set(want); out = out.filter(c => w.has(c.stage)); }
+    else if (!all && !status) out = out.filter(c => c.stage !== 'merged' && c.stage !== 'dropped');
     return json(out);
+  }
+  if (path === '/api/redirect' && req.method === 'GET') {   // 目前的串號轉址表
+    return json((await db.prepare('SELECT from_thread AS "from",to_thread AS "to",at FROM thread_redirect ORDER BY at DESC').all()).results);
+  }
+  if (path === '/api/redirect' && req.method === 'POST') {   // 登記轉址：{from,to,actor}；同時把未結案卡片的 owner_thread 改成新串
+    const body = await req.clone().json().catch(() => ({}));
+    const from = String(body.from ?? '').trim(), to = String(body.to ?? '').trim();
+    if (!String(body.actor ?? '').trim() || String(body.actor).toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
+    if (!from || !to) return json({ error: 'from 與 to 都要填' }, 400);
+    if (from === to) return json({ error: 'from 不能等於 to' }, 400);
+    const map = await loadRedirects(db);
+    const dest = resolveThread(map, to);
+    if (dest === from) return json({ error: '這樣會繞圈（to 最後又轉回 from）' }, 409);
+    const t = now();
+    await db.prepare('INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES(?,?,?) ON CONFLICT(from_thread) DO UPDATE SET to_thread=excluded.to_thread,at=excluded.at').bind(from, to, t).run();
+    // 所有指向 from 的舊轉址不用動（解析時會一路走到新的）；卡片直接改成最終的串
+    const r = await db.prepare("UPDATE cards SET owner_thread=?,updated_at=? WHERE owner_thread=? AND status IN ('open','claimed','waiting')").bind(dest, t, from).run();
+    return json({ from, to, resolved: dest, cards_updated: r.meta.changes });
+  }
+  if (req.method === 'GET' && path === '/api/stats') {   // 各階段張數（頁首用）：進行中的卡算出階段，已合併與已放棄只數張數不讀內容
+    const act = (await db.prepare('SELECT * FROM cards WHERE ' + ACTIVE_SQL).all()).results;
+    const stages = Object.fromEntries(STAGES.map(k => [k, 0]));
+    for (const c of act) stages[stageOf(c)]++;
+    for (const r of (await db.prepare("SELECT status, count(*) AS n FROM cards WHERE status IN ('merged','dropped') GROUP BY status").all()).results) stages[r.status] += r.n;
+    return json({ stages, total: Object.values(stages).reduce((a, b) => a + b, 0) });
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/cards\/([^/]+)\/tests$/))) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();
@@ -372,7 +405,7 @@ async function handleInner(req, env, ctx) {
       await log(db, id, actor, '補寫放棄理由' + (body.note ? `：${body.note}` : ''));
       return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
     }
-    if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
+    if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged' || c.status === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
     const resend = body.status === 'dropped' && Object.keys(body).every(k => ['status', 'actor', 'superseded_by', 'discard_reason', 'note'].includes(k));
     if (stageOf(c) === 'waiting_parent') {   // 等待父卡：等接手卡進 main 自動結案；只允許重送放棄（回現況）
       if (body.status === 'dropped' && resend) return json(view(c));

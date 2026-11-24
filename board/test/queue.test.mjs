@@ -929,3 +929,187 @@ test('放行要完整 hash：送審是完整的，放行帶短前綴就補成完
   assert.equal(bad.status, 400); assert.match((await bad.json()).error, /完整/);
   assert.equal((await getCard(e, 'h2')).stage, 'reviewing');
 });
+
+test('BD-01：合併後 status 變 merged，不在 desired／卡住提醒的掃描範圍，父卡已合併的子卡仍省略 parent', async () => {
+  const e = mkenv();
+  await approved(e, 'P'); await claim(e, 'K', 'a', { parent: 'P' });
+  await ev(e, 'P', { kind: 'merged', approved_sha: SHA });
+  const row = await e.DB.prepare("SELECT status,phase FROM cards WHERE id='P'").first();
+  assert.deepEqual([row.status, row.phase], ['merged', 'merged']);
+  assert.equal((await e.DB.prepare("SELECT count(*) n FROM cards WHERE status='claimed'").first()).n, 1);   // 只剩真的在動的 K
+  const d = await (await call(e, 'GET', '/api/queue/desired', undefined, 'h')).json();
+  assert.deepEqual(d, [{ branch: 'dev/k', priority: 100, retest: 0 }]);                                    // P 不在、K 不帶 parent
+  assert.equal(await stageOf(e, 'P'), 'merged');
+  assert.equal((await call(e, 'PATCH', '/api/cards/P', { status: 'dropped', discard_reason: '測試用：已合併的卡不能放棄' })).status, 409);
+  assert.equal((await ev(e, 'P', { kind: 'tested_green', approved_sha: SHA }).then(r => r.json())).stale, 1);   // 已合併後的過期事件丟掉
+  assert.equal((await ev(e, 'P', { kind: 'merged', approved_sha: SHA }).then(r => r.json())).applied, 1);       // merged 事實重送仍接受
+});
+
+test('BD-01：事件表有 card_id 索引；migrate_015 把舊的已合併卡改成 merged', async () => {
+  const e = mkenv();
+  const idx = (await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='events_card'").first());
+  assert.ok(idx);
+  await claim(e, 'OLD'); await e.DB.prepare("UPDATE cards SET phase='merged' WHERE id='OLD'").run();
+  const { readFileSync } = await import('node:fs');
+  for (const stmt of readFileSync(new URL('../migrate_015.sql', import.meta.url), 'utf8').split(';').map(s => s.replace(/--.*$/gm, '').trim()).filter(Boolean)) await e.DB.prepare(stmt).run();
+  assert.equal((await e.DB.prepare("SELECT status FROM cards WHERE id='OLD'").first()).status, 'merged');
+});
+
+test('BD-02：列表預設只回進行中的卡；?all=1、?stage=merged,dropped 取歷史；父卡已合併仍補得到', async () => {
+  const e = mkenv();
+  await approved(e, 'P'); await claim(e, 'K', 'a', { parent: 'P' });
+  await claim(e, 'D'); await drop(e, 'D');
+  await call(e, 'POST', '/api/cards', { id: 'O', title: 'o' });
+  await ev(e, 'P', { kind: 'merged', approved_sha: SHA });
+  const ids = async q => (await (await call(e, 'GET', '/api/cards' + q)).json()).map(c => c.id).sort();
+  assert.deepEqual(await ids(''), ['K', 'O']);
+  assert.deepEqual(await ids('?all=1'), ['D', 'K', 'O', 'P']);
+  assert.deepEqual(await ids('?stage=merged'), ['P']);
+  assert.deepEqual(await ids('?stage=merged,dropped'), ['D', 'P']);
+  assert.deepEqual(await ids('?stage=new,developing'), ['K', 'O']);
+  const k = (await (await call(e, 'GET', '/api/cards')).json()).find(c => c.id === 'K');
+  assert.deepEqual([k.parent_stage, k.waiting_parent], ['merged', false]);                  // 父卡不在列表裡，用 IN 補查
+  const st = await (await call(e, 'GET', '/api/stats')).json();
+  assert.deepEqual([st.stages.merged, st.stages.dropped, st.stages.developing, st.stages.new, st.total], [1, 1, 1, 1, 4]);
+});
+
+// ---- BD-03：版本號 rev 與 304 ----
+const revOf = async e => Number((await e.DB.prepare("SELECT value FROM meta WHERE key='rev'").first()).value);
+const getRaw = (e, path, headers = {}, token = 't') => handle(new Request('http://x' + path, { headers: { authorization: `Bearer ${token}`, ...headers } }), e, {});
+
+test('BD-03：任何卡片動作、排隊器事件、流程狀態之後 rev 都會變', async () => {
+  const e = mkenv(); const seen = [await revOf(e)];
+  const bumped = async what => { const r = await revOf(e); assert.ok(r > seen[seen.length - 1], what); seen.push(r); };
+  await call(e, 'POST', '/api/cards', { id: 'c1', title: 'c1' }); await bumped('開卡');
+  await call(e, 'POST', '/api/claim', { id: 'c1', owner: 'w', owner_thread: 'a' }); await bumped('領卡');
+  await act(e, 'c1', 'submit', { commit: SHA, actor: 'w' }); await bumped('送審');
+  await act(e, 'c1', 'approve', { commit: SHA, actor: 'rev' }); await bumped('放行');
+  await ev(e, 'c1', { kind: 'tested_green', approved_sha: SHA }); await bumped('排隊器事件');
+  await hook(e, [{ id: 9001, kind: 'workflow_status', mode: 'direct_merge', loop: { state: 'green' } }]); await bumped('流程狀態（meta 寫入）');
+  await hook(e, [{ id: 9002, kind: 'loop_perf', main_sha: 'a'.repeat(40), perf: { kind: 'loop', wall_s: 12 } }]); await bumped('效能（loop_perf）');
+  await e.DB.prepare("DELETE FROM meta WHERE key='workflow'").run(); await bumped('meta 刪除');
+  await e.DB.prepare("DELETE FROM cards WHERE id='c1'").run(); await bumped('卡片刪除');
+  assert.equal(Number((await e.DB.prepare("SELECT count(*) n FROM meta WHERE key='rev'").first()).n), 1);   // rev 自己不會被複製或遞迴
+});
+
+test('BD-03：讀取端點帶 etag；If-None-Match 或 ?rev= 相同回 304，不同或沒帶回 200；沒權杖照樣 401', async () => {
+  const e = mkenv(); await claim(e, 'c1');
+  for (const path of ['/api/cards', '/api/stats', '/api/workflow', '/api/perf', '/api/queue/desired']) {
+    const r1 = await getRaw(e, path); assert.equal(r1.status, 200, path);
+    const et = r1.headers.get('etag'); assert.ok(et, path + ' 要帶 etag');
+    const r2 = await getRaw(e, path, { 'if-none-match': et }); assert.equal(r2.status, 304, path); assert.equal(await r2.text(), '');
+    assert.equal((await getRaw(e, path + (path.includes('?') ? '&' : '?') + 'rev=' + (await revOf(e)))).status, 304, path + ' ?rev=');
+    assert.equal((await getRaw(e, path, { 'if-none-match': 'W/"0"' })).status, 200, path);
+    assert.equal((await getRaw(e, path, { 'if-none-match': et }, 'bad')).status, 401, path + ' 沒權杖不能靠 304 探測');
+  }
+  const et = (await getRaw(e, '/api/cards')).headers.get('etag');
+  await call(e, 'POST', '/api/cards', { id: 'c2', title: 'c2' });
+  const r3 = await getRaw(e, '/api/cards', { 'if-none-match': et }); assert.equal(r3.status, 200); assert.notEqual(r3.headers.get('etag'), et);
+  assert.equal((await r3.json()).length, 2);
+});
+
+test('BD-03：沒有 rev（還沒跑 migrate_016）時照常回答，不帶 etag；閒置輪詢讀取列數為 1', async () => {
+  const e = mkenv(); await claim(e, 'c1');
+  const et = (await getRaw(e, '/api/queue/desired')).headers.get('etag');
+  let reads = 0; const real = e.DB.prepare.bind(e.DB);
+  e.DB.prepare = sql => { reads++; return real(sql); };
+  assert.equal((await getRaw(e, '/api/queue/desired', { 'if-none-match': et })).status, 304);
+  assert.equal(reads, 1, '304 只做一次查詢（讀 rev 一列）');
+  e.DB.prepare = real;
+  await e.DB.prepare("DELETE FROM meta WHERE key='rev'").run();
+  const r = await getRaw(e, '/api/queue/desired'); assert.equal(r.status, 200); assert.equal(r.headers.get('etag'), null);
+});
+
+// ---- BD-06：排隊器現況快照對帳 ----
+const snap = (e, branches, extra = {}) => hook(e, [{ id: ++ev.n, kind: 'state_snapshot', branches, ...extra }]);
+const phaseOf = async (e, id) => (await e.DB.prepare('SELECT phase FROM cards WHERE id=?').bind(id).first()).phase;
+const pending = async e => (await e.DB.prepare("SELECT kind,card_id FROM outbox WHERE sent_at IS NULL ORDER BY n").all()).results;
+
+test('BD-06：進度事件被當成過期丟掉後，下一份快照把階段修正', async () => {
+  const e = mkenv(); await approved(e, 'c1');
+  await ev(e, 'c1', { kind: 'tested_green', approved_sha: SHA, retest: 5 });                     // retest 對不上：被當成過期丟掉
+  assert.equal(await stageOf(e, 'c1'), 'selftesting'); assert.equal(await phaseOf(e, 'c1'), null);
+  const r = await (await snap(e, [{ branch: 'dev/c1', state: 'selftest_green', commit: SHA, approved_sha: SHA, retest: 0 }])).json();
+  assert.equal(r.applied, 1);
+  assert.equal(await phaseOf(e, 'c1'), 'selftest_green'); assert.equal(await stageOf(e, 'c1'), 'batching');
+  assert.ok((await getCard(e, 'c1')).events.some(x => x.note.includes('快照對帳：階段 無 → selftest_green')));
+  assert.equal((await (await snap(e, [{ branch: 'dev/c1', state: 'selftest_green', approved_sha: SHA, retest: 0 }])).json()).applied, 0);   // 同樣的快照再來：沒東西可改
+  await snap(e, [{ branch: 'dev/c1', state: 'merged', approved_sha: SHA, retest: 0 }]);
+  assert.equal(await stageOf(e, 'c1'), 'merged');
+  assert.equal((await e.DB.prepare("SELECT status FROM cards WHERE id='c1'").first()).status, 'merged');   // 同 BD-01：離開 claimed
+});
+
+test('BD-06：快照不會覆蓋已重新送審、版本或重測對不上的卡', async () => {
+  const e = mkenv(); await approved(e, 'c1'); await approved(e, 'c2'); await approved(e, 'c3');
+  await act(e, 'c1', 'submit', { commit: SHA2, actor: 'w' });                                    // c1 重新送審：放行清掉
+  await snap(e, [
+    { branch: 'dev/c1', state: 'batching', approved_sha: SHA, retest: 0 },                       // 舊放行版本的快照
+    { branch: 'dev/c2', state: 'batching', approved_sha: SHA2, retest: 0 },                      // 版本對不上
+    { branch: 'dev/c3', state: 'batching', approved_sha: SHA, retest: 3 }]);                     // 重測次數對不上
+  for (const id of ['c1', 'c2', 'c3']) assert.equal(await phaseOf(e, id), null, id);
+  assert.equal(await stageOf(e, 'c1'), 'reviewing');
+  await e.DB.prepare("UPDATE cards SET phase_at=? WHERE id='c3'").bind(Math.floor(Date.now() / 1000) + 100).run();   // 卡的階段比快照新：不覆蓋
+  await snap(e, [{ branch: 'dev/c3', state: 'batching', approved_sha: SHA, retest: 0 }], { at: Math.floor(Date.now() / 1000) });
+  assert.equal(await phaseOf(e, 'c3'), null);
+  assert.equal((await (await snap(e, 'bad')).json()).stale, 1);                                  // 格式不對
+});
+
+test('BD-06：已放行超過 10 分鐘卻不在快照裡：發一次 queue_error，同一個放行版本不重發', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'boss' }); await approved(e, 'c1'); await approved(e, 'c2');
+  await e.DB.prepare("UPDATE cards SET approved_at=? WHERE id='c1'").bind(Math.floor(Date.now() / 1000) - 700).run();   // c1 放行 11 分鐘前；c2 剛放行
+  await snap(e, [{ branch: 'dev/c2', state: 'selftesting', approved_sha: SHA, retest: 0 }]);
+  assert.deepEqual((await pending(e)).filter(x => x.kind === 'queue_error').map(x => x.card_id), ['c1']);
+  await snap(e, []); await snap(e, []);
+  assert.equal((await pending(e)).filter(x => x.kind === 'queue_error' && x.card_id === 'c1').length, 1);
+});
+
+test('BD-06：快照補上接手卡的 merged 時，等它的卡一樣自動結案並收到 waiting_done', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'boss' });
+  await approved(e, 'B'); await claim(e, 'A', 'dev-a');
+  await call(e, 'PATCH', '/api/cards/A', { status: 'dropped', superseded_by: 'B', discard_reason: '測試用：改由 B 接手這張卡的內容' });
+  await ev(e, 'A', { kind: 'drop_checked', unmerged: true, covered: true });
+  assert.equal(await stageOf(e, 'A'), 'waiting_parent');
+  await snap(e, [{ branch: 'dev/b', state: 'merged', approved_sha: SHA, retest: 0 }]);
+  assert.equal(await stageOf(e, 'B'), 'merged');
+  assert.equal(await stageOf(e, 'A'), 'dropped');
+  assert.ok((await pending(e)).some(x => x.kind === 'waiting_done' && x.card_id === 'A'));
+});
+
+// ---- BD-07：串號轉址 ----
+const mailTo = async (e, claimBody = { actor: 'courier' }) => (await (await call(e, 'POST', '/api/outbox/claim', claimBody)).json()).messages;
+
+test('BD-07：登記轉址後，寄給舊串的信領出來是新串，未結案卡的負責串一起改', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm-old' });
+  await claim(e, 'c1', 'dev-old'); await claim(e, 'c2', 'dev-old');
+  await drop(e, 'c2');                                                                   // 已結案（放棄）的卡不改
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'dev-old', to: 'dev-new' }, 'bad')).status, 401);
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'dev-old' })).status, 400);
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'x', to: 'x' })).status, 400);
+  const r = await (await call(e, 'POST', '/api/redirect', { from: 'dev-old', to: 'dev-new' })).json();
+  assert.deepEqual([r.resolved, r.cards_updated], ['dev-new', 1]);
+  assert.equal((await e.DB.prepare("SELECT owner_thread o FROM cards WHERE id='c1'").first()).o, 'dev-new');
+  assert.equal((await e.DB.prepare("SELECT owner_thread o FROM cards WHERE id='c2'").first()).o, 'dev-old');
+  // 舊信（寄給舊串）與環境變數裡的舊管理者串號，都轉到新串
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('dev-old','c1','stuck',1)").run();
+  await call(e, 'POST', '/api/redirect', { from: 'adm-old', to: 'adm-new' });
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('','c1','stuck',2)").run();   // 空收件人走管理者
+  const to = (await mailTo(e)).map(m => m.to_thread).sort();
+  assert.deepEqual(to, ['adm-new', 'dev-new']);
+  assert.equal((await (await call(e, 'GET', '/api/redirect')).json()).length, 2);
+});
+
+test('BD-07：鏈式轉址一路解析、超過 10 跳或繞圈不卡死', async () => {
+  const e = mkenv();
+  await call(e, 'POST', '/api/redirect', { from: 'a', to: 'b' }); await call(e, 'POST', '/api/redirect', { from: 'b', to: 'c' });
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('a','k1','stuck',1)").run();
+  assert.deepEqual((await mailTo(e)).map(m => m.to_thread), ['c']);
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'c', to: 'a' })).status, 409);   // 會繞圈：拒絕
+  // 資料庫裡已經有環（手動改過）：解析停在環前，不無限迴圈
+  await e.DB.prepare("INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES('c','a',1)").run();
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('a','k2','stuck',2)").run();
+  assert.equal((await mailTo(e)).length, 1);
+  // 超過 10 跳
+  const e2 = mkenv(); for (let i = 0; i < 15; i++) await e2.DB.prepare('INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES(?,?,1)').bind('n' + i, 'n' + (i + 1)).run();
+  await e2.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('n0','k1','stuck',1)").run();
+  assert.equal((await mailTo(e2))[0].to_thread, 'n10');
+});
