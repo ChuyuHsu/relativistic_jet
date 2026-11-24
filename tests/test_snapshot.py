@@ -39,12 +39,28 @@ class SnapshotTest(Base):
         d = snaps(self.con)[-1]
         by = {b["branch"]: b for b in d["branches"]}
         if self.state("a") == "merged":
-            self.assertNotIn("a", by)                       # 已合入的不列
+            self.assertIn("a", by)                          # 剛合入的要列（看板的合併事件萬一沒收到，靠快照對帳）
+            self.assertEqual(by["a"]["state"], "merged")
         self.assertIn("b", by)
         b = by["b"]
         self.assertEqual(set(b), {"branch", "state", "commit", "approved_sha", "retest"})
         self.assertEqual(b["commit"], "b-1")
         self.assertEqual(d["at"], self.now[0])
+
+    def test_old_merged_not_listed(self):
+        s = self.mk2()
+        self.repo.add("a")
+        s.tick(); self.approve_all("a")
+        self.go(until=lambda: "a" in self.merged())
+        self.now[0] += 400
+        s.tick()
+        rec = {b["branch"]: b for b in snaps(self.con)[-1]["branches"]}
+        self.assertEqual(rec["a"]["state"], "merged")             # 剛合入：列在快照裡
+        self.assertEqual(rec["a"]["commit"], "a-1")
+        self.con.execute("UPDATE branches SET updated_at=? WHERE name='a'", (store.now() - 3 * 3600,))
+        self.now[0] += 400
+        s.tick()
+        self.assertNotIn("a", [b["branch"] for b in snaps(self.con)[-1]["branches"]])
 
     def test_disabled_with_zero(self):
         s = self.mk2(notify={"snapshot_seconds": 0})

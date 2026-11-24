@@ -49,6 +49,7 @@ class LoopMixin:
             self.main = new
 
     SNAPSHOT_MAX = 500
+    SNAPSHOT_MERGED_S = 7200      # 快照裡保留最近合入的分支多久
     NIGHTLY_MAX_ITEMS = 100
     NIGHTLY_INFRA_TRIES = 3
     NIGHTLY_RETRY_S = 600
@@ -124,7 +125,11 @@ class LoopMixin:
             return
         self._snap_at = now
         try:
-            rows = [r for r in store.list_branches(self.con) if r["state"] != S.MERGED.value]
+            # 管理中的分支，加上最近 SNAPSHOT_MERGED_S 秒內合入的：看板的「合併」事件萬一沒送到或被當成過期丟掉，
+            # 看板能靠快照把卡對帳成已合併（否則會被誤報「放行超過 10 分鐘不在快照裡」）。
+            allrows = store.list_branches(self.con)
+            rows = [r for r in allrows if r["state"] != S.MERGED.value]
+            rows += [r for r in allrows if r["state"] == S.MERGED.value and (r["updated_at"] or 0) >= store.now() - self.SNAPSHOT_MERGED_S]
             branches = [{"branch": r["name"], "state": r["state"], "commit": r["head_sha"],
                          "approved_sha": r["approved_sha"], "retest": r["retest"] or 0}
                         for r in rows[:self.SNAPSHOT_MAX]]
