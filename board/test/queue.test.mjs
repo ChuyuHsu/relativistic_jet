@@ -688,13 +688,13 @@ test('放棄待查太久沒結果通知管理者一次；舊一輪的查驗結�
   assert.equal(await stageOf(e, 'c1'), 'dropping');
 });
 
-test('desired：一次讀卡，D1 往返只有一次（卡再多也不慢）', async () => {
+test('desired：一次讀卡，D1 往返固定幾次，與卡數無關（卡再多也不慢）', async () => {
   const e = mkenv();
   for (let i = 0; i < 40; i++) await claim(e, `d${i}`, `t${i}`, i ? { parent: `d${i - 1}` } : {});
   let trips = 0; const real = e.DB;
   e.DB = { prepare: sql => { const st = real.prepare(sql); const w = { bind: (...a) => { st.bind(...a); return w; }, all: () => { trips++; return st.all(); }, first: () => { trips++; return st.first(); }, run: () => { trips++; return st.run(); } }; return w; }, batch: l => real.batch(l) };
   const r = await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json();
-  assert.equal(r.cards.length, 40); assert.equal(trips, 1);
+  assert.equal(r.cards.length, 40); assert.ok(trips <= 2);   // 讀卡一次＋讀紅燈判斷一次，與卡數無關
 });
 
 test('superseded 的現版跟放行版本是同一個提交：不採信，送審與放行保留', async () => {
@@ -846,7 +846,15 @@ test('紅燈判斷：loop_triage 存下並通知管理者；總指揮 POST /api/
   g = await (await call(e, 'GET', '/api/triage', undefined, 'h')).json();
   assert.equal(g.triage.status, 'answered'); assert.equal(g.triage.suspects[0].branch, 'dev/b'); assert.equal(g.triage.answered_by, 'tester');
   assert.equal((await (await call(e, 'GET', '/api/workflow')).json()).triage.verdict, 'suspects');
-  await hook(e, [{ id: 't2', kind: 'loop_culprit', main_sha: 'abcdef1234567890', branch: 'dev/b' }]);
+  const des = await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json();   // 排隊器從 desired 頂層讀嫌疑
+  assert.deepEqual(des.loop_suspect, { main_sha: 'abcdef1234567890', branch: 'dev/b' });
+  // 排隊器實際欄位名：green_sha／commits[{sha,branch,subject}]／failed_items[{item_id,summary}]
+  await hook(e, [{ id: 't1b', kind: 'loop_triage', main_sha: 'ffffeeeedddd', green_sha: '1111', commits: [{ sha: 'z1', branch: 'dev/q', subject: 's' }], failed_items: [{ item_id: 'unit_y', summary: 'x' }], deadline_at: 123 }]);
+  const t2 = (await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage;
+  assert.equal(t2.status, 'pending'); assert.equal(t2.range[0].branch, 'dev/q'); assert.equal(t2.failed_items[0].item, 'unit_y'); assert.equal(t2.last_green_sha, '1111'); assert.equal(t2.deadline_at, 123);
+  assert.equal((await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json()).loop_suspect, undefined);   // 新一輪待判斷：舊嫌疑不再給
+  await call(e, 'POST', '/api/triage', { verdict: 'suspects', suspects: [{ branch: 'dev/b' }] });
+  await hook(e, [{ id: 't2', kind: 'loop_culprit', main_sha: 'ffffeeeedddd', branch: 'dev/b' }]);
   assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage.status, 'resolved');
   await hook(e, [{ id: 't3', kind: 'loop_green' }]);
   assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage, null);

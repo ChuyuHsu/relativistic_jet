@@ -109,7 +109,9 @@ async function desired(req, env) {
         const sc = c.superseded_by ? by.get(c.superseded_by) : null;
         return { card: c.id, branch: c.branch || branchFor(env, c.id), superseded_by_branch: sc ? (sc.branch || branchFor(env, sc.id)) : null, dropping_at: c.dropping_at };   // dropping_at 請原樣帶回事件，用來認是哪一次放棄
       });
-      return json({ cards: out, drop_checks });
+      const tri = await getTriage(env.DB);   // 總指揮判斷出的嫌疑分支：排隊器只驗證一次（與 cards、drop_checks 同層）
+      const loop_suspect = tri && tri.status === 'answered' && tri.verdict === 'suspects' && tri.suspects && tri.suspects.length ? { main_sha: tri.main_sha, branch: tri.suspects[0].branch } : null;
+      return json(loop_suspect ? { cards: out, drop_checks, loop_suspect } : { cards: out, drop_checks });
     }
     return json(out);
   } catch { return json({ error: '看板內部錯誤' }, 500); }

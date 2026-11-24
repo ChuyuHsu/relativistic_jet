@@ -91,9 +91,9 @@ export async function handleHook(req, env, ctx) {
       }
       if (kind === 'loop_triage') {   // 背景循環紅了：先請人讀 diff 判斷嫌疑分支（比二分快）；存起來、通知管理者，回報走 POST /api/triage
         const cut = (v, n) => String(v ?? '').slice(0, n);
-        const range = (Array.isArray(e.range) ? e.range : []).slice(0, 200).map(r => ({ commit: cut(r && r.commit, 40), branch: cut(r && r.branch, 120), subject: cut(r && r.subject, 160) }));
-        const failed = (Array.isArray(e.failed_items) ? e.failed_items : []).slice(0, 20).map(f => (f && typeof f === 'object') ? { item: cut(f.item ?? f.name, 120), summary: cut(f.summary, 1200) } : { item: cut(f, 120) });
-        const tri = { main_sha: cut(e.main_sha, 40), last_green_sha: cut(e.last_green_sha, 40), range, failed_items: failed, detail: cut(e.detail, 500), status: 'pending', at: T };
+        const range = (Array.isArray(e.commits) ? e.commits : Array.isArray(e.range) ? e.range : []).slice(0, 200).map(r => ({ commit: cut(r && (r.sha ?? r.commit), 40), branch: cut(r && r.branch, 120), subject: cut(r && r.subject, 160) }));
+        const failed = (Array.isArray(e.failed_items) ? e.failed_items : []).slice(0, 20).map(f => (f && typeof f === 'object') ? { item: cut(f.item ?? f.item_id ?? f.name, 120), summary: cut(f.summary, 1200) } : { item: cut(f, 120) });
+        const tri = { main_sha: cut(e.main_sha, 40), last_green_sha: cut(e.green_sha ?? e.last_green_sha, 40), deadline_at: e.deadline_at ?? null, range, failed_items: failed, detail: cut(e.detail, 500), status: 'pending', at: T };
         q("INSERT INTO meta(key,value,updated_at) VALUES('triage',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify(tri).slice(0, 60000), T);
         const brs = [...new Set(range.map(r => r.branch).filter(Boolean))];
         post(admins.length ? admins : [''], null, 'loop_triage', null, `main 紅燈 ${tri.main_sha.slice(0, 8)}（上次綠 ${tri.last_green_sha.slice(0, 8)}）：區間 ${range.length} 筆提交，分支 ${brs.slice(0, 8).join('、')}${brs.length > 8 ? '…' : ''}；紅項 ${failed.map(f => f.item).slice(0, 5).join('、')}。請讀 diff 判斷嫌疑分支，再 POST /api/triage 回報（或回「看不出來」）。`.slice(0, 500));

@@ -267,7 +267,7 @@
 
 背景循環在 main 紅了，先請人讀 diff 判斷嫌疑分支（比直接二分快），看不出來再跑二分：
 
-- 排隊器送事件 `loop_triage`：`{kind, id, main_sha, last_green_sha, range:[{commit, branch, subject}], failed_items:[{item, summary}], detail}`。看板存起來（`/api/workflow` 與 `GET /api/triage` 讀得到）並通知管理者（`loop_triage`）。
+- 排隊器送事件 `loop_triage`：`{kind, id, main_sha, green_sha, commits:[{sha, branch, subject}], failed_items:[{item_id, summary}], deadline_at, detail}`（欄位名也接受 last_green_sha、range[{commit}]、failed_items[{item}]）。看板存起來（`/api/workflow` 與 `GET /api/triage` 讀得到）並通知管理者（`loop_triage`）。
 - 管理者回報：`POST /api/triage`（TOKEN）`{actor, main_sha?, verdict:"suspects"|"unknown", suspects:[{branch, commit?, reason?}], note?}`；`main_sha` 帶了就要對得上（409）；`suspects` 至少一個；沒有待判斷的紅燈回 404。
-- 排隊器讀：`GET /api/triage`（HOOK_TOKEN／READ_TOKEN／TOKEN）回 `{triage}`，`status` 為 `pending`（等人）、`answered`（已回報，看 `verdict`／`suspects`）、`resolved`（已送 `loop_culprit`）。排隊器讀到 `suspects` 只對嫌疑跑一次驗證，確認後照舊送 `loop_culprit` 開急修卡；`unknown` 就自己二分。
+- 排隊器讀：`GET /api/queue/desired?with=drop_checks` 的頂層多一個 `loop_suspect:{main_sha, branch}`（總指揮回報了 suspects 才有，與 `cards`、`drop_checks` 同層；多個嫌疑時給第一個）；也可 `GET /api/triage`（HOOK_TOKEN／READ_TOKEN／TOKEN）回 `{triage}`，`status` 為 `pending`（等人）、`answered`（已回報，看 `verdict`／`suspects`）、`resolved`（已送 `loop_culprit`）。排隊器讀到 `suspects` 只對嫌疑跑一次驗證，確認後照舊送 `loop_culprit` 開急修卡；`unknown` 就自己二分。
 - 送 `loop_culprit` 會把這筆標成 `resolved`；`loop_green` 清掉。
