@@ -70,3 +70,5 @@ CREATE TRIGGER IF NOT EXISTS rev_meta_i AFTER INSERT ON meta WHEN NEW.key!='rev'
 CREATE TRIGGER IF NOT EXISTS rev_meta_u AFTER UPDATE ON meta WHEN NEW.key!='rev' BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
 CREATE TRIGGER IF NOT EXISTS rev_meta_d AFTER DELETE ON meta WHEN OLD.key!='rev' BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
 CREATE TRIGGER IF NOT EXISTS rev_perf_i AFTER INSERT ON loop_perf BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+-- BD-07 串號轉址：舊串號 → 新串號。信箱領信時沿著轉址鏈解析收件串，不用到處改串號
+CREATE TABLE IF NOT EXISTS thread_redirect (from_thread TEXT PRIMARY KEY, to_thread TEXT NOT NULL, at INTEGER NOT NULL);

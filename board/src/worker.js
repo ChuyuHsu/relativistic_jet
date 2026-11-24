@@ -1,6 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck, housekeeping } from './queue.js';
+import { loadRedirects, resolveThread, handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck, housekeeping } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、merged 已合併、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
@@ -210,6 +210,24 @@ async function handleInner(req, env, ctx, gated = false) {
     if (want.length) { const w = new Set(want); out = out.filter(c => w.has(c.stage)); }
     else if (!all && !status) out = out.filter(c => c.stage !== 'merged' && c.stage !== 'dropped');
     return json(out);
+  }
+  if (path === '/api/redirect' && req.method === 'GET') {   // 目前的串號轉址表
+    return json((await db.prepare('SELECT from_thread AS "from",to_thread AS "to",at FROM thread_redirect ORDER BY at DESC').all()).results);
+  }
+  if (path === '/api/redirect' && req.method === 'POST') {   // 登記轉址：{from,to,actor}；同時把未結案卡片的 owner_thread 改成新串
+    const body = await req.clone().json().catch(() => ({}));
+    const from = String(body.from ?? '').trim(), to = String(body.to ?? '').trim();
+    if (!String(body.actor ?? '').trim() || String(body.actor).toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
+    if (!from || !to) return json({ error: 'from 與 to 都要填' }, 400);
+    if (from === to) return json({ error: 'from 不能等於 to' }, 400);
+    const map = await loadRedirects(db);
+    const dest = resolveThread(map, to);
+    if (dest === from) return json({ error: '這樣會繞圈（to 最後又轉回 from）' }, 409);
+    const t = now();
+    await db.prepare('INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES(?,?,?) ON CONFLICT(from_thread) DO UPDATE SET to_thread=excluded.to_thread,at=excluded.at').bind(from, to, t).run();
+    // 所有指向 from 的舊轉址不用動（解析時會一路走到新的）；卡片直接改成最終的串
+    const r = await db.prepare("UPDATE cards SET owner_thread=?,updated_at=? WHERE owner_thread=? AND status IN ('open','claimed','waiting')").bind(dest, t, from).run();
+    return json({ from, to, resolved: dest, cards_updated: r.meta.changes });
   }
   if (req.method === 'GET' && path === '/api/stats') {   // 各階段張數（頁首用）：進行中的卡算出階段，已合併與已放棄只數張數不讀內容
     const act = (await db.prepare('SELECT * FROM cards WHERE ' + ACTIVE_SQL).all()).results;

@@ -385,6 +385,15 @@ const NEXT = {
 };
 const CLAIM_TTL = 300;
 
+// 串號轉址：沿鏈解析（最多 10 跳；遇到繞圈就停在繞圈前的最後一個）
+export function resolveThread(map, id) {
+  let cur = id; const seen = new Set([cur]);
+  for (let i = 0; i < 10 && map.has(cur); i++) { const nx = map.get(cur); if (seen.has(nx)) break; seen.add(nx); cur = nx; }
+  return cur;
+}
+export async function loadRedirects(db) {
+  return new Map((await db.prepare('SELECT from_thread,to_thread FROM thread_redirect').all()).results.map(r => [r.from_thread, r.to_thread]));
+}
 export async function outboxClaim(req, env) {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
   const body = await req.json().catch(() => ({}));
@@ -393,7 +402,9 @@ export async function outboxClaim(req, env) {
   const db = env.DB, t = now(), token = `${t}-${crypto.randomUUID()}`;
   await db.prepare('UPDATE outbox SET claimed_at=?,claim_id=? WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(t, token, t - CLAIM_TTL).run();
   const rows = (await db.prepare('SELECT * FROM outbox WHERE sent_at IS NULL AND claim_id=? ORDER BY n').bind(token).all()).results;
-  const fallback = list(env.ADMIN_THREADS)[0] || '';
+  const redir = await loadRedirects(db);
+  const fallback = resolveThread(redir, list(env.ADMIN_THREADS)[0] || '');
+  for (const r of rows) if (r.owner_thread) r.owner_thread = resolveThread(redir, r.owner_thread);   // 收件串一律經過轉址（環境變數與舊卡上的串號也一樣）
   // 同一個收件串、同一張卡的通知只留最新一則（舊的已被新的取代，直接標成已送）：壓低發信量。沒有卡號的通知不合併。
   const latest = new Map(), stale = [];
   for (const r of rows) {
@@ -409,7 +420,7 @@ export async function outboxClaim(req, env) {
   // 沒輪到的不是丟掉，只是把領取標記放掉，下一次 claim 再給（claimed_at 清空，不用等 5 分鐘）。
   const minGap = Math.max(0, Number(body.min_gap_s) || 0), maxMsg = Number.isInteger(body.max_messages) && body.max_messages > 0 ? body.max_messages : Infinity;
   const lastSent = new Map();
-  if (minGap > 0) for (const r of (await db.prepare('SELECT owner_thread, max(sent_at) AS t FROM outbox WHERE sent_at IS NOT NULL GROUP BY owner_thread').all()).results) lastSent.set(r.owner_thread || fallback, r.t);
+  if (minGap > 0) for (const r of (await db.prepare('SELECT owner_thread, max(sent_at) AS t FROM outbox WHERE sent_at IS NOT NULL GROUP BY owner_thread').all()).results) lastSent.set(resolveThread(redir, r.owner_thread) || fallback, Math.max(r.t, lastSent.get(resolveThread(redir, r.owner_thread) || fallback) ?? 0));
   const held = [];
   let given = 0;
   for (const [to, items] of [...groups].sort((a, b) => Math.min(...a[1].map(i => i.at)) - Math.min(...b[1].map(i => i.at)))) {

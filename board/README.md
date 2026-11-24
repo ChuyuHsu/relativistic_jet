@@ -41,6 +41,8 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 4. 機密全用 `wrangler secret put`（自己想長亂碼，不要貼進聊天）：`TOKEN`（寫入）、`READ_TOKEN`（只讀，選配）、`HOOK_TOKEN`（排隊器用）、`ROUTINE_KEY`（叫醒用，選配）。設定（非機密）：`BRANCH_PREFIX`、`ROUTINE_ID`、`WAKE_BATCH_S`、`WAKE_MAX_PER_HOUR`、`REVIEW_THREADS`（送審時要叫醒的審查串 id，逗號分隔）、`ADMIN_THREADS`（卡住提醒對象）、`STUCK_HOURS`。串 id 屬於各專案私有設定，放本機的 `wrangler.local.toml`，不提交。
 5. `wrangler deploy`，網址就是看板。
 
+- **串號轉址（BD-07）**：`POST /api/redirect {from,to,actor}`（寫入權杖）登記「舊串→新串」，同時把未結案（open／claimed／waiting）卡片的 `owner_thread` 改成最終的新串；`GET /api/redirect` 列出。信箱 `outbox/claim` 領信時沿轉址鏈解析收件串（最多 10 跳，繞圈停在環前；登記時會繞圈直接 409），環境變數 `REVIEW_THREADS`／`ADMIN_THREADS` 裡的舊串號與舊信也經過同一個解析。重開串時只要打一次 redirect。升級要跑 `migrate_018.sql`。
+
 升級已部署的資料庫：依序各跑一次 `migrate_001.sql`～`migrate_005.sql`，再跑 `schema.sql`。測試：`cd board && npm test`（Node 22，不需安裝套件）。
 
 ## 信箱（收信端自己來領）

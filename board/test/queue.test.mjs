@@ -1074,3 +1074,42 @@ test('BD-06：快照補上接手卡的 merged 時，等它的卡一樣自動結�
   assert.equal(await stageOf(e, 'A'), 'dropped');
   assert.ok((await pending(e)).some(x => x.kind === 'waiting_done' && x.card_id === 'A'));
 });
+
+// ---- BD-07：串號轉址 ----
+const mailTo = async (e, claimBody = { actor: 'courier' }) => (await (await call(e, 'POST', '/api/outbox/claim', claimBody)).json()).messages;
+
+test('BD-07：登記轉址後，寄給舊串的信領出來是新串，未結案卡的負責串一起改', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm-old' });
+  await claim(e, 'c1', 'dev-old'); await claim(e, 'c2', 'dev-old');
+  await drop(e, 'c2');                                                                   // 已結案（放棄）的卡不改
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'dev-old', to: 'dev-new' }, 'bad')).status, 401);
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'dev-old' })).status, 400);
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'x', to: 'x' })).status, 400);
+  const r = await (await call(e, 'POST', '/api/redirect', { from: 'dev-old', to: 'dev-new' })).json();
+  assert.deepEqual([r.resolved, r.cards_updated], ['dev-new', 1]);
+  assert.equal((await e.DB.prepare("SELECT owner_thread o FROM cards WHERE id='c1'").first()).o, 'dev-new');
+  assert.equal((await e.DB.prepare("SELECT owner_thread o FROM cards WHERE id='c2'").first()).o, 'dev-old');
+  // 舊信（寄給舊串）與環境變數裡的舊管理者串號，都轉到新串
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('dev-old','c1','stuck',1)").run();
+  await call(e, 'POST', '/api/redirect', { from: 'adm-old', to: 'adm-new' });
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('','c1','stuck',2)").run();   // 空收件人走管理者
+  const to = (await mailTo(e)).map(m => m.to_thread).sort();
+  assert.deepEqual(to, ['adm-new', 'dev-new']);
+  assert.equal((await (await call(e, 'GET', '/api/redirect')).json()).length, 2);
+});
+
+test('BD-07：鏈式轉址一路解析、超過 10 跳或繞圈不卡死', async () => {
+  const e = mkenv();
+  await call(e, 'POST', '/api/redirect', { from: 'a', to: 'b' }); await call(e, 'POST', '/api/redirect', { from: 'b', to: 'c' });
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('a','k1','stuck',1)").run();
+  assert.deepEqual((await mailTo(e)).map(m => m.to_thread), ['c']);
+  assert.equal((await call(e, 'POST', '/api/redirect', { from: 'c', to: 'a' })).status, 409);   // 會繞圈：拒絕
+  // 資料庫裡已經有環（手動改過）：解析停在環前，不無限迴圈
+  await e.DB.prepare("INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES('c','a',1)").run();
+  await e.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('a','k2','stuck',2)").run();
+  assert.equal((await mailTo(e)).length, 1);
+  // 超過 10 跳
+  const e2 = mkenv(); for (let i = 0; i < 15; i++) await e2.DB.prepare('INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES(?,?,1)').bind('n' + i, 'n' + (i + 1)).run();
+  await e2.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('n0','k1','stuck',1)").run();
+  assert.equal((await mailTo(e2))[0].to_thread, 'n10');
+});
