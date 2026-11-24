@@ -133,7 +133,7 @@ def add_event(con, kind, branch=None, detail=None):
 
 MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
                  "superseded", "parent_blocked", "drop_checked", "selftest_started", "batch_started",
-                 "workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
+                 "workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf", "state_snapshot")   # 給機器看的事件：不進人的待辦（寫入時就標成已處理）
 
 
 def emit(con, kind, branch, detail: dict, commit_sha=None, force=False):

@@ -49,6 +49,7 @@ class Config:
     notify_url: Optional[str] = None
     notify_batch_s: int = 180
     notify_destinations: List[dict] = field(default_factory=list)   # 多個通知目的地（選配）
+    snapshot_s: int = 300             # 每幾秒送一份現況快照（state_snapshot）給看板對帳；0＝不送
     listen: str = "127.0.0.1:8080"
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
@@ -65,6 +66,12 @@ class Config:
     recheck_red: bool = True          # 自測紅時，先把新紅項放在乾淨 main 上單獨重跑；main 也紅就不算這張卡的錯
     order: str = "parallel"           # review_first＝先審後測；parallel＝不分先後
     source: Optional[dict] = None     # 外部來源（選配）：{url, token_file, poll_seconds, max_age_s, timeout_s}
+
+
+def _snap_s(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        raise ConfigError("notify.snapshot_seconds 必須是 ≥0 的數字（0＝不送）")
+    return int(v)
 
 
 def _need(d, k, typ):
@@ -127,6 +134,7 @@ def parse(d: dict) -> Config:
         notify_url=notify.get("url"),
         notify_batch_s=notify.get("batch_seconds", 60),
         notify_destinations=_parse_destinations(notify.get("destinations")),
+        snapshot_s=_snap_s(notify.get("snapshot_seconds", 300)),
         listen=api.get("listen", "127.0.0.1:8080"),
         read_key_file=api.get("read_key_file"),
         write_key_file=api.get("write_key_file"),
