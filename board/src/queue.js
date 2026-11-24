@@ -194,6 +194,7 @@ export async function handleHook(req, env, ctx) {
       // 優先用事件自帶的上游狀態名（state，或排隊器狀態事件的 to），否則依 kind 對照
       const to = kind === 'superseded' ? null : e.state ? String(e.state) : (typeof e.to === 'string' && /^[a-z_]{3,20}$/.test(e.to) ? e.to : PHASE_OF[kind]);
       if (to) patch(card, { phase: to, phase_at: T, updated_at: T });
+      if (to === 'merged' && card.status === 'claimed') patch(card, { status: 'merged' });   // 已進 main：離開 claimed，輪詢與卡住提醒不再掃到它
       if (!['approved', 'revoked', 'superseded', 'parent_blocked'].includes(kind)) {   // 放行是看板自己的欄位；父卡擋住只是註記，都不覆蓋「最新結果」
         let fi = Array.isArray(e.failed_items) && e.failed_items.length ? e.failed_items.slice(0, 50).map(f => (f && typeof f === 'object' && typeof f.summary === 'string' && f.summary.length > 1200) ? { ...f, summary: f.summary.slice(0, 1200) } : f) : null;
         if (!fi) { const prev = resultOf(card); if (prev && prev.failed_items && prev.failed_items.length && e.commit && prev.commit === e.commit) fi = prev.failed_items; }   // 同一版本後來的事件（如 rejected）沒帶紅項就沿用先前的

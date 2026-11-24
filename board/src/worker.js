@@ -2,7 +2,7 @@
 import { bearerIs } from './auth.js';
 import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck, housekeeping } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
-// 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
+// 卡片自己只管前段與結局：open 空、claimed 已認領、merged 已合併、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
 // 排隊器自己定時來拉 /api/queue/desired 取得該管哪些分支與放行；看板不主動連排隊器。
 const STATUSES = ['open', 'claimed', 'dropped'];
@@ -372,7 +372,7 @@ async function handleInner(req, env, ctx) {
       await log(db, id, actor, '補寫放棄理由' + (body.note ? `：${body.note}` : ''));
       return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
     }
-    if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
+    if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged' || c.status === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
     const resend = body.status === 'dropped' && Object.keys(body).every(k => ['status', 'actor', 'superseded_by', 'discard_reason', 'note'].includes(k));
     if (stageOf(c) === 'waiting_parent') {   // 等待父卡：等接手卡進 main 自動結案；只允許重送放棄（回現況）
       if (body.status === 'dropped' && resend) return json(view(c));
