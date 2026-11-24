@@ -156,3 +156,34 @@ class SnapshotDedupeTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NightlyCancelTest(NightlyTest):
+    def test_cancel_requeues_then_reports_after_limit(self):
+        s = self.mk2({"at": "03:30"}, status="cancelled")
+        self.now[0] = at(25, 3, 31)
+        for _ in range(4):
+            s.tick()
+        self.assertEqual(len(self.fulls()), 1)
+        self.assertEqual(self.results(), [])                   # 被取消：重排，不是沒結果就算了
+        self.assertEqual(store.get_meta(self.con, "nightly_day"), "")
+        for _ in range(2):
+            self.now[0] += 601
+            for _ in range(4):
+                s.tick()
+        self.assertEqual(len(self.fulls()), 3)
+        r = self.results()
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["red"][0]["item"], "完整層被取消")
+
+    def test_recover_requeues_lost_nightly(self):
+        s = self.mk2({"at": "03:30"})
+        store.set_meta(self.con, "nightly_day", "2026-11-25")
+        self.con.execute("INSERT INTO runs(id,kind,status,started_at,workdir,cores,timeout_s,units,layer,commit_sha) "
+                         "VALUES(500,'nightly','running',1,'x','1',1,1,'full','m0')")
+        s.recover()
+        self.assertEqual(store.get_meta(self.con, "nightly_day"), "")
+        self.now[0] = at(25, 3, 40)
+        for _ in range(4):
+            s.tick()
+        self.assertTrue(self.fulls())

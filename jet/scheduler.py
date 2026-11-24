@@ -156,6 +156,14 @@ class Scheduler:
                 cl(keep=[j.workdir for j in adopted.values() if j.workdir])
             except TypeError:
                 cl()
+        lost = c.execute("SELECT id FROM runs WHERE kind='nightly' AND status IN ('running','queued')"
+                         + (" AND id NOT IN (%s)" % ",".join(str(r) for r in adopted) if adopted else "")).fetchall()
+        if lost:                    # 每日完整層沒接管到（換版或停機時被殺）：當天重排，次數照 _on_nightly 的規則算
+            n = int(store.get_meta(c, "nightly_infra", "0") or 0) + 1
+            store.set_meta(c, "nightly_infra", str(n))
+            if n < self.NIGHTLY_INFRA_TRIES:
+                store.set_meta(c, "nightly_day", "")
+                store.set_meta(c, "nightly_retry_at", "0")
         c.execute("UPDATE runs SET status='cancelled', finished_at=? WHERE status IN ('running','queued')"
                   + (" AND id NOT IN (%s)" % ",".join(str(r) for r in adopted) if adopted else ""),
                   (self.clock(),))
@@ -1067,11 +1075,9 @@ class Scheduler:
         if res.status in ("infra", "cancelled"):
             n = int(store.get_meta(c, "nightly_infra", "0") or 0) + 1
             store.set_meta(c, "nightly_infra", str(n))
-            if n < self.NIGHTLY_INFRA_TRIES and res.status == "infra":
-                store.set_meta(c, "nightly_day", "")                       # 今天再試
+            if n < self.NIGHTLY_INFRA_TRIES:                                # 基礎設施錯誤或被取消（換版、停機）：今天重排
+                store.set_meta(c, "nightly_day", "")
                 store.set_meta(c, "nightly_retry_at", str(self.clock() + self.NIGHTLY_RETRY_S))
-                return
-            if res.status == "cancelled":
                 return
         store.set_meta(c, "nightly_infra", "0")
         r = c.execute("SELECT started_at, finished_at, report_path, log_path FROM runs WHERE id=?", (j.run_id,)).fetchone()
@@ -1095,6 +1101,8 @@ class Scheduler:
             timeouts.append({"item": "完整層整體逾時", "summary": ex[:800]})
         if res.status == "infra":
             red.append({"item": "基礎設施錯誤", "summary": "完整層測試沒跑起來（重試仍失敗）"})
+        if res.status == "cancelled":
+            red.append({"item": "完整層被取消", "summary": "完整層測試多次被取消（換版或停機），沒有完整結果"})
         if res.status == "fail" and not red and not timeouts:
             red.append({"item": "未知紅項", "summary": "測試失敗但報告沒列出紅項"})
         store.emit(c, "full_result", None, {"main_sha": j.head_sha, "started_at": r["started_at"], "finished_at": r["finished_at"] or self.clock(),
