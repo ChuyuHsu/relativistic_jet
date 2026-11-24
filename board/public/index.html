@@ -68,7 +68,11 @@ function redDraw(w){
   const L=w.red_items||[];
   if(!w.mode){redp.innerHTML='';return}
   const st=x=>S[x]||x;
-  if(!w.main_red&&!L.length){redp.innerHTML='<div class="rp ok"><h2>main 全綠</h2></div>';return}
+  const lp=w.loop||{},t=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
+  if(!w.main_red&&!L.length){
+    if(w.mode!=='direct_merge'){redp.innerHTML='<div class="rp"><h2>沒有背景測試</h2><div class="m">目前是閘門批測模式，main 的紅綠看批測結果。</div></div>';return}
+    if(lp.last_result==='green'||lp.state==='green'){redp.innerHTML=`<div class="rp ok"><h2>main 全綠</h2><div class="m">背景測試最後一次通過${lp.last_run_at?'：'+t(lp.last_run_at):''}${lp.main_sha?'（'+esc(String(lp.main_sha).slice(0,8))+'）':''}</div></div>`;return}
+    redp.innerHTML=`<div class="rp"><h2>尚未收到背景測試結果</h2><div class="m">背景測試${lp.state==='running'?'正在跑第一輪':'還沒有完成的結果'}${lp.last_run_at?'（開始 '+t(lp.last_run_at)+'）':''}，跑完才知道 main 紅綠。</div></div>`;return}
   const sus=(w.triage&&w.triage.suspects)||[];
   redp.innerHTML=`<div class="rp bad"><h2>main 紅項 ${L.length||'？'} 個${w.triage&&w.triage.status==='pending'?'（等總指揮讀 diff 判斷嫌疑）':''}</h2>`+
     (L.length?L.map(r=>`<div class="it"><b>${esc(r.item)}</b>${r.summary?`<span class="m"> ${esc(r.summary)}</span>`:''}<br><span class="m">${r.fixers.length?'修理中：'+r.fixers.map(f=>`${esc(f.id)}（${esc(st(f.stage))}${f.owner?'・'+esc(f.owner):''}）`).join('、'):(r.suspects.length?'嫌疑分支：'+r.suspects.map(esc).join('、')+'（驗證中）':'還沒有人在修')}</span></div>`).join(''):'<div class="m">紅項明細還沒回報</div>')+'</div>';
