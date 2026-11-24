@@ -420,6 +420,7 @@ class Scheduler:
         self._enforce_review_first()
         self._put("guard", self._guard_info())
         self._promote()
+        self._snapshot_step()
         if store.is_paused(self.con) or not self.resources_ok():
             return
         if self.cfg.workflow_mode != "direct_merge":
@@ -1029,6 +1030,28 @@ class Scheduler:
             store.apply_event(c, r["name"], Event.BATCH_MERGED, merged_sha=new)
             self._after_merge([r["name"]], new, None, main)
             self.main = new
+
+    SNAPSHOT_MAX = 500
+
+    def _snapshot_step(self):
+        """定期送現況快照（BD-06 規格，CARD_FLOW §7 state_snapshot）：排隊器管理中的每條分支的狀態、提交、放行版本、重測次數。
+        跟一般事件走同一張有序的事件表，所以一定排在先前的 merged 等事件之後。送不出去不影響調度。"""
+        every = self.cfg.snapshot_s
+        if not every or every <= 0:
+            return
+        now = self.clock()
+        last = getattr(self, "_snap_at", None)
+        if last is not None and now - last < every:
+            return
+        self._snap_at = now
+        try:
+            rows = [r for r in store.list_branches(self.con) if r["state"] != S.MERGED.value]
+            branches = [{"branch": r["name"], "state": r["state"], "commit": r["head_sha"],
+                         "approved_sha": r["approved_sha"], "retest": r["retest"] or 0}
+                        for r in rows[:self.SNAPSHOT_MAX]]
+            store.emit(self.con, "state_snapshot", None, {"at": now, "branches": branches}, force=True)
+        except Exception as e:                      # 快照出錯不能影響調度
+            log.warning("現況快照失敗：%r", e)
 
     def _wf_status(self, state, **kw):
         """workflow_status 事件（整份取代）：狀態變了才送。"""
