@@ -531,3 +531,32 @@ class NongateIdsTest(unittest.TestCase):
         g = GitRepo.__new__(GitRepo)
         g.mirror = os.path.join(d, ".git"); g.timeout_s = 20
         self.assertEqual(g.nongate_ids(sha, "tests/shops"), ["b"])
+
+
+class DropCheckContentTest(DropCheckTest):
+    """逐檔比內容（JET-03）：squash 後內容相同、分支帶舊版、真的有沒進的改動。"""
+
+    def test_branch_carries_older_main_version(self):
+        self.branch("x", {"b.txt": "v1\n"})
+        self.to_main({"b.txt": "v1\n"})
+        self.to_main({"b.txt": "v2\n"})                          # main 已經走過 v1 又改成 v2
+        r = self.chk("x")
+        self.assertTrue(r["covered"])
+        self.assertFalse(r["unmerged"])
+        self.assertEqual(r["missing_files"], [])
+
+    def test_real_missing_change_still_reported(self):
+        self.branch("x", {"b.txt": "mine\n", "n.txt": "only mine\n"})
+        self.to_main({"b.txt": "v1\n"})
+        self.to_main({"b.txt": "mine\n"})                        # b.txt 已走過；n.txt 沒進
+        r = self.chk("x")
+        self.assertTrue(r["unmerged"])
+        self.assertEqual(r["missing_files"], ["n.txt"])
+        self.assertEqual(r["missing_count"], 1)
+
+    def test_superseder_has_same_content(self):
+        self.branch("x", {"b.txt": "new\n"})
+        self.branch("y", {"b.txt": "new\n"})
+        self.to_main({"b.txt": "other\n"})
+        r = self.chk("x", "y")
+        self.assertTrue(r["covered"])
