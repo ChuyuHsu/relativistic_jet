@@ -422,6 +422,14 @@ class Scheduler:
         self._promote()
         if store.is_paused(self.con) or not self.resources_ok():
             return
+        if self.cfg.workflow_mode != "direct_merge":
+            self._wf_status("idle", main_sha=self.main)        # 批測閘門模式：沒有背景 loop，只回報目前模式
+        if self.cfg.workflow_mode == "direct_merge":
+            if not self.draining:
+                self._loop_step()
+                self._direct_merge_step()
+                self._dispatch_selftests()
+            return
         if self.draining:
             if self.batch is not None:
                 self._batch_step()
@@ -570,7 +578,7 @@ class Scheduler:
         # 內容變了（或退回後重疊）：停掉在跑的工作，回待自測
         self._cancel_jobs(branch=name)
         if st == S.BATCHING.value:
-            self._abort_batch("成員有新提交")
+            self._truncate_batch(name, "成員有新提交")
         fields = {"head_sha": sha}
         if not same:
             fields.update(content_id=cid, fail_count=0, queued_at=None, reject_reason=None,
@@ -586,7 +594,7 @@ class Scheduler:
         name = row["name"]
         self._cancel_jobs(branch=name)
         if row["state"] == S.BATCHING.value:
-            self._abort_batch("成員消失")
+            self._truncate_batch(name, "成員消失")
         for ch in store.children(self.con, name):
             self.con.execute("UPDATE branches SET parent=NULL WHERE name=?", (ch["name"],))   # 外鍵：先脫鉤；來源模式的父卡以清單為準（_src_parent），父卡回來會重新套上
             self._parent_changed(ch)
@@ -693,9 +701,23 @@ class Scheduler:
         os.makedirs(d, exist_ok=True)
         log_p, rep_p = os.path.join(d, "output.log"), os.path.join(d, "report.json")
         self.con.execute("UPDATE runs SET log_path=?, report_path=? WHERE id=?", (log_p, rep_p, rid))
+        env_extra = None
+        try:                              # 提交訊息有 `Allow-Strings-Rewrite: <理由>` 尾行 → 這次測試帶 ALLOW_STRINGS_REWRITE=1（strings.csv 有意改既有行）
+            import re as _re
+            heads = [head_sha] if head_sha else []
+            if kind in ("point", "probe", "pretry") and self.batch is not None and size:
+                heads = [m[2] for m in self.batch.members[:size]]       # 批測：看每個成員自己的提交（疊成一個提交後訊息會不見）
+            base = self.repo.main_sha()
+            for h in heads or [sha]:
+                if h and base and h != base and _re.search(r"^Allow-Strings-Rewrite:[ \t]*\S",
+                                                          self.repo.commit_messages(base, h), _re.M | _re.I):
+                    env_extra = {"ALLOW_STRINGS_REWRITE": "1"}
+                    break
+        except Exception:
+            env_extra = None
         try:
             handle = self.executor.start(Job(layer=layer, workdir=wd, cores=cores, timeout_s=timeout,
-                                             report_path=rep_p, log_path=log_p, only=only))
+                                             report_path=rep_p, log_path=log_p, only=only, env_extra=env_extra))
         except Exception as e:
             ctx.__exit__(None, None, None)
             self.pool.release(cores)
@@ -719,12 +741,103 @@ class Scheduler:
             self._keep_artifacts(j)
         except Exception as e:                               # 留檔失敗不能影響測試結論
             log.warning("留存測試產物失敗：%r", e)
+        if j.kind in ("baseline", "loopprobe"):
+            try:
+                self._record_item_times(j)
+                self._record_item_metrics(j)
+            except Exception as e:
+                log.warning("記錄逐項耗時失敗：%r", e)
         try:
             j.ctx.__exit__(None, None, None)
         finally:
             self.pool.release(j.cores)
         self.con.execute("UPDATE runs SET status=?, finished_at=? WHERE id=?", (status, self.clock(), rid))
         return j
+
+    METRIC_COLS = ("secs", "draw_calls_avg", "draw_calls_max", "fps_avg", "fps_min", "objects", "mem_mb")
+
+    def _record_item_metrics(self, j):
+        """解析逐項畫面量測檔（JSON：{"schema":1,"items":{項目:{secs,draw_calls_avg,draw_calls_max,fps_avg,fps_min,objects,mem_mb}}}）。"""
+        pat = self.cfg.metrics_file
+        if not pat or not j.workdir:
+            return
+        import glob
+        root = os.path.realpath(j.workdir)
+        for src in sorted(glob.glob(os.path.join(j.workdir, pat), recursive=True)):
+            real = os.path.realpath(src)
+            if not os.path.isfile(real) or not real.startswith(root + os.sep) or os.path.getsize(real) > (20 << 20):
+                continue
+            try:
+                with open(real, encoding="utf-8") as f:
+                    items = (json.load(f) or {}).get("items") or {}
+            except (OSError, ValueError):
+                continue
+            if not isinstance(items, dict):
+                continue
+            for name, m in items.items():
+                if not isinstance(m, dict):
+                    continue
+                vals = []
+                for k in self.METRIC_COLS:
+                    v = m.get(k)
+                    vals.append(float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None)
+                self.con.execute("INSERT OR REPLACE INTO item_metrics(run_id,item,secs,draw_calls_avg,draw_calls_max,fps_avg,"
+                                 "fps_min,objects,mem_mb) VALUES(?,?,?,?,?,?,?,?,?)", (j.run_id, str(name), *vals))
+
+    def _record_item_times(self, j):
+        """解析逐項耗時檔，存進 item_times（背景 loop 的性能量測）。"""
+        pat = self.cfg.times_file
+        if not pat or not j.workdir:
+            return
+        import glob
+        root = os.path.realpath(j.workdir)
+        rows = {}
+        for src in sorted(glob.glob(os.path.join(j.workdir, pat), recursive=True)):
+            real = os.path.realpath(src)
+            if not os.path.isfile(real) or not real.startswith(root + os.sep):
+                continue
+            with open(real, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    p = line.rstrip("\n").split("\t")
+                    if len(p) < 3:
+                        continue
+                    try:
+                        a, b = float(p[1]), float(p[2])
+                    except ValueError:
+                        continue
+                    if b >= a:
+                        rows[p[0]] = (round(b - a, 2), a, b)
+        for item, (secs, a, b) in rows.items():
+            self.con.execute("INSERT OR REPLACE INTO item_times(run_id,item,secs,start_ts,end_ts) VALUES(?,?,?,?,?)",
+                             (j.run_id, item, secs, a, b))
+
+    def _record_loop_run(self, j, res):
+        """背景 loop 一次測試的整體量測，並把摘要送看板（loop_perf）。"""
+        c = self.con
+        r = c.execute("SELECT started_at, finished_at FROM runs WHERE id=?", (j.run_id,)).fetchone()
+        wall = (r["finished_at"] - r["started_at"]) if r and r["finished_at"] and r["started_at"] else res.duration_s
+        n = c.execute("SELECT COUNT(*) FROM item_times WHERE run_id=?", (j.run_id,)).fetchone()[0]
+        c.execute("INSERT OR REPLACE INTO loop_runs(run_id,kind,main_sha,started_at,finished_at,wall_s,cores_n,cpu_s,items_n,status)"
+                  " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  (j.run_id, j.kind, j.head_sha, r["started_at"] if r else None, r["finished_at"] if r else None,
+                   wall, len(j.cores) or j.units, res.cpu_s, n, res.status))
+        top = [{"item": x[0], "secs": x[1]} for x in c.execute(
+            "SELECT item, secs FROM item_times WHERE run_id=? ORDER BY secs DESC LIMIT 15", (j.run_id,))]
+        mx = lambda col, order, k=10: [{"item": x[0], "value": x[1]} for x in c.execute(
+            f"SELECT item, {col} FROM item_metrics WHERE run_id=? AND {col} IS NOT NULL ORDER BY {col} {order} LIMIT {k}", (j.run_id,))]
+        agg = c.execute("SELECT COUNT(*), AVG(fps_avg), MIN(fps_min), AVG(draw_calls_avg), MAX(draw_calls_max) FROM item_metrics WHERE run_id=?",
+                        (j.run_id,)).fetchone()
+        metrics = None
+        if agg and agg[0]:
+            metrics = {"items": agg[0], "fps_avg": round(agg[1], 1) if agg[1] is not None else None, "fps_min": agg[2],
+                       "draw_calls_avg": round(agg[3], 1) if agg[3] is not None else None, "draw_calls_max": agg[4],
+                       "lowest_fps": mx("fps_min", "ASC"), "most_draw_calls": mx("draw_calls_max", "DESC")}
+        util = None
+        if res.cpu_s and wall and (len(j.cores) or j.units):
+            util = round(res.cpu_s / (wall * (len(j.cores) or j.units)), 2)
+        store.emit(c, "loop_perf", None, {"main_sha": j.head_sha, "perf": {
+            "kind": j.kind, "wall_s": round(wall or 0, 1), "cores": len(j.cores) or j.units, "cpu_util": util,
+            "items": n, "top": top, "metrics": metrics}, "detail": f"背景測試耗時 {round(wall or 0)} 秒，{n} 項"}, force=True)
 
     ARTIFACT_MAX = 5 << 20           # 單檔上限；大的只留尾巴
 
@@ -773,6 +886,11 @@ class Scheduler:
             self._release_job(rid, res.status)
             if res.status not in ("infra", "cancelled"):
                 self._infra_streak = 0
+            if j.kind in ("baseline", "loopprobe") and res.status not in ("cancelled",):
+                try:
+                    self._record_loop_run(j, res)
+                except Exception as e:
+                    log.warning("記錄背景測試量測失敗：%r", e)
             if j.kind == "selftest":
                 self._on_selftest(j, res)
             elif j.kind == "recheck":
@@ -781,6 +899,8 @@ class Scheduler:
                 self._on_pretry(j, res)
             elif j.kind == "baseline":
                 self._on_baseline(j, res)
+            elif j.kind == "loopprobe":
+                self._on_loopprobe(j, res)
             else:
                 self._on_point(j, res)
 
@@ -870,7 +990,176 @@ class Scheduler:
         if res.status in ("infra", "timeout", "cancelled"):
             self._infra_retry("baseline")
             return
+        if self.cfg.workflow_mode == "direct_merge":
+            try:
+                rp = self.con.execute("SELECT report_path FROM runs WHERE id=?", (j.run_id,)).fetchone()
+                summ = executor.read_report_summaries(rp[0]) if rp and rp[0] else {}
+            except Exception:
+                summ = {}
+            self._loop_result(j.head_sha, res, summ)
         self._set_baseline_all(j.head_sha, set(res.failed_items))
+
+    # ---------- direct_merge 工作流：自測綠就直接合，背景 loop 測最新 main、紅了二分找兇手 ----------
+    def _direct_merge_step(self):
+        c = self.con
+        rows = [r for r in store.list_branches(c, S.QUEUED.value) if not self._direct_docs(r)]
+        rows.sort(key=lambda r: (-r["prio_override"], self._board_prio(r["name"]), r["queued_at"] or 0, r["name"]))
+        if not rows or not self._repull():
+            return
+        for r in rows:
+            r = store.get_branch(c, r["name"])
+            if r is None or r["state"] != S.QUEUED.value or r["parent"] is not None:
+                continue                                   # 父卡還沒合：等它合完（_after_merge 會把子卡脫離）
+            if not self._approved(r) or not self._tracked_ok(r["name"]) or r["name"] in self._blocked \
+                    or self._blocked_by_main_red(r):
+                continue
+            main = self.repo.main_sha()
+            res = self.repo.stack(main, [(r["name"], r["head_sha"])])
+            if len(res.kept) != 1:
+                store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason="疊不上 main（撞檔）")
+                store.add_event(c, "conflict", r["name"], "直接合入前疊不上 main")
+                continue
+            new = res.prefixes[0]
+            store.apply_event(c, r["name"], Event.BATCH_START)
+            try:
+                self.repo.fast_forward_main(new, main)
+            except MainMoved:
+                store.apply_event(c, r["name"], Event.BATCH_DEFERRED)
+                return
+            store.apply_event(c, r["name"], Event.BATCH_MERGED, merged_sha=new)
+            self._after_merge([r["name"]], new, None, main)
+            self.main = new
+
+    def _wf_status(self, state, **kw):
+        """workflow_status 事件（整份取代）：狀態變了才送。"""
+        loop = {"state": state, "last_run_at": kw.get("last_run_at"), "last_result": kw.get("last_result"),
+                "main_sha": kw.get("main_sha", self.main), "failed_items": kw.get("failed_items", []),
+                "next_run_at": kw.get("next_run_at")}
+        d = {"mode": self.cfg.workflow_mode, "loop": loop}
+        key = json.dumps(d, sort_keys=True, ensure_ascii=False)
+        if store.get_meta(self.con, "wf_status") != key:
+            store.set_meta(self.con, "wf_status", key)
+            store.emit(self.con, "workflow_status", None, d, force=True)
+
+    def _loop_cfg(self):
+        cores = self.cfg.loop_cores or self.cfg.batch_cores
+        return cores, (self.cfg.loop_timeout_s or self.cfg.batch_timeout_s)
+
+    def _loop_step(self):
+        """背景 loop：一次只跑一個；先處理二分，沒有二分就測最新 main（測過的 main 不重測）。"""
+        if not self.cfg.loop_enabled:
+            return
+        if any(j.kind in ("baseline", "loopprobe") for j in self.jobs.values()):
+            self._wf_status("bisecting" if store.get_meta(self.con, "loop_bisect") else "running",
+                            last_run_at=self.clock(), main_sha=self.main)
+            return
+        cores, to = self._loop_cfg()
+        raw = store.get_meta(self.con, "loop_bisect")
+        if raw:
+            st = json.loads(raw)
+            if st.get("phase") == "triage":
+                idx = self._loop_suspect_idx(st)
+                if idx is not None:           # 看板回了嫌疑：只驗證一次（嫌疑提交與它前一個各跑一次紅項）
+                    st["queue"] = [st["cands"][idx]] + ([st["cands"][idx - 1]] if idx > 0 else [])
+                    st["phase"] = "verify"
+                    store.set_meta(self.con, "loop_bisect", json.dumps(st))
+                elif self.clock() >= st.get("deadline", 0):
+                    st["phase"] = "bisect"    # 逾時：改二分
+                    store.set_meta(self.con, "loop_bisect", json.dumps(st))
+                else:
+                    self._wf_status("triage", main_sha=st.get("red_sha"), last_result="red", failed_items=st["items"])
+                    return
+            if st.get("queue"):
+                nxt = st["queue"][0]
+                if self._launch("loopprobe", "gate", nxt, cores, to, base_sha=nxt, head_sha=nxt):
+                    st["queue"].pop(0)
+                    store.set_meta(self.con, "loop_bisect", json.dumps(st))
+                return
+            if st["hi"] - st["lo"] <= 1:
+                self._loop_conclude(st)
+                return
+            mid = (st["lo"] + st["hi"]) // 2
+            self._launch("loopprobe", "gate", st["cands"][mid], cores, to, base_sha=st["cands"][mid], head_sha=st["cands"][mid])
+            return
+        main = self.main
+        if store.get_meta(self.con, "loop_tested") != main:
+            self._launch("baseline", "gate", main, cores, to, base_sha=main)
+        else:
+            self._wf_status("green" if store.get_meta(self.con, "loop_green") == main else "idle", main_sha=main)
+
+    def _loop_result(self, sha, res, summ=None):
+        """對最新 main 的一次 gate 結果：沒有新紅就記為綠；有新紅就從上次綠的 main 到這個 sha 二分找兇手。"""
+        c = self.con
+        store.set_meta(c, "loop_tested", sha)
+        new_red = set(res.failed_items) - self._known_red("gate", sha) if res.status != "pass" else set()
+        if res.status == "pass" or not new_red:
+            store.set_meta(c, "loop_green", sha)
+            store.set_meta(c, "loop_bisect", "")
+            store.emit(c, "loop_green", None, {"main_sha": sha, "detail": "背景測試：主線沒有新紅項"}, force=True)
+            self._wf_status("green", main_sha=sha, last_run_at=self.clock(), last_result="green")
+            return
+        green = store.get_meta(c, "loop_green")
+        cands = self.repo.commits_between(green, sha) if green and hasattr(self.repo, "commits_between") else []
+        store.emit(c, "loop_red", None, {"main_sha": sha, "failed_items": sorted(new_red), "detail": f"{len(cands)} 個提交待二分"}, force=True)
+        self._wf_status("bisecting" if len(cands) > 1 else "red", main_sha=sha, last_run_at=self.clock(),
+                        last_result="red", failed_items=sorted(new_red))
+        if len(cands) > 1:
+            st = {"items": sorted(new_red), "cands": cands, "lo": -1, "hi": len(cands) - 1, "phase": "bisect",
+                  "queue": [], "red_sha": sha}
+            if self.cfg.loop_triage == "code_first":
+                st["phase"] = "triage"
+                st["deadline"] = self.clock() + self.cfg.loop_triage_wait_s
+                commits = []
+                for cs in cands:
+                    row = c.execute("SELECT name FROM branches WHERE merged_sha=? LIMIT 1", (cs,)).fetchone()
+                    commits.append({"sha": cs, "branch": row["name"] if row else None,
+                                    "subject": self.repo.commit_subject(cs) if hasattr(self.repo, "commit_subject") else ""})
+                store.emit(c, "loop_triage", None, {
+                    "main_sha": sha, "green_sha": green, "commits": commits, "deadline_at": st["deadline"],
+                    "failed_items": [{"item_id": i, "summary": ((summ or {}).get(i) or "")[:1200]} for i in sorted(new_red)],
+                    "detail": f"請先看代碼找嫌疑分支（{len(cands)} 個提交），{self.cfg.loop_triage_wait_s} 秒內回報，逾時改二分"}, force=True)
+            store.set_meta(c, "loop_bisect", json.dumps(st))
+        elif len(cands) == 1:
+            self._loop_conclude({"items": sorted(new_red), "cands": cands, "lo": -1, "hi": 0})
+
+    def _loop_suspect_idx(self, st):
+        """看板在清單裡回報的嫌疑分支（要對上這次紅的 main）→ 它在候選提交裡的位置；沒有或對不上回 None。"""
+        d = getattr(getattr(self.source, "drops", None), "suspect", None) if self.source is not None else None
+        if not d or not str(st.get("red_sha", "")).startswith(d["main_sha"][:12]):
+            return None
+        row = self.con.execute("SELECT merged_sha FROM branches WHERE name=?", (d["branch"],)).fetchone()
+        if row and row["merged_sha"] in st["cands"]:
+            return st["cands"].index(row["merged_sha"])
+        return None
+
+    def _on_loopprobe(self, j, res):
+        if res.status in ("infra", "timeout", "cancelled"):
+            self._infra_retry("loopprobe")
+            return
+        raw = store.get_meta(self.con, "loop_bisect")
+        if not raw:
+            return
+        st = json.loads(raw)
+        if j.head_sha not in st["cands"]:
+            return
+        idx = st["cands"].index(j.head_sha)
+        red = bool(set(res.failed_items) & set(st["items"])) if res.status != "pass" else False
+        if red:
+            st["hi"] = min(st["hi"], idx)
+        else:
+            st["lo"] = max(st["lo"], idx)
+        store.set_meta(self.con, "loop_bisect", json.dumps(st))
+
+    def _loop_conclude(self, st):
+        c = self.con
+        sha = st["cands"][st["hi"]]
+        row = c.execute("SELECT name FROM branches WHERE merged_sha=? LIMIT 1", (sha,)).fetchone()
+        who = row["name"] if row else None
+        store.emit(c, "loop_culprit", who, {"culprit_branch": who, "culprit_commit": sha, "failed_items": st["items"],
+                                            "main_sha": self.main, "hotfix_id": "HOTFIX-" + sha[:8],
+                                            "detail": f"背景測試找到兇手：提交 {sha[:9]}（{who or '不明分支'}）讓 {','.join(st['items'])[:300]} 變紅"}, force=True)
+        self._wf_status("red", main_sha=self.main, last_result="red", failed_items=st["items"])
+        store.set_meta(c, "loop_bisect", "")
 
     # ---------- 自測 ----------
     def _chain(self, name) -> List:
@@ -1046,7 +1335,14 @@ class Scheduler:
                 return
             main_red = (set(res.failed_items) & rec["new_red"]) if res.status in ("fail", "pass") else set()
             import re
-            gate_red = {i for i in main_red if not any(re.search(p, i) for p in self.cfg.main_red_ignore)}
+            pats = list(self.cfg.main_red_ignore)
+            if self.cfg.gate_registry_dir:         # 登記檔標 gate:false 的店（施工中、每晚才跑）：項目名含店 id 的不擋
+                try:
+                    pats += [r"(?<![a-z0-9])" + re.escape(x) + r"(?![a-z0-9])"
+                             for x in self.repo.nongate_ids(self.main, self.cfg.gate_registry_dir)]
+                except Exception:
+                    pass
+            gate_red = {i for i in main_red if not any(re.search(p, i) for p in pats)}
             if gate_red:                       # 只有範圍內（沒被 policy.main_red_ignore 排除）的項目才算「main 自己紅」並擋批次
                 self._declare_main_red(gate_red, j.branch)
             ignored = main_red - gate_red
@@ -1398,6 +1694,9 @@ class Scheduler:
         name = row["name"]
         if ap == row["head_sha"]:
             return "yes"
+        if 7 <= len(ap) < 40 and all(ch in "0123456789abcdefABCDEF" for ch in ap) \
+                and row["head_sha"].lower().startswith(ap.lower()):
+            return "yes"                       # 放行版本寫成縮短的提交碼（前 7 碼以上），對得上目前的頭就算
         cid = store.known_content_id(self.con, name, ap)
         if cid is None:
             now = self.clock()
@@ -1414,6 +1713,13 @@ class Scheduler:
                 # 這些情況一律 unknown（不撤放行、不發 superseded）：①本程序還沒成功掃過遠端（重啟後物件、清單都還沒到）；
                 # ②放行版本就是遠端現在的頭（只是資料庫裡的頭還沒跟上，內容 id 暫時算不出來）。
                 # 只有「掃過遠端、放行版本不是現在的頭、又一直拿不到」才算內容不同（被新提交蓋掉）。
+                tip = (self._tips or {}).get(name)
+                if self._tips is not None and tip and len(ap) < 40 and tip.lower().startswith(ap.lower()):
+                    return "yes" if row["head_sha"].lower().startswith(ap.lower()) else "unknown"
+                if len(ap) < 40 and store.get_meta(self.con, f"short_ap:{name}") != ap:
+                    store.set_meta(self.con, f"short_ap:{name}", ap)
+                    store.add_info_event(self.con, "approval_unresolved", name,
+                                         f"放行版本 {ap} 不是完整 40 碼、解析不出對應提交；請用完整提交碼重新放行")
                 if self._tips is None or self._tips.get(name) == ap:
                     self._unres_since.pop((name, ap), None)
                     return "unknown"
@@ -1569,6 +1875,42 @@ class Scheduler:
         return max(greens, default=0)
 
     # ---------- 批測 ----------
+    def _truncate_batch(self, name: str, why: str):
+        """成員 name 有新提交／消失：只把它和排在它後面的踢出批，前面的測點與結果照用、照合。
+        它是第一條（前面沒有東西可救）時等於整批作廢。"""
+        b = self.batch
+        if b is None:
+            return
+        k = next((i for i, m in enumerate(b.members) if m[0] == name), None)
+        if k is None:
+            return
+        if k == 0:
+            self._abort_batch(why)
+            return
+        for rid, j in list(self.jobs.items()):                      # 含被踢那條的測點作廢（大小 > k）
+            if j.kind in ("point", "probe", "pretry") and j.batch_id == b.id and (j.size or 0) > k:
+                try:
+                    self.executor.cancel(j.handle)
+                finally:
+                    self._release_job(rid, "cancelled")
+        for n, _, _ in b.members[k:]:
+            if n == name:
+                continue                                           # 它自己由呼叫端走 PUSHED／刪除
+            r = store.get_branch(self.con, n)
+            if r is not None and r["state"] == S.BATCHING.value:
+                store.apply_event(self.con, n, Event.BATCH_DEFERRED)
+        self.con.execute("DELETE FROM batch_members WHERE batch_id=? AND pos>?", (b.id, k))
+        b.members = b.members[:k]
+        b.prefixes = b.prefixes[:k]
+        for d in (b.results, b.probes, b.failed):
+            for sz in [z for z in d if z > k]:
+                del d[sz]
+        b.launched = {(kd, sz) for kd, sz in b.launched if sz <= k}
+        for n in list(b.ctx):
+            if n not in {m[0] for m in b.members}:
+                del b.ctx[n]
+        log.info("批縮短到前 %d 條：%s（%s）", k, name, why)
+
     def _abort_batch(self, why: str):
         b = self.batch
         if b is None:

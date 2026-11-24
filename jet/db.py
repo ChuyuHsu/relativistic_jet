@@ -25,6 +25,20 @@ CREATE TABLE IF NOT EXISTS branches(
 );
 CREATE INDEX IF NOT EXISTS branches_state ON branches(state);
 
+CREATE TABLE IF NOT EXISTS loop_runs(     -- 背景 loop 每次測試的性能量測
+  run_id INTEGER PRIMARY KEY, kind TEXT NOT NULL, main_sha TEXT, started_at REAL, finished_at REAL,
+  wall_s REAL, cores_n INTEGER, cpu_s REAL, items_n INTEGER, status TEXT
+);
+CREATE TABLE IF NOT EXISTS item_metrics(  -- 逐項畫面量測（由 commands.metrics_file 解析）
+  run_id INTEGER NOT NULL, item TEXT NOT NULL, secs REAL, draw_calls_avg REAL, draw_calls_max REAL,
+  fps_avg REAL, fps_min REAL, objects REAL, mem_mb REAL,
+  PRIMARY KEY(run_id, item)
+);
+CREATE TABLE IF NOT EXISTS item_times(    -- 逐項耗時（由 commands.times_file 解析）
+  run_id INTEGER NOT NULL, item TEXT NOT NULL, secs REAL NOT NULL, start_ts REAL, end_ts REAL,
+  PRIMARY KEY(run_id, item)
+);
+
 CREATE TABLE IF NOT EXISTS tracked(    -- 登記制：只管這張表裡的分支（設定 git.scope="tracked"）
   branch TEXT PRIMARY KEY,
   parent TEXT,                         -- 登記時帶的父分支（分支第一次被掃到時套用）

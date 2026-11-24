@@ -105,6 +105,45 @@ class GitRepo:
         self._git("remote", "remove", "origin", check=False)
         self._git("remote", "add", "origin", remote)
 
+    def commits_between(self, base: str, head: str) -> List[str]:
+        """base 之後到 head 的提交（舊→新，只走第一親代）；讀不到回空。"""
+        try:
+            return self._git("rev-list", "--first-parent", "--reverse", f"{base}..{head}").stdout.split()
+        except GitError:
+            return []
+
+    def commit_subject(self, sha: str) -> str:
+        try:
+            return self._git("log", "-1", "--format=%s", sha).stdout.strip()[:200]
+        except GitError:
+            return ""
+
+    def commit_messages(self, base: str, head: str) -> str:
+        """base..head 之間所有提交的完整訊息（讀不到回空字串）。"""
+        try:
+            return self._git("log", "--format=%B%x00", f"{base}..{head}").stdout
+        except GitError:
+            return ""
+
+    def nongate_ids(self, sha: str, reg_dir: str) -> List[str]:
+        """登記目錄（例如 tests/shops）裡 "gate": false 的檔名（不含 .json）；讀不到就回空（不擋也不放寬）。"""
+        import json as _json
+        out: List[str] = []
+        try:
+            names = self._git("ls-tree", "--name-only", sha, reg_dir.rstrip("/") + "/").stdout.split()
+        except GitError:
+            return out
+        for n in names:
+            if not n.endswith(".json"):
+                continue
+            try:
+                d = _json.loads(self._git("show", f"{sha}:{n}").stdout)
+            except (GitError, ValueError):
+                continue
+            if isinstance(d, dict) and d.get("gate") is False:
+                out.append(os.path.basename(n)[:-5])
+        return out
+
     # ---- 基礎 ----
     def _git(self, *args: str, cwd: Optional[str] = None, check: bool = True,
              env: Optional[dict] = None, input: Optional[str] = None,

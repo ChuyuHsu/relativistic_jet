@@ -18,14 +18,18 @@ from urllib.parse import urlparse
 
 NOTIFY_KINDS = ("rejected", "conflict", "halted", "queue_error")   # 要人處理的（預設只送這些）
 MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
-                 "superseded", "parent_blocked", "drop_checked", "selftest_started", "batch_started")  # 給機器看的狀態變化
+                 "superseded", "parent_blocked", "drop_checked", "selftest_started", "batch_started",
+                 "workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf")  # 給機器看的狀態變化
 ALL_KINDS = NOTIFY_KINDS + MACHINE_KINDS
 KIND_TEXT = {
     "rejected": "被退回", "conflict": "跟 main 撞檔", "halted": "暫停待人處理", "queue_error": "排隊器出狀況",
     "pushed": "有新提交", "tested_green": "自測綠", "tested_red": "自測紅", "queued": "進佇列",
     "merged": "已合入", "approved": "已放行", "revoked": "已撤回放行",
     "superseded": "內容變了、放行失效", "parent_blocked": "父分支擋住", "drop_checked": "放棄查核結果", "selftest_started": "開始自測", "batch_started": "開始批測",
+    "workflow_status": "工作流狀態", "loop_red": "背景測試發現主線紅", "loop_green": "背景測試主線綠", "loop_culprit": "背景測試找到兇手", "loop_triage": "背景測試請看板先看代碼找嫌疑", "loop_perf": "背景測試性能量測",
 }
+LOOP_KINDS = ("workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf")
+LOOP_FIELDS = ("mode", "loop", "main_sha", "culprit_commit", "culprit_branch", "hotfix_id", "failed_items", "green_sha", "commits", "deadline_at", "perf")
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 MAX_EVENTS_PER_POST = 10          # 每次請求最多幾筆（可用 max_events 調）；對方處理慢時整批會逾時，所以預設小
@@ -153,6 +157,10 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
             "card": e.get("card"), "target": e.get("target"), "unmerged": e.get("unmerged"),
             "covered": e.get("covered"), "missing_count": e.get("missing_count"),
             "missing_files": e.get("missing_files"), "dropping_at": e.get("dropping_at"),
+            "mode": e.get("mode"), "loop": e.get("loop"), "main_sha": e.get("main_sha"),
+            "culprit_commit": e.get("culprit_commit"), "culprit_branch": e.get("culprit_branch"),
+            "hotfix_id": e.get("hotfix_id"), "green_sha": e.get("green_sha"), "commits": e.get("commits"),
+            "deadline_at": e.get("deadline_at"), "perf": e.get("perf"),
         }.items() if v is not None or k in ("branch", "detail")} for e in events],
     }
     if destination:
@@ -183,6 +191,11 @@ def _enrich(con, r) -> Dict[str, Any]:
                 e["to"] = "selftesting" if e["kind"] == "selftest_started" else "batching"   # 看板的 phase 靠它顯示「自測中／批測中」
                 d = {"reason": (f"run #{d.get('run_id')} 核 {d.get('cores')}" if e["kind"] == "selftest_started"
                                 else f"批 #{d.get('batch_id')} 第 {d.get('pos')}/{d.get('batch_size')} 條")}
+            if e["kind"] in LOOP_KINDS:
+                for k in LOOP_FIELDS:
+                    if k in d:
+                        e[k] = d[k]
+                d = {"reason": d.get("detail")}
             if e["kind"] == "drop_checked":
                 for k in ("card", "target", "unmerged", "covered", "missing_count", "missing_files", "dropping_at"):
                     e[k] = d.get(k)
@@ -210,7 +223,7 @@ def _enrich(con, r) -> Dict[str, Any]:
     if e.get("detail"):
         parts.append(e["detail"])
     if e.get("failed_items"):
-        parts.append("紅項：" + "、".join(x["item_id"] for x in e["failed_items"][:10]))
+        parts.append("紅項：" + "、".join((x["item_id"] if isinstance(x, dict) and "item_id" in x else x.get("id", "?") if isinstance(x, dict) else str(x)) for x in e["failed_items"][:10]))
     e["detail"] = "｜".join(parts)[:MAX_DETAIL] if parts else e.get("detail")
     return e
 

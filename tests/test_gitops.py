@@ -514,3 +514,20 @@ class DropCheckTest(Base):
         r = self.chk("x")
         self.assertEqual(r["missing_count"], 30)
         self.assertEqual(len(r["missing_files"]), 20)
+
+
+class NongateIdsTest(unittest.TestCase):
+    def test_reads_gate_false(self):
+        import json, os, subprocess, tempfile
+        d = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", d], check=True)
+        os.makedirs(os.path.join(d, "tests/shops"))
+        for n, g in (("a", True), ("b", False)):
+            json.dump({"gate": g}, open(os.path.join(d, f"tests/shops/{n}.json"), "w"))
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", d, "commit", "-qm", "x"], check=True, env=env)
+        sha = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        g = GitRepo.__new__(GitRepo)
+        g.mirror = os.path.join(d, ".git"); g.timeout_s = 20
+        self.assertEqual(g.nongate_ids(sha, "tests/shops"), ["b"])

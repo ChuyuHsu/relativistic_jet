@@ -448,3 +448,27 @@ class WriteQueue:
             p.done.set()
             n += 1
         return n
+
+
+def query_perf(con, last: int = 20, top: int = 20) -> Dict[str, Any]:
+    """背景 loop 的性能量測：最近 last 次的整體耗時與核使用，以及平均最慢的 top 個測試項目。"""
+    runs = [dict(r) for r in con.execute("SELECT * FROM loop_runs ORDER BY run_id DESC LIMIT ?", (last,))]
+    ids = [r["run_id"] for r in runs]
+    items: List[Dict[str, Any]] = []
+    if ids:
+        q = ",".join("?" * len(ids))
+        items = [dict(r) for r in con.execute(
+            f"SELECT item, COUNT(*) AS n, ROUND(AVG(secs),1) AS avg_s, ROUND(MAX(secs),1) AS max_s, ROUND(SUM(secs),1) AS total_s "
+            f"FROM item_times WHERE run_id IN ({q}) GROUP BY item ORDER BY avg_s DESC LIMIT ?", (*ids, top))]
+    metrics: List[Dict[str, Any]] = []
+    if ids:
+        metrics = [dict(r) for r in con.execute(
+            f"SELECT item, COUNT(*) AS n, ROUND(AVG(fps_avg),1) AS fps_avg, ROUND(MIN(fps_min),1) AS fps_min, "
+            f"ROUND(AVG(draw_calls_avg),0) AS draw_calls_avg, MAX(draw_calls_max) AS draw_calls_max, ROUND(MAX(mem_mb),0) AS mem_mb "
+            f"FROM item_metrics WHERE run_id IN ({q}) GROUP BY item ORDER BY MIN(fps_min) IS NULL, MIN(fps_min) ASC LIMIT ?", (*ids, top))]
+    for r in runs:
+        cores = r.get("cores_n") or 0
+        r["cpu_util"] = round(r["cpu_s"] / (r["wall_s"] * cores), 2) if r.get("cpu_s") and r.get("wall_s") and cores else None
+    walls = [r["wall_s"] for r in runs if r.get("wall_s")]
+    return {"runs": runs, "items": items, "metrics": metrics,
+            "summary": {"runs": len(runs), "avg_wall_s": round(sum(walls) / len(walls), 1) if walls else None}}

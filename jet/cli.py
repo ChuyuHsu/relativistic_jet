@@ -363,6 +363,29 @@ def cmd_backup(args):
     return 0
 
 
+def cmd_perf(args):
+    cfg = config.load(_cfg_path(args))
+    con = ops.open_readonly(maintenance.db_path(cfg.state_dir))
+    try:
+        d = ops.query_perf(con, args.last, args.top)
+    finally:
+        con.close()
+    if args.json:
+        print(json.dumps(d, ensure_ascii=False, indent=1))
+        return 0
+    print(f"背景測試最近 {d['summary']['runs']} 次，平均每次 {d['summary']['avg_wall_s']} 秒")
+    for r in d["runs"][:10]:
+        print(f"  #{r['run_id']} {r['kind']} {str(r['main_sha'])[:9]}　{round(r['wall_s'] or 0)} 秒　{r['cores_n']} 核　CPU 使用率 {r['cpu_util']}　{r['items_n']} 項　{r['status']}")
+    print("平均最慢的項目：")
+    for it in d["items"]:
+        print(f"  {it['avg_s']:>7} 秒（最大 {it['max_s']}，{it['n']} 次）{it['item']}")
+    if d.get("metrics"):
+        print("畫面量測（FPS 最低的項目）：")
+        for m in d["metrics"]:
+            print(f"  FPS 平均 {m['fps_avg']} 最低 {m['fps_min']}　繪製 平均 {m['draw_calls_avg']} 最高 {m['draw_calls_max']}　{m['item']}")
+    return 0
+
+
 def cmd_list_backups(args):
     cfg = config.load(_cfg_path(args))
     for p in maintenance.list_backups(cfg.state_dir):
@@ -434,6 +457,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("branch", cmd_branch, "單一分支的狀態與紅項"); sp.add_argument("name")
     sp = add("merged", cmd_merged, "已合入"); sp.add_argument("--limit", type=int, default=20)
     add("todo", cmd_todo, "待辦")
+    sp = add("perf", cmd_perf, "背景測試性能量測（每次耗時、核使用率、平均最慢項目）")
+    sp.add_argument("--last", type=int, default=20); sp.add_argument("--top", type=int, default=20)
     add("metrics", cmd_metrics, "量測")
     sp = add("approve", cmd_approve, "放行"); sp.add_argument("branch"); sp.add_argument("sha", help="審過的提交（head_sha 前 7 碼以上，或 content_id）"); sp.add_argument("--by", default="cli")
     sp = add("revoke", cmd_revoke, "撤回放行"); sp.add_argument("branch")

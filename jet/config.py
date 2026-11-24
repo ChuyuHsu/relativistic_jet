@@ -43,6 +43,8 @@ class Config:
     require_approval: bool = True
     test_cmd: List[str] = field(default_factory=list)
     classify_cmd: Optional[List[str]] = None
+    times_file: Optional[str] = None  # 逐項耗時檔（相對工作目錄的 glob，TSV：項目\t開始\t結束，epoch 秒）；有設才記背景 loop 的逐項耗時
+    metrics_file: Optional[str] = None  # 逐項畫面量測檔（相對工作目錄的 glob，JSON，格式見 docs/WORKFLOW.md）
     artifacts: Optional[List[str]] = None   # 測試跑完（含逾時）要留下的檔案（相對工作目錄的 glob）
     notify_url: Optional[str] = None
     notify_batch_s: int = 180
@@ -51,6 +53,13 @@ class Config:
     read_key_file: Optional[str] = None
     write_key_file: Optional[str] = None
     flaky_retry: bool = True          # 計時類項目（timing_items）新紅：先在同一個提交上只重跑那幾項，第二次綠就當抖動放過（門檻不放寬）
+    gate_registry_dir: str = ""      # 例如 tests/shops：裡面 "gate": false 的店，項目名含該店 id 的紅項不算「main 自己紅」（只記錄）；空＝不啟用
+    workflow_mode: str = "gate_batch"   # gate_batch＝批測閘門（預設）｜direct_merge＝自測綠就直接合，背景 loop 測最新 main、紅了自動二分找兇手
+    loop_enabled: bool = True         # direct_merge 時是否跑背景 loop
+    loop_cores: int = 0               # 背景 loop 每個工作用的核數；0＝同 cores.batch_cores
+    loop_triage: str = "bisect"      # 背景測試紅了先怎麼找兇手：bisect＝直接二分；code_first＝先發 loop_triage 事件等看板回嫌疑分支（只驗證一次），逾時才二分
+    loop_triage_wait_s: int = 900
+    loop_timeout_s: int = 0           # 0＝同 limits 的批測逾時
     main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
     recheck_red: bool = True          # 自測紅時，先把新紅項放在乾淨 main 上單獨重跑；main 也紅就不算這張卡的錯
@@ -113,6 +122,8 @@ def parse(d: dict) -> Config:
         test_cmd=_need(cmds, "test", list),
         classify_cmd=cmds.get("classify"),
         artifacts=cmds.get("artifacts"),
+        times_file=cmds.get("times_file"),
+        metrics_file=cmds.get("metrics_file"),
         notify_url=notify.get("url"),
         notify_batch_s=notify.get("batch_seconds", 60),
         notify_destinations=_parse_destinations(notify.get("destinations")),
@@ -123,6 +134,13 @@ def parse(d: dict) -> Config:
         recheck_red=pol.get("recheck_red", True),
         flaky_retry=pol.get("flaky_retry", True),
         main_red_ignore=tuple(pol.get("main_red_ignore", ())),
+        workflow_mode=str((d.get("workflow") or {}).get("mode", "gate_batch")),
+        loop_enabled=bool(((d.get("workflow") or {}).get("loop") or {}).get("enabled", True)),
+        loop_cores=int(((d.get("workflow") or {}).get("loop") or {}).get("cores", 0)),
+        loop_triage=str(((d.get("workflow") or {}).get("loop") or {}).get("triage", "bisect")),
+        loop_triage_wait_s=int(((d.get("workflow") or {}).get("loop") or {}).get("triage_wait_s", 900)),
+        loop_timeout_s=int(((d.get("workflow") or {}).get("loop") or {}).get("timeout_s", 0)),
+        gate_registry_dir=str(pol.get("gate_registry_dir", "")),
         timing_items=tuple(pol.get("timing_items", ("loadtime", "perf", "timeout", "card_touch", "godot_time_"))),
         source=_parse_source(d.get("source")),
     )
@@ -177,6 +195,10 @@ def _validate(c: Config) -> None:
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
     if not isinstance(c.flaky_retry, bool):
         raise ConfigError("policy.flaky_retry 必須是 true 或 false")
+    if c.workflow_mode not in ("gate_batch", "direct_merge"):
+        raise ConfigError("workflow.mode 只能是 gate_batch 或 direct_merge")
+    if c.loop_triage not in ("bisect", "code_first"):
+        raise ConfigError("workflow.loop.triage 只能是 bisect 或 code_first")
     import re as _re
     for pat in c.main_red_ignore:
         try:
