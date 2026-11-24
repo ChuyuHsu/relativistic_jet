@@ -1,6 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck } from './queue.js';
+import { handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, resultOf, stuckCheck, housekeeping } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、dropped 放棄；放行是卡片上的欄位（approved_*）。
 // 中段（待自測、自測綠、排隊、合入、退回…）是排隊器的分支狀態，由排隊器的事件（/hooks/queue）寫進 phase 與 last_result，
@@ -42,16 +42,34 @@ async function notify(db, owners, c, kind, detail) {
 const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 
 // 附上父卡資訊：parent_stage（父卡現在的階段，不存在回 missing）、waiting_parent（父卡還沒合併，子卡就算放行也要等）
-async function withParent(db, cards) {
+async function withParent(db, cards, pool) {
   const need = cards.filter(c => c.parent);
   if (!need.length) return cards;
-  const rows = (await db.prepare('SELECT * FROM cards').all()).results;
-  const by = new Map(rows.map(r => [r.id, r]));
+  let by;
+  if (pool) by = new Map(pool.map(r => [r.id, r]));
+  else {
+    const ids = [...new Set(need.map(c => c.parent))];
+    by = new Map((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results.map(r => [r.id, r]));
+  }
   return cards.map(c => {
     if (!c.parent) return c;
     const p = by.get(c.parent), ps = p ? stageOf(p) : 'missing';
     return { ...c, parent_stage: ps, waiting_parent: ps !== 'merged', parent_blocked: ps === 'dropped' || ps === 'missing' };
   });
+}
+
+// 回應快取（Cache API，每個機房各自存幾秒）：輪詢的人很多，同一份答案算一次就好。權杖在快取前已檢查，快取鍵只有網址。
+async function cached(req, ctx, ttl, produce) {
+  if (typeof caches === 'undefined' || !ctx || req.method !== 'GET') return produce();
+  const key = new Request(new URL(req.url).toString(), { method: 'GET' });
+  try { const hit = await caches.default.match(key); if (hit) return hit; } catch { /* 沒快取就照算 */ }
+  const res = await produce();
+  if (res.status === 200) {
+    const copy = new Response(res.clone().body, res);
+    copy.headers.set('cache-control', `public, max-age=${ttl}`);
+    ctx.waitUntil(caches.default.put(key, copy).catch(() => {}));
+  }
+  return res;
 }
 
 // 設父卡：不能是自己、不存在、已放棄，也不能成環（沿父鏈走回自己）。回錯誤訊息或 null。
@@ -91,10 +109,19 @@ async function desired(req, env) {
   if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
   try {
     // 一次把卡讀進記憶體再算（原本每張卡多查一兩次 D1，卡多了會超過 10 秒）
-    const all = (await env.DB.prepare('SELECT * FROM cards ORDER BY priority,created_at').all()).results;
+    // 只讀要用到的卡（用索引）：已認領的、放棄待查的，再補它們的父卡與接手卡
+    const mine = (await env.DB.prepare("SELECT * FROM cards WHERE status='claimed' ORDER BY priority,created_at").all()).results;
+    const withDrops = new URL(req.url).searchParams.get('with') === 'drop_checks';
+    const dropRows = withDrops ? (await env.DB.prepare("SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped'").all()).results : [];
+    const all = mine.concat(dropRows.filter(d => !mine.some(m => m.id === d.id)));
     const by = new Map(all.map(c => [c.id, c]));
+    const want = [...new Set(all.flatMap(c => [c.parent, c.superseded_by]).filter(x => x && !by.has(x)))];
+    for (let i = 0; i < want.length; i += 80) {
+      const ch = want.slice(i, i + 80);
+      for (const r of (await env.DB.prepare(`SELECT * FROM cards WHERE id IN (${ch.map(() => '?').join(',')})`).bind(...ch).all()).results) by.set(r.id, r);
+    }
     const out = [];
-    for (const c of all) {
+    for (const c of mine) {
       if (!(c.status === 'claimed' && c.branch && c.phase !== 'merged' && !c.dropping_at)) continue;
       const e = { branch: c.branch };
       const p = parentInfo(env, c, by);
@@ -104,8 +131,8 @@ async function desired(req, env) {
       e.priority = c.priority;   // 數字小的先（跟看板排序一致）；排隊器拿來排自測與批測順序
       out.push(e);
     }
-    if (new URL(req.url).searchParams.get('with') === 'drop_checks') {   // 放棄待查：排隊器要查這些分支有沒有改動漏掉
-      const drop_checks = all.filter(c => c.dropping_at && c.status !== 'dropped').sort((a, b) => a.dropping_at - b.dropping_at).map(c => {
+    if (withDrops) {   // 放棄待查：排隊器要查這些分支有沒有改動漏掉
+      const drop_checks = dropRows.sort((a, b) => a.dropping_at - b.dropping_at).map(c => {
         const sc = c.superseded_by ? by.get(c.superseded_by) : null;
         return { card: c.id, branch: c.branch || branchFor(env, c.id), superseded_by_branch: sc ? (sc.branch || branchFor(env, sc.id)) : null, dropping_at: c.dropping_at };   // dropping_at 請原樣帶回事件，用來認是哪一次放棄
       });
@@ -117,14 +144,28 @@ async function desired(req, env) {
   } catch { return json({ error: '看板內部錯誤' }, 500); }
 }
 
+// 網頁輪詢才帶 v：讀取權杖驗過後快取 10 秒；指令稿直接讀（不帶 v）永遠是最新
 export async function handle(req, env, ctx) {
+  if (req.method === 'GET' && typeof caches !== 'undefined') {
+    const u = new URL(req.url);
+    if (u.searchParams.has('v') && ['/api/cards', '/api/workflow', '/api/perf'].includes(u.pathname)) {
+      if (!bearerIs(req, env.TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
+      return cached(req, ctx, 10, () => handleInner(req, env, ctx));
+    }
+  }
+  return handleInner(req, env, ctx);
+}
+async function handleInner(req, env, ctx) {
   const url = new URL(req.url);
   const path = url.pathname;
   const db = env.DB;
   if (path === '/hooks/queue') return handleHook(req, env, ctx);
   const write = req.method !== 'GET';
   // 排隊器拉清單：HOOK_TOKEN 或 READ_TOKEN；其餘寫入要 TOKEN，讀取要 TOKEN 或 READ_TOKEN
-  if (path === '/api/queue/desired') return desired(req, env);
+  if (path === '/api/queue/desired') {
+    if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
+    return cached(req, ctx, 5, () => desired(req, env));   // 排隊器輪詢：5 秒內同一份答案
+  }
   if (path === '/api/outbox/pending') return outboxPending(req, env);
   if (path === '/api/triage' && req.method === 'GET') {   // 排隊器讀：目前的紅燈判斷（含總指揮的回報）
     if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
@@ -157,7 +198,7 @@ export async function handle(req, env, ctx) {
     const rows = status
       ? await db.prepare('SELECT * FROM cards WHERE status=? ORDER BY priority,created_at').bind(status).all()
       : await db.prepare('SELECT * FROM cards ORDER BY priority,created_at').all();
-    let out = (await withParent(db, rows.results.map(view)));
+    let out = (await withParent(db, rows.results.map(view), status ? null : rows.results));
     const sf = url.searchParams.get('stage');
     if (sf) { const want = new Set(sf.split(',')); out = out.filter(c => want.has(c.stage)); }
     return json(out);
@@ -396,5 +437,5 @@ export async function handle(req, env, ctx) {
 
 export default {
   fetch: (req, env, ctx) => handle(req, env, ctx),
-  scheduled: (_ev, env, ctx) => ctx.waitUntil(stuckCheck(env).then(() => autoFlush(env))),
+  scheduled: (ev, env, ctx) => ctx.waitUntil((new Date((ev && ev.scheduledTime) || Date.now()).getUTCMinutes() % 10 === 0 ? housekeeping(env) : Promise.resolve()).then(() => autoFlush(env))),
 };

@@ -319,6 +319,13 @@ export async function stuckCheck(env) {
   return { notified: n };
 }
 
+// 每 10 分鐘一次（不用每分鐘掃）：卡住提醒＋清掉一天前已送出的信（表小了，掃描也省讀取量）
+export async function housekeeping(env) {
+  const r = await stuckCheck(env);
+  try { await env.DB.prepare('DELETE FROM outbox WHERE sent_at IS NOT NULL AND sent_at<?').bind(now() - 86400).run(); } catch { /* 清不掉下次再清 */ }
+  return r;
+}
+
 // 主動叫醒（routine fire）預設關閉：外部 token 打排程任務可能被擋。要開才設 FIRE_ENABLED=1。預設改由收信端自己來領（/api/outbox/claim）。
 export async function autoFlush(env) { return env.FIRE_ENABLED === '1' ? flush(env) : { skipped: 'fire disabled' }; }
 

@@ -694,7 +694,7 @@ test('desired：一次讀卡，D1 往返固定幾次，與卡數無關（卡再�
   let trips = 0; const real = e.DB;
   e.DB = { prepare: sql => { const st = real.prepare(sql); const w = { bind: (...a) => { st.bind(...a); return w; }, all: () => { trips++; return st.all(); }, first: () => { trips++; return st.first(); }, run: () => { trips++; return st.run(); } }; return w; }, batch: l => real.batch(l) };
   const r = await (await call(e, 'GET', '/api/queue/desired?with=drop_checks', undefined, 'h')).json();
-  assert.equal(r.cards.length, 40); assert.ok(trips <= 2);   // 讀卡一次＋讀紅燈判斷一次，與卡數無關
+  assert.equal(r.cards.length, 40); assert.ok(trips <= 4);   // 已認領一次＋放棄待查一次＋（缺的父卡一次）＋紅燈判斷一次，與卡數無關
 });
 
 test('superseded 的現版跟放行版本是同一個提交：不採信，送審與放行保留', async () => {

@@ -54,3 +54,9 @@ CREATE TABLE IF NOT EXISTS hook_log (n INTEGER PRIMARY KEY AUTOINCREMENT, at INT
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS loop_perf (n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, main_sha TEXT, kind TEXT, wall_s REAL, cores INTEGER, cpu_util REAL, items INTEGER, top TEXT, metrics TEXT);
+-- 省讀取量（D1 免費額度每日 500 萬 rows_read）：沒有索引的查詢每次都掃全表
+CREATE INDEX IF NOT EXISTS outbox_unsent ON outbox(n) WHERE sent_at IS NULL;
+CREATE INDEX IF NOT EXISTS cards_dropping ON cards(dropping_at) WHERE dropping_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS cards_area ON cards(area);
+CREATE INDEX IF NOT EXISTS cards_parent ON cards(parent) WHERE parent IS NOT NULL;
+CREATE INDEX IF NOT EXISTS cards_superseded ON cards(superseded_by) WHERE superseded_by IS NOT NULL;

@@ -146,7 +146,7 @@ const trend=(rr,k,label,col)=>{const v=rr.map(r=>r.metrics&&r.metrics[k]);if(!v.
 const rk=(t,a,f)=>(a||[]).length?`<div class="m" style="margin-top:8px">${t}（近幾輪）</div>`+a.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">${f(s)}（${s.runs} 輪）</span></div>`).join(''):'';
 async function perfDraw(){
   try{
-    const p=await(await fetch('/api/perf?n=30',{headers:{authorization:'Bearer '+tok}})).json();
+    const p=await(await fetch('/api/perf?n=30&v=1',{headers:{authorization:'Bearer '+tok}})).json();
     const R=(p.runs||[]);
     if(!R.length){perfp.innerHTML='';return}
     const rr=R.slice().reverse(),mx=Math.max(...rr.map(r=>r.wall_s),1),W=Math.max(rr.length*14,120),H=50;
@@ -178,15 +178,15 @@ try{tok=localStorage.getItem('rt')||''}catch(e){}
 try{const q=new URLSearchParams(location.hash.slice(1)).get('t');if(q){tok=q;localStorage.setItem('rt',q);history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
 async function load(){
   try{
-    const r=await fetch('/api/cards',{headers:{authorization:'Bearer '+tok}});
+    const r=await fetch('/api/cards?v=1',{headers:{authorization:'Bearer '+tok}});
     if(r.status===401){tok=prompt('輸入讀取權杖')||'';try{localStorage.setItem('rt',tok)}catch(e){}; if(!tok){list.textContent='需要權杖';return} return load()}
     cards=await r.json();
     // 「審查通過自測中」只算排隊器真的在跑的（phase=selftesting）；還沒開始的分成等父卡（父卡沒進 main）與等排隊
     cards.forEach(c=>{if(c.stage==='selftesting'&&c.phase!=='selftesting')c.stage=c.waiting_parent?'wait_parent':'wait_queue';else if(c.stage==='batching'&&c.waiting_parent)c.stage='done_wait'});
     perfDraw();
-    try{const w=await(await fetch('/api/workflow',{headers:{authorization:'Bearer '+tok}})).json();wfDraw(w)}catch(e){}
+    try{const w=await(await fetch('/api/workflow?v=1',{headers:{authorization:'Bearer '+tok}})).json();wfDraw(w)}catch(e){}
     draw()
   }catch(e){list.textContent='讀取失敗'}
 }
-load();setInterval(load,30000);
+load();setInterval(()=>{if(!document.hidden)load()},60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)load()});
 </script></body></html>
