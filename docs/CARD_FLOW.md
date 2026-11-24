@@ -262,3 +262,12 @@
 - `GET /api/workflow`（TOKEN 或 READ_TOKEN）：回 `{mode, loop, reported_at, open_hotfix:[{id,title,status,owner,priority}]}`；看板頁首會顯示目前模式、背景循環狀態與未結的急修卡。
 - 事件 `loop_culprit`：背景循環在 main 紅了、bisect 出兇手時送（帶兇手的分支名 `branch`，或 `culprit_branch`／`culprit_card`）：`{kind:"loop_culprit", branch, main_sha, culprit_commit, failed_items, detail, hotfix_id?}`。看板自動開一張急修卡（id 預設 `HOTFIX-<main_sha 前 8 碼>`、priority 0、area `hotfix`，`owner_thread` 預填兇手卡的負責串、內文附紅項），並通知兇手卡的負責串與管理者（通知種類 `loop_culprit`）。同一個急修卡 id 已存在就不重開。急修卡走一般流程（領、送審、放行、自測、合併）。
 - 事件 `loop_red`／`loop_green`：只記錄 main 紅狀態供畫面與 `/api/workflow` 的 `main_red` 顯示（`{since, main_sha, failed_items, detail}`），不開卡；`loop_green`，或 `workflow_status` 帶 `loop.state` 或 `loop.last_result` 為 `green`，會清掉。
+
+### 紅燈先判斷再驗證（loop_triage）
+
+背景循環在 main 紅了，先請人讀 diff 判斷嫌疑分支（比直接二分快），看不出來再跑二分：
+
+- 排隊器送事件 `loop_triage`：`{kind, id, main_sha, last_green_sha, range:[{commit, branch, subject}], failed_items:[{item, summary}], detail}`。看板存起來（`/api/workflow` 與 `GET /api/triage` 讀得到）並通知管理者（`loop_triage`）。
+- 管理者回報：`POST /api/triage`（TOKEN）`{actor, main_sha?, verdict:"suspects"|"unknown", suspects:[{branch, commit?, reason?}], note?}`；`main_sha` 帶了就要對得上（409）；`suspects` 至少一個；沒有待判斷的紅燈回 404。
+- 排隊器讀：`GET /api/triage`（HOOK_TOKEN／READ_TOKEN／TOKEN）回 `{triage}`，`status` 為 `pending`（等人）、`answered`（已回報，看 `verdict`／`suspects`）、`resolved`（已送 `loop_culprit`）。排隊器讀到 `suspects` 只對嫌疑跑一次驗證，確認後照舊送 `loop_culprit` 開急修卡；`unknown` 就自己二分。
+- 送 `loop_culprit` 會把這筆標成 `resolved`；`loop_green` 清掉。

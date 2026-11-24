@@ -67,7 +67,7 @@ function wfDraw(w){
   const L=w.loop||{},st={idle:'閒置',running:'測試中',red:'紅燈',bisecting:'找兇手中',green:'綠燈'};
   S.batching=w.mode==='direct_merge'?'自測完畢待合併':'自測完畢批測中';
   const t=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
-  wf.textContent=w.mode?`流程：${w.mode==='direct_merge'?'直接合併（自測綠就合 main，背景循環對 main 跑完整測試）':'閘門批測（攢批測過才合 main）'}`+(w.mode==='direct_merge'&&w.loop?`｜背景循環：${st[L.state]||L.state||'未知'}${L.last_run_at?'・上次 '+t(L.last_run_at):''}${L.last_result?'・結果 '+L.last_result:''}`:'')+(w.main_red?`｜main 紅燈${(w.main_red.failed_items||[]).length?'：'+w.main_red.failed_items.map(x=>x.item||x.name||x).slice(0,5).join('、'):''}`:'')+((w.open_hotfix||[]).length?`｜急修卡 ${(w.open_hotfix||[]).length} 張：${(w.open_hotfix||[]).map(h=>h.id).join('、')}`:''):'';
+  wf.textContent=w.mode?`流程：${w.mode==='direct_merge'?'直接合併（自測綠就合 main，背景循環對 main 跑完整測試）':'閘門批測（攢批測過才合 main）'}`+(w.mode==='direct_merge'&&w.loop?`｜背景循環：${st[L.state]||L.state||'未知'}${L.last_run_at?'・上次 '+t(L.last_run_at):''}${L.last_result?'・結果 '+L.last_result:''}`:'')+(w.triage&&w.triage.status==='pending'?'｜等總指揮讀 diff 判斷嫌疑':'')+(w.main_red?`｜main 紅燈${(w.main_red.failed_items||[]).length?'：'+w.main_red.failed_items.map(x=>x.item||x.name||x).slice(0,5).join('、'):''}`:'')+((w.open_hotfix||[]).length?`｜急修卡 ${(w.open_hotfix||[]).length} 張：${(w.open_hotfix||[]).map(h=>h.id).join('、')}`:''):'';
 }
 let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}
 // 網址帶 #t=讀取權杖（# 後面不會送到伺服器）：記進瀏覽器後立刻從網址列拿掉，之後直接開網址就行

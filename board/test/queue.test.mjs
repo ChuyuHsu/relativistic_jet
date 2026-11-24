@@ -827,3 +827,27 @@ test('流程模式與背景循環：workflow_status 回報、/api/workflow 讀�
   await hook(e, [{ id: 'r6', kind: 'loop_red', main_sha: 'x' }, { id: 'r7', kind: 'workflow_status', mode: 'direct_merge', loop: { state: 'green' } }]);
   assert.equal((await (await call(e, 'GET', '/api/workflow')).json()).main_red, null);
 });
+
+test('紅燈判斷：loop_triage 存下並通知管理者；總指揮 POST /api/triage 回報嫌疑；排隊器 GET 讀；culprit 後結案、loop_green 清掉', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  assert.equal((await call(e, 'POST', '/api/triage', { verdict: 'unknown' })).status, 404);   // 沒有待判斷
+  const tri = { id: 't1', kind: 'loop_triage', main_sha: 'abcdef1234567890', last_green_sha: '0123456789abcdef', range: [{ commit: 'c1', branch: 'dev/a', subject: '改 a' }, { commit: 'c2', branch: 'dev/b', subject: '改 b' }], failed_items: [{ item: 'unit_x', summary: 'boom' }], detail: '紅了' };
+  await hook(e, [tri]);
+  const box = (await e.DB.prepare("SELECT owner_thread,detail FROM outbox WHERE kind='loop_triage'").all()).results;
+  assert.equal(box.length, 1); assert.equal(box[0].owner_thread, 'adm'); assert.match(box[0].detail, /dev\/a、dev\/b/);
+  let g = await (await call(e, 'GET', '/api/triage', undefined, 'h')).json();   // 排隊器用 HOOK_TOKEN 讀
+  assert.equal(g.triage.status, 'pending'); assert.equal(g.triage.range.length, 2);
+  assert.equal((await call(e, 'GET', '/api/triage', undefined, 'bad')).status, 401);
+  assert.equal((await call(e, 'POST', '/api/triage', { main_sha: 'ffff', verdict: 'unknown' })).status, 409);
+  assert.equal((await call(e, 'POST', '/api/triage', { main_sha: 'abcdef12', verdict: 'maybe' })).status, 400);
+  assert.equal((await call(e, 'POST', '/api/triage', { main_sha: 'abcdef12', verdict: 'suspects', suspects: [] })).status, 400);
+  const ok = await call(e, 'POST', '/api/triage', { main_sha: 'abcdef12', verdict: 'suspects', suspects: [{ branch: 'dev/b', commit: 'c2', reason: '改了 x 的常數' }] });
+  assert.equal(ok.status, 200);
+  g = await (await call(e, 'GET', '/api/triage', undefined, 'h')).json();
+  assert.equal(g.triage.status, 'answered'); assert.equal(g.triage.suspects[0].branch, 'dev/b'); assert.equal(g.triage.answered_by, 'tester');
+  assert.equal((await (await call(e, 'GET', '/api/workflow')).json()).triage.verdict, 'suspects');
+  await hook(e, [{ id: 't2', kind: 'loop_culprit', main_sha: 'abcdef1234567890', branch: 'dev/b' }]);
+  assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage.status, 'resolved');
+  await hook(e, [{ id: 't3', kind: 'loop_green' }]);
+  assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage, null);
+});

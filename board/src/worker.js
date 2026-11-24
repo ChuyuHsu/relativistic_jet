@@ -77,6 +77,10 @@ function reasonProblem(why) {
   if (t.length < 10 || /^[A-Za-z0-9_.\/-]+$/.test(t)) return 'discard_reason 要寫清楚為什麼這張卡本身不再需要（被哪張取代、哪個提交已在 main、或哪項定案撤掉）；只寫卡號或太短的不算，父卡放棄也不是理由';
   return null;
 }
+async function getTriage(db) {
+  const r = await db.prepare("SELECT value FROM meta WHERE key='triage'").first();
+  try { return r ? JSON.parse(r.value) : null; } catch { return null; }
+}
 async function log(db, id, actor, note) {
   await db.prepare('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)').bind(id, now(), actor, note).run();
 }
@@ -120,6 +124,10 @@ export async function handle(req, env, ctx) {
   // 排隊器拉清單：HOOK_TOKEN 或 READ_TOKEN；其餘寫入要 TOKEN，讀取要 TOKEN 或 READ_TOKEN
   if (path === '/api/queue/desired') return desired(req, env);
   if (path === '/api/outbox/pending') return outboxPending(req, env);
+  if (path === '/api/triage' && req.method === 'GET') {   // 排隊器讀：目前的紅燈判斷（含總指揮的回報）
+    if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
+    return json({ triage: await getTriage(db) });
+  }
   if (!(write ? bearerIs(req, env.TOKEN) : bearerIs(req, env.TOKEN, env.READ_TOKEN))) return json({ error: 'unauthorized' }, 401);
   if (path === '/api/outbox/claim' || path === '/api/outbox/ack' || path === '/api/outbox/release') return (path.endsWith('claim') ? outboxClaim : path.endsWith('ack') ? outboxAck : outboxRelease)(req.clone(), env);
   if (req.method === 'GET' && path === '/api/workflow') {   // 目前流程模式（gate_batch｜direct_merge）與背景循環狀態；排隊器用 workflow_status 事件回報
@@ -128,7 +136,8 @@ export async function handle(req, env, ctx) {
     const hot = (await db.prepare("SELECT id,title,status,owner,priority FROM cards WHERE area='hotfix' AND phase IS NOT 'merged' AND status!='dropped' ORDER BY created_at").all()).results;
     const mr = await db.prepare("SELECT value,updated_at FROM meta WHERE key='main_red'").first();
     let main_red = null; try { main_red = mr ? JSON.parse(mr.value) : null; } catch { /* 壞值當沒有 */ }
-    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, main_red, reported_at: r?.updated_at ?? null, open_hotfix: hot });
+    const triage = await getTriage(db);
+    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, main_red, triage: triage ? { main_sha: triage.main_sha, status: triage.status, verdict: triage.verdict ?? null, suspects: triage.suspects ?? null } : null, reported_at: r?.updated_at ?? null, open_hotfix: hot });
   }
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
@@ -216,6 +225,17 @@ export async function handle(req, env, ctx) {
     if (!forced && (stage !== 'rejected' || c.rejected_reason)) return no(c.rejected_reason ? '被審查退回的卡不能重測，要改好再送審' : undefined);
     if (!await upd(`retest=retest+1,${QUEUE_CLEAR}`)) return lost();
     return done(`重測（第 ${c.retest + 1} 次）`);
+  }
+  if (path === '/api/triage' && req.method === 'POST') {   // 總指揮讀完 diff 回報嫌疑分支（或看不出來）
+    const tri = await getTriage(db);
+    if (!tri) return json({ error: '現在沒有待判斷的紅燈' }, 404);
+    if (body.main_sha && !String(tri.main_sha).startsWith(String(body.main_sha)) && !String(body.main_sha).startsWith(String(tri.main_sha))) return json({ error: `main_sha 對不上現在待判斷的紅燈（${String(tri.main_sha).slice(0, 12)}）` }, 409);
+    if (!['suspects', 'unknown'].includes(body.verdict)) return json({ error: 'verdict 要是 suspects（有嫌疑分支）或 unknown（看不出來）' }, 400);
+    const sus = (Array.isArray(body.suspects) ? body.suspects : []).slice(0, 20).map(s => ({ branch: String(s && s.branch || '').slice(0, 120), commit: s && s.commit ? String(s.commit).slice(0, 40) : null, reason: s && s.reason ? String(s.reason).slice(0, 300) : null })).filter(s => s.branch);
+    if (body.verdict === 'suspects' && !sus.length) return json({ error: 'suspects 至少要有一個帶 branch 的嫌疑' }, 400);
+    const next = { ...tri, status: 'answered', verdict: body.verdict, suspects: body.verdict === 'suspects' ? sus : [], answered_by: actor, answered_at: now(), note: body.note ? String(body.note).slice(0, 500) : null };
+    await db.prepare("UPDATE meta SET value=?,updated_at=? WHERE key='triage'").bind(JSON.stringify(next).slice(0, 60000), now()).run();
+    return json({ ok: true, triage: next });
   }
   if (req.method === 'POST' && path === '/api/cards') {
     if (!body.id || !body.title) return json({ error: 'id 與 title 必填' }, 400);
