@@ -126,7 +126,9 @@ export async function handle(req, env, ctx) {
     const r = await db.prepare("SELECT value,updated_at FROM meta WHERE key='workflow'").first();
     let wf = null; try { wf = r ? JSON.parse(r.value) : null; } catch { /* 壞值當沒有 */ }
     const hot = (await db.prepare("SELECT id,title,status,owner,priority FROM cards WHERE area='hotfix' AND phase IS NOT 'merged' AND status!='dropped' ORDER BY created_at").all()).results;
-    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, reported_at: r?.updated_at ?? null, open_hotfix: hot });
+    const mr = await db.prepare("SELECT value,updated_at FROM meta WHERE key='main_red'").first();
+    let main_red = null; try { main_red = mr ? JSON.parse(mr.value) : null; } catch { /* 壞值當沒有 */ }
+    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, main_red, reported_at: r?.updated_at ?? null, open_hotfix: hot });
   }
   let m;
   if (req.method === 'GET' && path === '/api/cards') {

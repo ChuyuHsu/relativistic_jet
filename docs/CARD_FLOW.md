@@ -260,4 +260,5 @@
 
 - 事件 `workflow_status`（`POST /hooks/queue`，不需要對應到卡）：`{kind:"workflow_status", mode:"gate_batch|direct_merge", loop:{state, last_run_at, last_result, main_sha, failed_items, culprit, next_run_at …}}`，整份取代上一份。`mode` 不是這兩個值就丟掉。`loop.state` 建議用 idle／running／red／bisecting／green。
 - `GET /api/workflow`（TOKEN 或 READ_TOKEN）：回 `{mode, loop, reported_at, open_hotfix:[{id,title,status,owner,priority}]}`；看板頁首會顯示目前模式、背景循環狀態與未結的急修卡。
-- 事件 `loop_red`：背景循環在 main 紅了、bisect 出兇手時送：`{kind:"loop_red", main_sha, culprit_commit, culprit_card 或 culprit_branch, failed_items, detail, hotfix_id?}`。看板自動開一張急修卡（id 預設 `HOTFIX-<main_sha 前 8 碼>`、priority 0、area `hotfix`，`owner_thread` 預填兇手卡的負責串），並通知兇手卡的負責串與管理者（通知種類 `loop_red`）。同一個急修卡 id 已存在就不重開（重報丟掉）。急修卡走一般流程（領、送審、放行、自測、合併）。
+- 事件 `loop_culprit`：背景循環在 main 紅了、bisect 出兇手時送（帶兇手的分支名 `branch`，或 `culprit_branch`／`culprit_card`）：`{kind:"loop_culprit", branch, main_sha, culprit_commit, failed_items, detail, hotfix_id?}`。看板自動開一張急修卡（id 預設 `HOTFIX-<main_sha 前 8 碼>`、priority 0、area `hotfix`，`owner_thread` 預填兇手卡的負責串、內文附紅項），並通知兇手卡的負責串與管理者（通知種類 `loop_culprit`）。同一個急修卡 id 已存在就不重開。急修卡走一般流程（領、送審、放行、自測、合併）。
+- 事件 `loop_red`／`loop_green`：只記錄 main 紅狀態供畫面與 `/api/workflow` 的 `main_red` 顯示（`{since, main_sha, failed_items, detail}`），不開卡；`loop_green`，或 `workflow_status` 帶 `loop.state` 或 `loop.last_result` 為 `green`，會清掉。
