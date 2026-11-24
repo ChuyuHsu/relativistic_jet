@@ -63,7 +63,7 @@ function draw(){
   gv.hidden=view!=='g';lv.hidden=view!=='l';
   if(view==='g'){graph();return}
   tabs.hidden=true;
-  const open=JSON.parse((()=>{try{return localStorage.getItem('rg')||'{}'}catch(e){return '{}'}})());
+  let open={};try{open=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(e){open={}}
   list.innerHTML=GROUPS.map(([name,ks,def])=>{
     const tot=cards.filter(c=>ks.includes(c.stage)).length;
     if(!tot)return '';
