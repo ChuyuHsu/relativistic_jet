@@ -308,9 +308,36 @@ class GitRepo:
         files = {f for f in out.split("\0") if f} | set(conflicts)
         return False, sorted(files)
 
+    HISTORY_DEPTH = 200      # 逐檔比內容時，往 main 歷史回查同一檔的版本數上限
+
+    def _blob(self, rev: str, path: str) -> Optional[str]:
+        """ rev 這個提交裡 path 的內容指紋；沒有這個檔回 None。"""
+        r = self._git("rev-parse", "--verify", "-q", f"{rev}:{path}", check=False)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+    def _still_missing(self, files: List[str], branch_sha: str, targets: Sequence[str], main_sha: str) -> List[str]:
+        """逐檔比內容：分支上的這個檔，符合下列任一條就算「沒漏」，其餘才算缺的。
+        ①內容等於任一目標（main 現在的版本、接手卡分支的版本）；②等於 main 歷史上該檔的某一版（最多回查 HISTORY_DEPTH 版，
+        代表 main 已經走過這一版）。分支沒有這個檔（刪掉）時，只有目標也沒有才算沒漏。"""
+        left = []
+        for f in files:
+            try:
+                mine = self._blob(branch_sha, f)
+                if any(self._blob(t, f) == mine for t in targets):
+                    continue
+                if mine is not None:
+                    hist = self._git("log", f"-n{self.HISTORY_DEPTH}", "--format=%H", main_sha, "--", f, check=False).stdout
+                    if any(self._blob(c, f) == mine for c in hist.split()):
+                        continue
+            except GitError:
+                pass                                       # 查不出來就當缺：寧可誤擋不可誤放
+            left.append(f)
+        return left
+
     def drop_check(self, branch: str, superseded_by: Optional[str] = None, max_files: int = 20) -> Dict[str, object]:
         """放棄防呆：這條分支的改動，是不是已經全部在目標（取代它的分支頭；沒有或已不存在就是 main）裡。
-        不比行數、不用門檻：只看「合進去之後有沒有變」。寧可誤擋不可誤放。"""
+        先看「合進去之後有沒有變」；有變的檔再逐檔比內容（見 _still_missing），內容 main 已有或已走過的不算缺。
+        寧可誤擋不可誤放。"""
         main_sha = self.main_sha()
         bsha = self._ref_sha(branch)
         tsha = self._ref_sha(superseded_by) if superseded_by else None
@@ -321,11 +348,17 @@ class GitRepo:
             res.update(unmerged=False, covered=True, missing_count=0, missing_files=[])
             return res
         in_main, main_files = self._probe(main_sha, bsha)
+        if not in_main:
+            main_files = self._still_missing(main_files, bsha, [main_sha], main_sha)
+            in_main = not main_files
         res["unmerged"] = not in_main
         if tsha is None:
             covered, files = in_main, main_files
         else:
             covered, files = self._probe(tsha, bsha)
+            if not covered:
+                files = self._still_missing(files, bsha, [tsha, main_sha], main_sha)
+                covered = not files
         res.update(covered=covered, missing_count=len(files), missing_files=files[:max_files])
         return res
 
