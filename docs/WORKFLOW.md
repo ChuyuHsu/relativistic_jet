@@ -26,6 +26,12 @@
 
 回報方式：清單回應（`/api/queue/desired`）的頂層物件加 `loop_suspect: {"main_sha": "<紅的那個 main>", "branch": "<嫌疑分支>"}`；`main_sha` 要對上 `loop_triage` 事件的 `main_sha`（前 12 碼相符），不符就忽略。
 
+## 每日完整層與現況快照
+
+- `workflow.nightly`：`at`（本機時間 `"HH:MM"`，空字串＝不跑）、`cores`（0＝同批測）、`timeout_s`（0＝同批測）。到點對 main 最新版跑 `full` 層一次、一天一次；結果送 `full_result` 事件（`main_sha`、`started_at`、`finished_at`、`total`、`red`［項目＋摘要］、`timeouts`［項目＋摘要］），欄位見 `docs/CARD_FLOW.md`。紅了只記錄，不擋 main、不二分、不動任何分支。基礎設施錯誤最多重試 3 次（間隔 10 分鐘），仍失敗就送一筆紅項「基礎設施錯誤」。
+- `notify.snapshot_seconds`（預設 300，0＝不送）：定期送 `state_snapshot`（管理中每條分支的狀態、提交、放行版本、重測次數）給看板對帳。寫新快照前刪掉舊的，看板連不上時不會堆積。
+- 看板支援 etag 時，清單輪詢帶 `If-None-Match`，304 沿用上次清單；推 main 前的那一次重拉一律無條件讀取。
+
 ## 性能量測
 
 設定 `commands.times_file`（相對工作目錄的 glob，TSV：項目、開始、結束，epoch 秒）後，背景 loop 每次測試會把逐項耗時記進 `item_times`、整體耗時／核數／CPU 使用率記進 `loop_runs`，並送一筆 `loop_perf` 事件（`perf`：`wall_s`、`cores`、`cpu_util`、`items`、`top`［最慢 15 項］）。`jet perf [--last N] [--top K] [--json]` 看最近 N 次與平均最慢的項目。
