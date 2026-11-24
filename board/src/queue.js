@@ -12,7 +12,7 @@ const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red
 // 需要人處理、要叫醒負責串的種類
 const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);   // → 領卡的開發者
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者
-const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  waiting_done: '接手卡已進 main，等待中的卡已結案',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
+const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  waiting_done: '接手卡已進 main，等待中的卡已結案',  loop_red: '背景循環在 main 上紅了，已自動開急修卡',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
 // 一批事件在記憶體裡依序處理（卡片狀態用預載的副本，邊處理邊更新），所有寫入收成語句，最後用 D1 batch 一次送出
 // （每個事件的語句整組同進同出，不跨 batch 切開）：一批 50 筆只有幾次往返，一組失敗不會留下做一半的事件。
@@ -45,6 +45,10 @@ export async function handleHook(req, env, ctx) {
   const load = rows => { for (const c of rows) { if (!byId.has(c.id)) byId.set(c.id, c); if (c.branch && !byBranch.has(c.branch)) byBranch.set(c.branch, byId.get(c.id)); } };
   for (const bs of chunk([...new Set(events.map(e => e.branch).filter(Boolean).map(String))], 90))
     load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
+  for (const bs of chunk([...new Set(events.filter(e => e.kind === 'loop_red' && e.culprit_branch).map(e => String(e.culprit_branch)))], 90))
+    load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
+  for (const ids of chunk([...new Set(events.filter(e => e.kind === 'loop_red' && e.culprit_card).map(e => String(e.culprit_card)))], 90))
+    load((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results);
   for (const ids of chunk([...new Set(events.filter(e => e.kind === 'drop_checked').flatMap(e => [e.card].filter(Boolean)).map(String))], 90))
     load((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results);
   // 放棄待查、branch 欄是空的卡：排隊器用 <前綴><卡號小寫> 當分支名查，事件的 branch 對得上這個推導名
@@ -72,6 +76,24 @@ export async function handleHook(req, env, ctx) {
       if (hasId(e)) {
         if (seen.has(keyOf(e))) { dup++; return; }
         seen.add(keyOf(e)); q('INSERT INTO hook_seen(key) VALUES(?)', keyOf(e));   // 不帶 OR IGNORE：兩個併發相同請求撞 UNIQUE，後者整組回滾，去重保持原子
+      }
+      if (kind === 'workflow_status') {   // 排隊器回報：{mode, loop:{state,last_run_at,last_result,main_sha,failed_items,culprit,next_run_at,...}}；整份取代，不需要對應到卡
+        if (!['gate_batch', 'direct_merge'].includes(e.mode)) { stale++; hl(e, 'workflow_status 的 mode 要是 gate_batch 或 direct_merge'); return; }
+        const val = JSON.stringify({ mode: e.mode, loop: e.loop && typeof e.loop === 'object' ? e.loop : null }).slice(0, 4000);
+        q("INSERT INTO meta(key,value,updated_at) VALUES('workflow',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", val, T);
+        applied++; return;
+      }
+      if (kind === 'loop_red') {   // 背景循環在 main 上紅了、bisect 出兇手：自動開一張急修卡（priority 0、area hotfix），通知兇手卡的負責串與管理者；同一個 id 只開一次
+        const hid = String(e.hotfix_id || `HOTFIX-${String(e.main_sha || e.id || T).slice(0, 8)}`).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
+        const cul = (e.culprit_card && byId.get(String(e.culprit_card))) || (e.culprit_branch && byBranch.get(String(e.culprit_branch))) || null;
+        if (await db.prepare('SELECT 1 FROM cards WHERE id=?').bind(hid).first()) { stale++; hl(e, `急修卡 ${hid} 已存在`); return; }
+        const items = Array.isArray(e.failed_items) ? e.failed_items.slice(0, 20).map(x => String((x && x.item) || (x && x.name) || x)).join('、') : '';
+        const bodyText = `背景循環在 main ${String(e.main_sha || '').slice(0, 12)} 測出紅項${items ? '：' + items : ''}。兇手提交 ${String(e.culprit_commit || '不明').slice(0, 12)}${cul ? `（來自卡 ${cul.id}）` : ''}。${e.detail ? String(e.detail).slice(0, 500) : ''}`.slice(0, 1500);
+        applied++;
+        q("INSERT INTO cards(id,title,body,area,priority,parent,owner_thread,created_at,updated_at) VALUES(?,?,?,'hotfix',0,NULL,?,?,?)", hid, `急修：main 紅燈${cul ? '（' + cul.id + '）' : ''}`, bodyText, cul?.owner_thread ?? null, T, T);
+        q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', hid, T, source, '建立（背景循環紅燈自動開卡）');
+        post([...new Set([cul?.owner_thread || '', ...(admins.length ? admins : [])])], { id: hid }, 'loop_red', null, `急修卡 ${hid}：${bodyText}`.slice(0, 500));
+        return;
       }
       let card = branch ? byBranch.get(branch) : null;
       if (!card && kind === 'drop_checked' && e.card) card = byId.get(String(e.card));
@@ -274,6 +296,7 @@ export async function autoFlush(env) { return env.FIRE_ENABLED === '1' ? flush(e
 const NEXT = {
   drop_rejected: '要放棄請先把內容接過去（接手的卡要包含缺的檔），或跟總指揮說真的不要（帶 discard_reason）。卡已回到原階段。',
   drop_discarded: '請事後看一眼：卡號、不在 main 的改動筆數與放棄原因都在上面。',
+  loop_red: 'main 在背景循環測出紅燈，兇手已 bisect 出來：請負責串優先領急修卡（priority 0）修好，不要等人催。',
   review_requested: '請看 git diff 審查（detail 若帶「上次退回原因」，先確認那一點真的改掉）；通過就在看板對這張卡 approve（帶審過的 commit），要改就 reject 並寫原因。',
   review_rejected: '審查退回：請依原因修改，改好 push 後對這張卡 submit 新版本。',
   tested_red: '自測紅：請看紅項修好，push 後 submit 新版本（若只是環境問題，請審查者 retest）。',

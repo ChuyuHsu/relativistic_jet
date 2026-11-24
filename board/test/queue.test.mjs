@@ -791,3 +791,25 @@ test('等待父卡接龍：A 等 B、B 等 C，C 合併後一路結案；接手�
   const box = (await e.DB.prepare("SELECT card_id FROM outbox WHERE kind='parent_blocked'").all()).results.map(r => r.card_id);
   assert.ok(box.includes('W1'));
 });
+
+test('流程模式與背景循環：workflow_status 回報、/api/workflow 讀取；loop_red 自動開急修卡並通知，同一個只開一次', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  assert.equal((await (await call(e, 'GET', '/api/workflow')).json()).mode, null);
+  const bad = await (await hook(e, [{ id: 'w0', kind: 'workflow_status', mode: 'zzz' }])).json();
+  assert.equal(bad.stale, 1);
+  await hook(e, [{ id: 'w1', kind: 'workflow_status', mode: 'direct_merge', loop: { state: 'running', last_result: 'green', main_sha: 'abc' } }]);
+  let w = await (await call(e, 'GET', '/api/workflow')).json();
+  assert.equal(w.mode, 'direct_merge'); assert.equal(w.loop.state, 'running'); assert.deepEqual(w.open_hotfix, []);
+  await claim(e, 'cul', 'thcul');
+  const red = { id: 'r1', kind: 'loop_red', main_sha: 'deadbeefcafe1234', culprit_card: 'cul', culprit_commit: '1234567abcdef', failed_items: [{ item: 'unit_x' }], detail: 'bisect 找到' };
+  const r1 = await (await hook(e, [red])).json();
+  assert.equal(r1.applied, 1);
+  const hf = (await (await call(e, 'GET', '/api/cards')).json()).find(c => c.id === 'HOTFIX-deadbeef');
+  assert.equal(hf.priority, 0); assert.equal(hf.area, 'hotfix'); assert.match(hf.body, /unit_x/); assert.equal(hf.owner_thread, 'thcul');
+  const box = (await e.DB.prepare("SELECT owner_thread FROM outbox WHERE kind='loop_red'").all()).results.map(r => r.owner_thread);
+  assert.ok(box.includes('thcul') && box.includes('adm'));
+  const r2 = await (await hook(e, [{ ...red, id: 'r2' }])).json();   // 同一個 main 紅燈重報：不再開
+  assert.equal(r2.applied, 0); assert.equal(r2.stale, 1);
+  w = await (await call(e, 'GET', '/api/workflow')).json();
+  assert.deepEqual(w.open_hotfix.map(x => x.id), ['HOTFIX-deadbeef']);
+});

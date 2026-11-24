@@ -122,6 +122,12 @@ export async function handle(req, env, ctx) {
   if (path === '/api/outbox/pending') return outboxPending(req, env);
   if (!(write ? bearerIs(req, env.TOKEN) : bearerIs(req, env.TOKEN, env.READ_TOKEN))) return json({ error: 'unauthorized' }, 401);
   if (path === '/api/outbox/claim' || path === '/api/outbox/ack' || path === '/api/outbox/release') return (path.endsWith('claim') ? outboxClaim : path.endsWith('ack') ? outboxAck : outboxRelease)(req.clone(), env);
+  if (req.method === 'GET' && path === '/api/workflow') {   // 目前流程模式（gate_batch｜direct_merge）與背景循環狀態；排隊器用 workflow_status 事件回報
+    const r = await db.prepare("SELECT value,updated_at FROM meta WHERE key='workflow'").first();
+    let wf = null; try { wf = r ? JSON.parse(r.value) : null; } catch { /* 壞值當沒有 */ }
+    const hot = (await db.prepare("SELECT id,title,status,owner,priority FROM cards WHERE area='hotfix' AND phase IS NOT 'merged' AND status!='dropped' ORDER BY created_at").all()).results;
+    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, reported_at: r?.updated_at ?? null, open_hotfix: hot });
+  }
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
     const status = url.searchParams.get('status');

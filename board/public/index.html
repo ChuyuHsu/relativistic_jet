@@ -13,7 +13,7 @@ h1{font-size:20px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 .lg{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;margin:6px 0}.lg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px}
 .c b{display:block}.m{color:var(--mut);font-size:13px}
 </style></head><body>
-<h1>任務看板</h1><div class="v"><button data-v="g" class="on">關係圖</button><button data-v="l">列表</button></div><div id="gv"></div><div id="lv" hidden><div class="tabs" id="tabs"></div><div id="list">載入中…</div></div>
+<h1>任務看板</h1><div class="m" id="wf"></div><div class="v"><button data-v="g" class="on">關係圖</button><button data-v="l">列表</button></div><div id="gv"></div><div id="lv" hidden><div class="tabs" id="tabs"></div><div id="list">載入中…</div></div>
 <script>
 const S={new:'剛開卡',developing:'開發中',reviewing:'審查中',selftesting:'審查通過自測中',batching:'自測完畢批測中',merged:'已合併',rejected:'退回',waiting_parent:'等待父卡',dropping:'放棄待查',dropped:'放棄'};
 const COL={new:'#8e8e93',developing:'#0a84ff',reviewing:'#bf5af2',selftesting:'#ff9f0a',batching:'#e08a00',merged:'#30a05a',rejected:'#ff453a',waiting_parent:'#c9a227',dropping:'#8e6a3c',dropped:'#636366'};
@@ -63,6 +63,12 @@ function draw(){
   list.innerHTML=l.length?l.map(cardHtml).join(''):'<div class="m">沒有</div>';
 }
 tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
+function wfDraw(w){
+  const L=w.loop||{},st={idle:'閒置',running:'測試中',red:'紅燈',bisecting:'找兇手中',green:'綠燈'};
+  S.batching=w.mode==='direct_merge'?'自測完畢待合併':'自測完畢批測中';
+  const t=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
+  wf.textContent=w.mode?`流程：${w.mode==='direct_merge'?'直接合併（自測綠就合 main，背景循環對 main 跑完整測試）':'閘門批測（攢批測過才合 main）'}`+(w.mode==='direct_merge'&&w.loop?`｜背景循環：${st[L.state]||L.state||'未知'}${L.last_run_at?'・上次 '+t(L.last_run_at):''}${L.last_result?'・結果 '+L.last_result:''}`:'')+((w.open_hotfix||[]).length?`｜急修卡 ${(w.open_hotfix||[]).length} 張：${(w.open_hotfix||[]).map(h=>h.id).join('、')}`:''):'';
+}
 let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}
 // 網址帶 #t=讀取權杖（# 後面不會送到伺服器）：記進瀏覽器後立刻從網址列拿掉，之後直接開網址就行
 try{const q=new URLSearchParams(location.hash.slice(1)).get('t');if(q){tok=q;localStorage.setItem('rt',q);history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
@@ -70,7 +76,9 @@ async function load(){
   try{
     const r=await fetch('/api/cards',{headers:{authorization:'Bearer '+tok}});
     if(r.status===401){tok=prompt('輸入讀取權杖')||'';try{localStorage.setItem('rt',tok)}catch(e){}; if(!tok){list.textContent='需要權杖';return} return load()}
-    cards=await r.json();draw()
+    cards=await r.json();
+    try{const w=await(await fetch('/api/workflow',{headers:{authorization:'Bearer '+tok}})).json();wfDraw(w)}catch(e){}
+    draw()
   }catch(e){list.textContent='讀取失敗'}
 }
 load();setInterval(load,30000);

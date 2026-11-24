@@ -248,3 +248,16 @@
 
 看板清單每筆帶 `priority`（數字小的先，跟看板排序一致）。自測派工與批測成員挑選的排序鍵是
 `(手動 jet priority 大的先, 看板 priority 小的先, 先來後到, 名字)`：手動值不同就照手動；同值（預設 0）才看看板；清單沒帶 priority 的排在有帶的後面。
+
+## 12. 流程模式與背景循環（workflow）
+
+排隊器有兩種流程模式（設定 `workflow.mode`）：
+
+- `gate_batch`：自測綠的卡攢成一批，閘門測過才合 main（本文前面各章的流程）。
+- `direct_merge`：自測綠就直接合 main；完整測試在背景對 main 循環跑，紅了自動 bisect 找兇手，並開急修卡給負責串。這個模式下沒有「批測」這一站：卡自測綠後馬上合併，看板上 `batching` 階段只是很短的過渡，畫面顯示成「自測完畢待合併」。階段名稱（API 值）兩種模式一致，不改。
+
+看板不決定模式，只記錄排隊器回報的：
+
+- 事件 `workflow_status`（`POST /hooks/queue`，不需要對應到卡）：`{kind:"workflow_status", mode:"gate_batch|direct_merge", loop:{state, last_run_at, last_result, main_sha, failed_items, culprit, next_run_at …}}`，整份取代上一份。`mode` 不是這兩個值就丟掉。`loop.state` 建議用 idle／running／red／bisecting／green。
+- `GET /api/workflow`（TOKEN 或 READ_TOKEN）：回 `{mode, loop, reported_at, open_hotfix:[{id,title,status,owner,priority}]}`；看板頁首會顯示目前模式、背景循環狀態與未結的急修卡。
+- 事件 `loop_red`：背景循環在 main 紅了、bisect 出兇手時送：`{kind:"loop_red", main_sha, culprit_commit, culprit_card 或 culprit_branch, failed_items, detail, hotfix_id?}`。看板自動開一張急修卡（id 預設 `HOTFIX-<main_sha 前 8 碼>`、priority 0、area `hotfix`，`owner_thread` 預填兇手卡的負責串），並通知兇手卡的負責串與管理者（通知種類 `loop_red`）。同一個急修卡 id 已存在就不重開（重報丟掉）。急修卡走一般流程（領、送審、放行、自測、合併）。
