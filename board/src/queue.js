@@ -16,10 +16,10 @@ const KIND_TEXT = { drop_rejected: '放棄沒成立：這張卡還有改動不�
 
 // 一批事件在記憶體裡依序處理（卡片狀態用預載的副本，邊處理邊更新），所有寫入收成語句，最後用 D1 batch 一次送出
 // （每個事件的語句整組同進同出，不跨 batch 切開）：一批 50 筆只有幾次往返，一組失敗不會留下做一半的事件。
-// D1 一句 SQL 最多 100 個參數：id 清單分段更新，回傳總共改了幾列
+// D1 一句 SQL 最多 100 個參數：id 清單分段更新，回傳總共改了幾列（只給 outbox 的 UPDATE 用，要有 n 欄）
 async function updateByIds(db, make, pre, ids) {
   let changes = 0;
-  for (const c of chunk(ids, 80)) changes += (await db.prepare(make(c.map(() => '?').join(','))).bind(...pre, ...c).run()).meta.changes;
+  for (const c of chunk(ids, 80)) changes += (await db.prepare(make(c.map(() => '?').join(',')) + ' RETURNING n').bind(...pre, ...c).all()).results.length;   // 用 RETURNING 數列：D1 的 meta.changes 會把觸發器改的列也算進去
   return changes;
 }
 const chunk = (arr, n) => { const o = []; for (let i = 0; i < arr.length; i += n) o.push(arr.slice(i, i + n)); return o; };

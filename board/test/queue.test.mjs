@@ -1156,3 +1156,26 @@ test('BD-04：資料庫額度用完回 503 {error:"d1_quota"}；其他錯誤不�
   const e2 = mkenv(); e2.DB = { prepare() { throw new Error('boom'); } };
   await assert.rejects(() => call(e2, 'GET', '/api/cards/zzz'), /boom/);
 });
+
+test('回歸：D1 的 meta.changes 含觸發器列數時，領卡／送審／放行／重測／匯入／轉址／信箱 claim-ack 仍正確，事件有記', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  const w = await e.DB.prepare("UPDATE cards SET updated_at=updated_at WHERE 0").run(); assert.equal(w.meta.changes, 0);
+  await call(e, 'POST', '/api/cards', { id: 'r1', title: 'r1' });
+  const probe = await e.DB.prepare("UPDATE cards SET title='r1' WHERE id='r1'").run();
+  assert.ok(probe.meta.changes >= 2, '假 D1 要像真的一樣把觸發器的列算進 changes');
+  assert.equal((await call(e, 'POST', '/api/claim', { id: 'r1', owner: 'w', owner_thread: 't1' })).status, 200);
+  assert.equal((await call(e, 'POST', '/api/claim', { id: 'r1', owner: 'x' })).status, 409);              // 輸家仍是 409
+  assert.equal((await act(e, 'r1', 'submit', { commit: SHA, actor: 'w' })).status, 200);
+  assert.equal((await act(e, 'r1', 'approve', { commit: SHA, actor: 'rev' })).status, 200);
+  await ev(e, 'r1', { kind: 'tested_red', approved_sha: SHA, detail: 'x' });
+  assert.equal((await act(e, 'r1', 'retest', { actor: 'rev', commit: SHA })).status, 200);
+  const notes = (await getCard(e, 'r1')).events.map(x => x.note).join('|');
+  for (const k of ['認領', '送審', '放行']) assert.ok(notes.includes(k), k + ' 事件要記：' + notes);
+  const imp = await (await call(e, 'POST', '/api/import', { cards: [{ id: 'i1', title: 'a' }, { id: 'i1', title: 'dup' }] })).json();
+  assert.deepEqual([imp.added, imp.skipped], [1, 1]);
+  const rd = await (await call(e, 'POST', '/api/redirect', { from: 't1', to: 't2' })).json(); assert.equal(rd.cards_updated, 1);
+  const msgs = (await (await call(e, 'POST', '/api/outbox/claim', { actor: 'c' })).json()).messages;
+  assert.ok(msgs.length > 0);
+  const ids = msgs.flatMap(m => m.ids);
+  assert.equal((await (await call(e, 'POST', '/api/outbox/ack', { actor: 'c', ids })).json()).acked, ids.length);
+});

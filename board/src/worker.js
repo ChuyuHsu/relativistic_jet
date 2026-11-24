@@ -233,8 +233,8 @@ async function handleInner(req, env, ctx, gated = false) {
     const t = now();
     await db.prepare('INSERT INTO thread_redirect(from_thread,to_thread,at) VALUES(?,?,?) ON CONFLICT(from_thread) DO UPDATE SET to_thread=excluded.to_thread,at=excluded.at').bind(from, to, t).run();
     // 所有指向 from 的舊轉址不用動（解析時會一路走到新的）；卡片直接改成最終的串
-    const r = await db.prepare("UPDATE cards SET owner_thread=?,updated_at=? WHERE owner_thread=? AND status IN ('open','claimed','waiting')").bind(dest, t, from).run();
-    return json({ from, to, resolved: dest, cards_updated: r.meta.changes });
+    const r = await db.prepare("UPDATE cards SET owner_thread=?,updated_at=? WHERE owner_thread=? AND status IN ('open','claimed','waiting') RETURNING id").bind(dest, t, from).all();
+    return json({ from, to, resolved: dest, cards_updated: r.results.length });
   }
   if (path === '/api/nightly' && req.method === 'GET') {   // 每晚完整層：最新一次與歷史（最近 14 次）；沒有結果時 latest 是 null
     const rows = (await db.prepare('SELECT * FROM nightly ORDER BY n DESC LIMIT 14').all()).results;
@@ -273,9 +273,10 @@ async function handleInner(req, env, ctx, gated = false) {
     const done = async note => { await log(db, c.id, actor, note); return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(c.id).first())); };
     // 條件式更新：只有卡片還是讀到的那個狀態／送審版本／放行版本／重測次數時才寫入，輸家得到 409（不會出現放行版本≠送審版本）
     const upd = async (set, ...vals) => {
-      const r = await db.prepare(`UPDATE cards SET ${set},updated_at=? WHERE id=? AND status=? AND IFNULL(submitted_commit,'')=? AND IFNULL(approved_commit,'')=? AND retest=? AND IFNULL(rejected_reason,'')=?`)
-        .bind(...vals, now(), c.id, c.status, c.submitted_commit ?? '', c.approved_commit ?? '', c.retest, c.rejected_reason ?? '').run();
-      return r.meta.changes === 1;
+      // 用 RETURNING 數列，不看 meta.changes：D1 的 changes 會把觸發器（rev）改的列也算進去，贏家會被當成輸家
+      const r = await db.prepare(`UPDATE cards SET ${set},updated_at=? WHERE id=? AND status=? AND IFNULL(submitted_commit,'')=? AND IFNULL(approved_commit,'')=? AND retest=? AND IFNULL(rejected_reason,'')=? RETURNING id`)
+        .bind(...vals, now(), c.id, c.status, c.submitted_commit ?? '', c.approved_commit ?? '', c.retest, c.rejected_reason ?? '').all();
+      return r.results.length === 1;
     };
     const lost = () => json({ error: '同時有別人改了這張卡，請重讀後再試', stage }, 409);
     const QUEUE_CLEAR = 'phase=NULL,phase_at=NULL,last_result=NULL';
@@ -377,9 +378,9 @@ async function handleInner(req, env, ctx, gated = false) {
     for (const c of body.cards || []) {
       if (!c.id || !c.title || (c.status && !STATUSES.includes(c.status))) { skipped++; continue; }
       const t = now();
-      const r = await db.prepare('INSERT OR IGNORE INTO cards(id,title,body,area,priority,status,owner,branch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
-        .bind(String(c.id), String(c.title), String(c.body || ''), String(c.area || ''), Number(c.priority ?? 100), c.status || 'open', c.owner ?? null, c.branch ?? null, t, t).run();
-      r.meta.changes ? added++ : skipped++;   // 分支名有唯一索引：同名分支會被略過
+      const r = await db.prepare('INSERT OR IGNORE INTO cards(id,title,body,area,priority,status,owner,branch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id')
+        .bind(String(c.id), String(c.title), String(c.body || ''), String(c.area || ''), Number(c.priority ?? 100), c.status || 'open', c.owner ?? null, c.branch ?? null, t, t).all();
+      r.results.length ? added++ : skipped++;   // 分支名有唯一索引：同名分支會被略過
     }
     return json({ added, skipped });
   }
@@ -396,9 +397,9 @@ async function handleInner(req, env, ctx, gated = false) {
         id = r.id;
       }
       const branch = branchFor(env, id);
-      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=COALESCE(branch,?),owner_thread=?,updated_at=? WHERE id=? AND status='open' AND dropping_at IS NULL")
-        .bind(String(body.owner), branch, body.owner_thread ? String(body.owner_thread) : null, now(), id).run();
-      if (res.meta.changes === 1) {
+      const res = await db.prepare("UPDATE cards SET status='claimed',owner=?,branch=COALESCE(branch,?),owner_thread=?,updated_at=? WHERE id=? AND status='open' AND dropping_at IS NULL RETURNING id")
+        .bind(String(body.owner), branch, body.owner_thread ? String(body.owner_thread) : null, now(), id).all();
+      if (res.results.length === 1) {
         await log(db, id, actor, `認領 ${body.owner}`);
         return json(view(await db.prepare('SELECT * FROM cards WHERE id=?').bind(id).first()));
       }
