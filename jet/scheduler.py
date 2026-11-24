@@ -423,6 +423,8 @@ class Scheduler:
         self._snapshot_step()
         if store.is_paused(self.con) or not self.resources_ok():
             return
+        if not self.draining:
+            self._nightly_step()
         if self.cfg.workflow_mode != "direct_merge":
             self._wf_status("idle", main_sha=self.main)        # 批測閘門模式：沒有背景 loop，只回報目前模式
         if self.cfg.workflow_mode == "direct_merge":
@@ -902,6 +904,8 @@ class Scheduler:
                 self._on_baseline(j, res)
             elif j.kind == "loopprobe":
                 self._on_loopprobe(j, res)
+            elif j.kind == "nightly":
+                self._on_nightly(j, res)
             else:
                 self._on_point(j, res)
 
@@ -1032,6 +1036,68 @@ class Scheduler:
             self.main = new
 
     SNAPSHOT_MAX = 500
+    NIGHTLY_MAX_ITEMS = 100
+    NIGHTLY_INFRA_TRIES = 3
+    NIGHTLY_RETRY_S = 600
+
+    def _nightly_step(self):
+        """每日完整層（NIGHT-01）：到設定的時刻，對 main 最新版跑 full 層一次，結果送 full_result。
+        一天只開一次（開跑時就記日期，換版接管時由 _adopt_runs 接手收結果）；基礎設施錯誤最多重試 NIGHTLY_INFRA_TRIES 次。
+        紅了只記錄：不擋 main、不二分、不動任何分支。"""
+        at = self.cfg.nightly_at
+        if not at or any(j.kind == "nightly" for j in self.jobs.values()):
+            return
+        now = self.clock()
+        lt = time.localtime(now)
+        today = time.strftime("%Y-%m-%d", lt)
+        hh, mm = int(at[:2]), int(at[3:])
+        if (lt.tm_hour, lt.tm_min) < (hh, mm) or store.get_meta(self.con, "nightly_day") == today:
+            return
+        if now < float(store.get_meta(self.con, "nightly_retry_at", "0") or 0):
+            return
+        cores = self.cfg.nightly_cores or self.cfg.batch_cores
+        to = self.cfg.nightly_timeout_s or self.cfg.batch_timeout_s
+        main = self.main
+        if self._launch("nightly", "full", main, cores, to, base_sha=main, head_sha=main):
+            store.set_meta(self.con, "nightly_day", today)
+
+    def _on_nightly(self, j, res):
+        c = self.con
+        if res.status in ("infra", "cancelled"):
+            n = int(store.get_meta(c, "nightly_infra", "0") or 0) + 1
+            store.set_meta(c, "nightly_infra", str(n))
+            if n < self.NIGHTLY_INFRA_TRIES and res.status == "infra":
+                store.set_meta(c, "nightly_day", "")                       # 今天再試
+                store.set_meta(c, "nightly_retry_at", str(self.clock() + self.NIGHTLY_RETRY_S))
+                return
+            if res.status == "cancelled":
+                return
+        store.set_meta(c, "nightly_infra", "0")
+        r = c.execute("SELECT started_at, finished_at, report_path, log_path FROM runs WHERE id=?", (j.run_id,)).fetchone()
+        total, red, timeouts = 0, [], []
+        try:
+            with open(r["report_path"], encoding="utf-8") as f:
+                items = json.load(f)["items"]
+            total = len(items)
+            sums = executor.read_report_summaries(r["report_path"])
+            for it in items:
+                name = str(it.get("id"))
+                ent = {"item": name, "summary": sums.get(name, "")[:800]}
+                if it.get("status") == "fail" and len(red) < self.NIGHTLY_MAX_ITEMS:
+                    red.append(ent)
+                elif it.get("status") == "timeout" and len(timeouts) < self.NIGHTLY_MAX_ITEMS:
+                    timeouts.append(ent)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        if res.status == "timeout" and not timeouts:      # 整輪逾時、報告也沒寫哪一項：帶名字記一筆
+            ex = executor.failure_excerpt(r["log_path"], "") if r and r["log_path"] else ""
+            timeouts.append({"item": "完整層整體逾時", "summary": ex[:800]})
+        if res.status == "infra":
+            red.append({"item": "基礎設施錯誤", "summary": "完整層測試沒跑起來（重試仍失敗）"})
+        if res.status == "fail" and not red and not timeouts:
+            red.append({"item": "未知紅項", "summary": "測試失敗但報告沒列出紅項"})
+        store.emit(c, "full_result", None, {"main_sha": j.head_sha, "started_at": r["started_at"], "finished_at": r["finished_at"] or self.clock(),
+                                            "total": total, "red": red, "timeouts": timeouts}, force=True)
 
     def _snapshot_step(self):
         """定期送現況快照（BD-06 規格，CARD_FLOW §7 state_snapshot）：排隊器管理中的每條分支的狀態、提交、放行版本、重測次數。
@@ -1049,6 +1115,8 @@ class Scheduler:
             branches = [{"branch": r["name"], "state": r["state"], "commit": r["head_sha"],
                          "approved_sha": r["approved_sha"], "retest": r["retest"] or 0}
                         for r in rows[:self.SNAPSHOT_MAX]]
+            # 舊的快照一律刪掉只留最新一筆：看板連不上時不會一直堆，恢復後也只送一筆（已送出的不會再被讀）
+            self.con.execute("DELETE FROM events WHERE kind='state_snapshot'")
             store.emit(self.con, "state_snapshot", None, {"at": now, "branches": branches}, force=True)
         except Exception as e:                      # 快照出錯不能影響調度
             log.warning("現況快照失敗：%r", e)

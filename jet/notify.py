@@ -19,14 +19,14 @@ from urllib.parse import urlparse
 NOTIFY_KINDS = ("rejected", "conflict", "halted", "queue_error")   # 要人處理的（預設只送這些）
 MACHINE_KINDS = ("pushed", "tested_green", "tested_red", "queued", "merged", "approved", "revoked",
                  "superseded", "parent_blocked", "drop_checked", "selftest_started", "batch_started",
-                 "workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf", "state_snapshot")  # 給機器看的狀態變化
+                 "workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf", "state_snapshot", "full_result")  # 給機器看的狀態變化
 ALL_KINDS = NOTIFY_KINDS + MACHINE_KINDS
 KIND_TEXT = {
     "rejected": "被退回", "conflict": "跟 main 撞檔", "halted": "暫停待人處理", "queue_error": "排隊器出狀況",
     "pushed": "有新提交", "tested_green": "自測綠", "tested_red": "自測紅", "queued": "進佇列",
     "merged": "已合入", "approved": "已放行", "revoked": "已撤回放行",
     "superseded": "內容變了、放行失效", "parent_blocked": "父分支擋住", "drop_checked": "放棄查核結果", "selftest_started": "開始自測", "batch_started": "開始批測",
-    "workflow_status": "工作流狀態", "loop_red": "背景測試發現主線紅", "loop_green": "背景測試主線綠", "loop_culprit": "背景測試找到兇手", "loop_triage": "背景測試請看板先看代碼找嫌疑", "loop_perf": "背景測試性能量測", "state_snapshot": "排隊器現況快照",
+    "workflow_status": "工作流狀態", "loop_red": "背景測試發現主線紅", "loop_green": "背景測試主線綠", "loop_culprit": "背景測試找到兇手", "loop_triage": "背景測試請看板先看代碼找嫌疑", "loop_perf": "背景測試性能量測", "state_snapshot": "排隊器現況快照", "full_result": "完整層結果",
 }
 LOOP_KINDS = ("workflow_status", "loop_red", "loop_green", "loop_culprit", "loop_triage", "loop_perf")
 LOOP_FIELDS = ("mode", "loop", "main_sha", "culprit_commit", "culprit_branch", "hotfix_id", "failed_items", "green_sha", "commits", "deadline_at", "perf")
@@ -161,6 +161,8 @@ def build_payload(events: List[Dict[str, Any]], now: float, destination: Optiona
             "culprit_commit": e.get("culprit_commit"), "culprit_branch": e.get("culprit_branch"),
             "hotfix_id": e.get("hotfix_id"), "green_sha": e.get("green_sha"), "commits": e.get("commits"),
             "deadline_at": e.get("deadline_at"), "perf": e.get("perf"), "branches": e.get("branches"),
+            "started_at": e.get("started_at"), "finished_at": e.get("finished_at"), "total": e.get("total"),
+            "red": e.get("red"), "timeouts": e.get("timeouts"),
         }.items() if v is not None or k in ("branch", "detail")} for e in events],
     }
     if destination:
@@ -196,6 +198,10 @@ def _enrich(con, r) -> Dict[str, Any]:
                     if k in d:
                         e[k] = d[k]
                 d = {"reason": d.get("detail")}
+            if e["kind"] == "full_result":
+                for k in ("main_sha", "started_at", "finished_at", "total", "red", "timeouts"):
+                    e[k] = d.get(k)
+                d = {"reason": f"{d.get('total')} 項，紅 {len(d.get('red') or [])}、逾時 {len(d.get('timeouts') or [])}"}
             if e["kind"] == "state_snapshot":
                 e["branches"] = d.get("branches") or []
                 d = {"reason": f"{len(e['branches'])} 條分支"}

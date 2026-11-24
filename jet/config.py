@@ -61,11 +61,22 @@ class Config:
     loop_triage: str = "bisect"      # 背景測試紅了先怎麼找兇手：bisect＝直接二分；code_first＝先發 loop_triage 事件等看板回嫌疑分支（只驗證一次），逾時才二分
     loop_triage_wait_s: int = 900
     loop_timeout_s: int = 0           # 0＝同 limits 的批測逾時
+    nightly_at: str = ""              # 每日完整層時刻 "HH:MM"（本機時間）；空＝不跑。到點對 main 最新版跑 full 層一次，紅了只記錄、不擋 main、不二分
+    nightly_cores: int = 0            # 完整層用的核數；0＝同 cores.batch_cores
+    nightly_timeout_s: int = 0        # 完整層逾時；0＝同 limits 的批測逾時
     main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
     recheck_red: bool = True          # 自測紅時，先把新紅項放在乾淨 main 上單獨重跑；main 也紅就不算這張卡的錯
     order: str = "parallel"           # review_first＝先審後測；parallel＝不分先後
     source: Optional[dict] = None     # 外部來源（選配）：{url, token_file, poll_seconds, max_age_s, timeout_s}
+
+
+def _nightly_at(v):
+    import re
+    v = "" if v is None else str(v).strip()
+    if v and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+        raise ConfigError('workflow.nightly.at 必須是 "HH:MM"（24 小時制）或空字串')
+    return v
 
 
 def _snap_s(v):
@@ -148,6 +159,9 @@ def parse(d: dict) -> Config:
         loop_triage=str(((d.get("workflow") or {}).get("loop") or {}).get("triage", "bisect")),
         loop_triage_wait_s=int(((d.get("workflow") or {}).get("loop") or {}).get("triage_wait_s", 900)),
         loop_timeout_s=int(((d.get("workflow") or {}).get("loop") or {}).get("timeout_s", 0)),
+        nightly_at=_nightly_at((((d.get("workflow") or {}).get("nightly") or {}).get("at", ""))),
+        nightly_cores=int(((d.get("workflow") or {}).get("nightly") or {}).get("cores", 0)),
+        nightly_timeout_s=int(((d.get("workflow") or {}).get("nightly") or {}).get("timeout_s", 0)),
         gate_registry_dir=str(pol.get("gate_registry_dir", "")),
         timing_items=tuple(pol.get("timing_items", ("loadtime", "perf", "timeout", "card_touch", "godot_time_"))),
         source=_parse_source(d.get("source")),
