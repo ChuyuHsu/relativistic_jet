@@ -123,7 +123,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
                 cl(keep=[j.workdir for j in adopted.values() if j.workdir])
             except TypeError:
                 cl()
-        lost = c.execute("SELECT id FROM runs WHERE kind='nightly' AND status IN ('running','queued')"
+        lost = c.execute("SELECT id, commit_sha, started_at FROM runs WHERE kind='nightly' AND status IN ('running','queued')"
                          + (" AND id NOT IN (%s)" % ",".join(str(r) for r in adopted) if adopted else "")).fetchall()
         if lost:                    # 每日完整層沒接管到（換版或停機時被殺）：當天重排，次數照 _on_nightly 的規則算
             n = int(store.get_meta(c, "nightly_infra", "0") or 0) + 1
@@ -131,6 +131,12 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
             if n < self.NIGHTLY_INFRA_TRIES:
                 store.set_meta(c, "nightly_day", "")
                 store.set_meta(c, "nightly_retry_at", "0")
+            else:                   # 次數用完：送一筆紅項、計數歸零（今天不再排，明天照常）
+                store.set_meta(c, "nightly_infra", "0")
+                store.emit(c, "full_result", None, {
+                    "main_sha": lost[-1]["commit_sha"], "started_at": lost[-1]["started_at"], "finished_at": self.clock(),
+                    "total": 0, "red": [{"item": "完整層被取消", "summary": "完整層測試多次被取消（換版或停機），沒有完整結果"}],
+                    "timeouts": []}, force=True)
         c.execute("UPDATE runs SET status='cancelled', finished_at=? WHERE status IN ('running','queued')"
                   + (" AND id NOT IN (%s)" % ",".join(str(r) for r in adopted) if adopted else ""),
                   (self.clock(),))

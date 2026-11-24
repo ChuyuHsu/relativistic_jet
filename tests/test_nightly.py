@@ -187,3 +187,23 @@ class NightlyCancelTest(NightlyTest):
         for _ in range(4):
             s.tick()
         self.assertTrue(self.fulls())
+
+
+class NightlyRecoverLimitTest(NightlyTest):
+    def test_recover_limit_reports_and_resets(self):
+        s = self.mk2({"at": "03:30"})
+        store.set_meta(self.con, "nightly_day", "2026-11-25")
+        store.set_meta(self.con, "nightly_infra", "2")             # 已經用掉兩次
+        self.con.execute("INSERT INTO runs(id,kind,status,started_at,workdir,cores,timeout_s,units,layer,commit_sha) "
+                         "VALUES(501,'nightly','running',1,'x','1',1,1,'full','m0')")
+        s.recover()
+        r = self.results()
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["red"][0]["item"], "完整層被取消")
+        self.assertEqual(r[0]["main_sha"], "m0")
+        self.assertEqual(store.get_meta(self.con, "nightly_infra"), "0")
+        self.assertEqual(store.get_meta(self.con, "nightly_day"), "2026-11-25")   # 今天不再排
+        self.con.execute("INSERT INTO runs(id,kind,status,started_at,workdir,cores,timeout_s,units,layer,commit_sha) "
+                         "VALUES(502,'nightly','running',1,'x','1',1,1,'full','m0')")
+        s.recover()                                                 # 隔天第一次再遇到：重排，不沉默
+        self.assertEqual(store.get_meta(self.con, "nightly_day"), "")
