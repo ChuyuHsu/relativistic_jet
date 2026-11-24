@@ -317,16 +317,21 @@ class GitRepo:
 
     def _still_missing(self, files: List[str], branch_sha: str, targets: Sequence[str], main_sha: str) -> List[str]:
         """逐檔比內容：分支上的這個檔，符合下列任一條就算「沒漏」，其餘才算缺的。
-        ①內容等於任一目標（main 現在的版本、接手卡分支的版本）；②等於 main 歷史上該檔的某一版（最多回查 HISTORY_DEPTH 版，
-        代表 main 已經走過這一版）。分支沒有這個檔（刪掉）時，只有目標也沒有才算沒漏。"""
+        ①內容等於任一目標（main 現在的版本、接手卡分支的版本）；②等於 merge-base..main 之間該檔的某一版（最多回查 HISTORY_DEPTH 版，
+        代表分支開出後 main 已經走過這一版）。分支沒有這個檔（刪掉）時，只有目標也沒有才算沒漏。"""
+        try:
+            base = self._merge_base(branch_sha, main_sha)
+        except GitError:
+            base = None                                    # 沒有共同祖先：不回查歷史，除了目標相同的都當缺
         left = []
         for f in files:
             try:
                 mine = self._blob(branch_sha, f)
                 if any(self._blob(t, f) == mine for t in targets):
                     continue
-                if mine is not None:
-                    hist = self._git("log", f"-n{self.HISTORY_DEPTH}", "--format=%H", main_sha, "--", f, check=False).stdout
+                if mine is not None and base is not None:
+                    # 只認分支開出來「之後」main 才出現的版本；還原成開分支之前的舊版不算已走過
+                    hist = self._git("log", f"-n{self.HISTORY_DEPTH}", "--format=%H", f"{base}..{main_sha}", "--", f, check=False).stdout
                     if any(self._blob(c, f) == mine for c in hist.split()):
                         continue
             except GitError:
