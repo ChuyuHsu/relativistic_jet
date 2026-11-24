@@ -11,7 +11,7 @@ const hook = (e, events, token = 'h') => call(e, 'POST', '/hooks/queue', { event
 const act = (e, id, a, body = {}) => call(e, 'POST', `/api/cards/${id}/${a}`, body);
 const getCard = async (e, id) => (await call(e, 'GET', `/api/cards/${id}`)).json();
 const withFetch = async (fn, impl) => { const real = globalThis.fetch; globalThis.fetch = impl; try { return await fn(); } finally { globalThis.fetch = real; } };
-const SHA = 'abc1234', SHA2 = 'bcd2345';
+const SHA = 'abc1234'.padEnd(40, '0'), SHA2 = 'bcd2345'.padEnd(40, '0');   // 排隊器只認完整 hash
 // 領卡（領卡人 w）
 async function claim(e, id, thread = 'dev-' + id, extra = {}) {
   await call(e, 'POST', '/api/cards', { id, title: id, ...extra });
@@ -916,4 +916,16 @@ test('背景測試效能：畫面量測（FPS、繪製數）存下並出排行�
   assert.equal(p.runs.length, 3); assert.equal(p.runs[2].metrics.fps_avg, 40); assert.equal(p.runs[0].metrics, null);
   assert.deepEqual(p.lowest_fps.map(s => [s.item, s.avg, s.min, s.last, s.runs]), [['shop_a', 25, 20, 30, 2], ['shop_b', 35, 35, 35, 1]]);
   assert.deepEqual(p.most_draw_calls.map(s => [s.item, s.avg, s.max, s.last]), [['shop_a', 275, 300, 250], ['shop_c', 260, 260, 260]]);
+});
+
+test('放行要完整 hash：送審是完整的，放行帶短前綴就補成完整；兩邊都短就拒收', async () => {
+  const e = mkenv();
+  await claim(e, 'h1', 'th'); await act(e, 'h1', 'submit', { commit: SHA, actor: 'w' });
+  const ok = await act(e, 'h1', 'approve', { commit: SHA.slice(0, 10), actor: 'rev' });
+  assert.equal(ok.status, 200);
+  assert.equal((await getCard(e, 'h1')).approved_commit, SHA);   // 存的是完整 40 碼
+  await claim(e, 'h2', 'th2'); await act(e, 'h2', 'submit', { commit: 'abc1234def', actor: 'w' });   // 送審本身就是短的
+  const bad = await act(e, 'h2', 'approve', { commit: 'abc1234def', actor: 'rev' });
+  assert.equal(bad.status, 400); assert.match((await bad.json()).error, /完整/);
+  assert.equal((await getCard(e, 'h2')).stage, 'reviewing');
 });
