@@ -69,7 +69,7 @@ const sqlForStages = ss => ss.length ? `(${[...new Set(ss.map(x => STAGE_SQL[x] 
 // 產生中途有寫入也只會讓下一次多拉一次，不會拿到舊資料。權杖必須在呼叫前已檢查。
 async function revGate(req, env, produce) {
   let r;
-  try { r = await env.DB.prepare("SELECT value FROM meta WHERE key='rev'").first(); } catch { return json({ error: '看板內部錯誤' }, 500); }
+  try { r = await env.DB.prepare("SELECT value FROM meta WHERE key='rev'").first(); } catch (err) { if (isQuota(err)) throw err; return json({ error: '看板內部錯誤' }, 500); }
   const rev = r ? String(r.value) : null;
   if (rev == null) return produce();   // 還沒跑 migrate_016：不支援，照常回答
   const etag = `W/"${rev}"`;
@@ -149,11 +149,18 @@ async function desired(req, env) {
       return json(loop_suspect ? { cards: out, drop_checks, loop_suspect } : { cards: out, drop_checks });
     }
     return json(out);
-  } catch { return json({ error: '看板內部錯誤' }, 500); }
+  } catch (err) { if (isQuota(err)) throw err; return json({ error: '看板內部錯誤' }, 500); }
 }
 
+// 資料庫額度（讀取列數、寫入列數）用完：回明確的 503 與原因，不要讓 Cloudflare 回 1101（各串看不懂）。其他錯誤照舊往上丟。
+const QUOTA = /(D1|database)[^]{0,120}(limit|quota|exceed)|(exceed|reach)[^]{0,60}(rows? (read|written)|daily|free)|rows_(read|written)/i;
+const isQuota = err => QUOTA.test(String((err && (err.message || err.cause?.message)) || err));
 export async function handle(req, env, ctx) {
-  return handleInner(req, env, ctx);
+  try { return await handleInner(req, env, ctx); }
+  catch (err) {
+    if (isQuota(err)) return new Response(JSON.stringify({ error: 'd1_quota', detail: '資料庫額度用完，等額度重置或升級後再試' }), { status: 503, headers: { 'content-type': 'application/json; charset=utf-8', 'retry-after': '3600' } });
+    throw err;
+  }
 }
 const GATED = new Set(['/api/cards', '/api/workflow', '/api/stats', '/api/perf', '/api/nightly']);   // 帶 etag、版本沒變回 304 的讀取端點
 async function handleInner(req, env, ctx, gated = false) {

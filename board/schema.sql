@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_card ON events(card_id, n);   -- 讀單張卡的事件不用掃全表
 CREATE UNIQUE INDEX IF NOT EXISTS cards_branch ON cards(branch) WHERE branch IS NOT NULL;
 -- 排隊器事件去重（至少送一次，對方可能重送）
-CREATE TABLE IF NOT EXISTS hook_seen (key TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS hook_seen (key TEXT PRIMARY KEY, at INTEGER);   -- at：只留 7 天（BD-04）
+CREATE INDEX IF NOT EXISTS hook_seen_at ON hook_seen(at);
 -- 要叫醒負責串的事件，攢批後送出
 CREATE TABLE IF NOT EXISTS outbox (
   n INTEGER PRIMARY KEY AUTOINCREMENT,

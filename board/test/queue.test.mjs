@@ -1131,3 +1131,28 @@ test('NIGHT-02：full_result 存下，/api/nightly 回最新一次與歷史（�
   const h = await (await call(e, 'GET', '/api/nightly')).json(); assert.equal(h.history.length, 14); assert.equal(h.latest.started_at, 129);
   const r1 = await getRaw(e, '/api/nightly'); assert.equal((await getRaw(e, '/api/nightly', { 'if-none-match': r1.headers.get('etag') })).status, 304);
 });
+
+// ---- BD-04：清理與額度防呆 ----
+test('BD-04：hook_seen 記時間，整理只刪 7 天前的；7 天內去重仍有效', async () => {
+  const e = mkenv(); await claim(e, 'c1');
+  await ev(e, 'c1', { kind: 'pushed' });
+  const id = ev.n, T = Math.floor(Date.now() / 1000);
+  assert.ok((await e.DB.prepare('SELECT at FROM hook_seen WHERE key=?').bind(`queue:${id}`).first()).at >= T - 5);
+  await e.DB.prepare("INSERT INTO hook_seen(key,at) VALUES('queue:old',?)").bind(T - 8 * 86400).run();
+  await e.DB.prepare("INSERT INTO hook_seen(key,at) VALUES('queue:six',?)").bind(T - 6 * 86400).run();
+  await e.DB.prepare("INSERT INTO hook_seen(key,at) VALUES('queue:legacy',NULL)").run();
+  await stuckCheck(e);   // 先確認不誤刪
+  const { housekeeping } = await import('../src/queue.js'); await housekeeping(e);
+  const keys = (await e.DB.prepare('SELECT key FROM hook_seen').all()).results.map(r => r.key).sort();
+  assert.deepEqual(keys, ['queue:' + id, 'queue:legacy', 'queue:six'].sort());
+  assert.equal((await (await hook(e, [{ id, branch: br('c1'), card: 'c1', kind: 'pushed' }])).json()).duplicate, 1);   // 7 天內重送仍去重
+});
+
+test('BD-04：資料庫額度用完回 503 {error:"d1_quota"}；其他錯誤不被吞掉', async () => {
+  const e = mkenv();
+  e.DB = { prepare() { throw new Error('D1_ERROR: Exceeded the daily rows_read limit of your free plan'); } };
+  const r = await call(e, 'GET', '/api/cards'); assert.equal(r.status, 503); assert.equal((await r.json()).error, 'd1_quota');
+  assert.equal((await hook(e, [{ id: 1, kind: 'pushed', branch: 'dev/x' }])).status, 503);
+  const e2 = mkenv(); e2.DB = { prepare() { throw new Error('boom'); } };
+  await assert.rejects(() => call(e2, 'GET', '/api/cards/zzz'), /boom/);
+});

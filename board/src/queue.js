@@ -90,7 +90,7 @@ export async function handleHook(req, env, ctx) {
       const kind = String(e.kind || ''), branch = e.branch ? String(e.branch) : null;
       if (hasId(e)) {
         if (seen.has(keyOf(e))) { dup++; return; }
-        seen.add(keyOf(e)); q('INSERT INTO hook_seen(key) VALUES(?)', keyOf(e));   // 不帶 OR IGNORE：兩個併發相同請求撞 UNIQUE，後者整組回滾，去重保持原子
+        seen.add(keyOf(e)); q('INSERT INTO hook_seen(key,at) VALUES(?,?)', keyOf(e), T);   // 不帶 OR IGNORE：兩個併發相同請求撞 UNIQUE，後者整組回滾，去重保持原子
       }
       if (kind === 'workflow_status') {   // 排隊器回報：{mode, loop:{state,last_run_at,last_result,main_sha,failed_items,culprit,next_run_at,...}}；整份取代，不需要對應到卡
         if (!['gate_batch', 'direct_merge'].includes(e.mode)) { stale++; hl(e, 'workflow_status 的 mode 要是 gate_batch 或 direct_merge'); return; }
@@ -369,6 +369,7 @@ export async function stuckCheck(env) {
 export async function housekeeping(env) {
   const r = await stuckCheck(env);
   try { await env.DB.prepare('DELETE FROM outbox WHERE sent_at IS NOT NULL AND sent_at<?').bind(now() - 86400).run(); } catch { /* 清不掉下次再清 */ }
+  try { await env.DB.prepare('DELETE FROM hook_seen WHERE at IS NOT NULL AND at<?').bind(now() - 7 * 86400).run(); } catch { /* 去重只留 7 天（超過 7 天的事件編號不會再重送） */ }
   return r;
 }
 

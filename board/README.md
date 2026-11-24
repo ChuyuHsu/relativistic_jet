@@ -43,6 +43,8 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 
 - **串號轉址（BD-07）**：`POST /api/redirect {from,to,actor}`（寫入權杖）登記「舊串→新串」，同時把未結案（open／claimed／waiting）卡片的 `owner_thread` 改成最終的新串；`GET /api/redirect` 列出。信箱 `outbox/claim` 領信時沿轉址鏈解析收件串（最多 10 跳，繞圈停在環前；登記時會繞圈直接 409），環境變數 `REVIEW_THREADS`／`ADMIN_THREADS` 裡的舊串號與舊信也經過同一個解析。重開串時只要打一次 redirect。升級要跑 `migrate_018.sql`。
 
+- **清理與額度防呆（BD-04）**：`hook_seen`（排隊器事件去重）記 `at`，每 10 分鐘的整理刪 7 天前的（7 天內重送仍去重）；資料庫額度（讀取／寫入列數）用完時，所有端點回 **503 `{"error":"d1_quota"}`**（帶 `retry-after`），不再讓 Cloudflare 回 1101。升級要跑 `migrate_017.sql`。
+
 升級已部署的資料庫：依序各跑一次 `migrate_001.sql`～`migrate_005.sql`，再跑 `schema.sql`。測試：`cd board && npm test`（Node 22，不需安裝套件）。
 
 ## 信箱（收信端自己來領）
