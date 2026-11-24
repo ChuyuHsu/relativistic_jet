@@ -1,56 +1,99 @@
 <!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>任務看板</title>
 <style>
-:root{--bg:#fff;--fg:#1c1c1e;--mut:#6b6b70;--card:#f2f2f7;color-scheme:light dark}
-@media(prefers-color-scheme:dark){:root{--bg:#000;--fg:#f2f2f7;--mut:#9a9aa0;--card:#1c1c1e}}
-body{margin:0;padding:12px 16px 40px;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,sans-serif}
-h1{font-size:20px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
-.tabs button{border:0;border-radius:14px;padding:6px 12px;background:var(--card);color:var(--fg);font-size:14px}
-.tabs button.on{background:#0a84ff;color:#fff}
-.c{background:var(--card);border-radius:12px;padding:10px 12px;margin:8px 0}
-.v{display:flex;gap:6px;margin:8px 0}.v button{border:0;border-radius:14px;padding:6px 14px;background:var(--card);color:var(--fg);font-size:14px}.v button.on{background:#0a84ff;color:#fff}
-.g{overflow-x:auto;background:var(--card);border-radius:12px;padding:8px;margin:8px 0}.g svg{display:block}.g text{fill:#fff;font:600 11px -apple-system,sans-serif;pointer-events:none}.g .n{cursor:pointer}.g .sel{stroke:var(--fg);stroke-width:3}.g path{fill:none;stroke:var(--mut);stroke-width:1.5}
-.lg{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;margin:6px 0}.lg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px}
-.rp{border-radius:12px;padding:10px 12px;margin:8px 0;background:var(--card)}.rp.bad{border-left:5px solid #ff453a}.rp.ok{border-left:5px solid #30a05a}.rp h2{font-size:16px;margin:0 0 6px}.rp .it{padding:4px 0;border-top:1px solid #8883}.rp .it b{display:inline}
-.pl{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:8px 0;font-size:14px}.pl button{border:0;border-radius:14px;padding:6px 10px;background:var(--card);color:var(--fg);font-size:14px}.pl button.on{background:#0a84ff;color:#fff}.pl button b{margin-left:4px}.pl i{color:var(--mut);font-style:normal}.pl .sep{margin:0 4px;color:var(--mut)}
-.grp{margin:10px 0}.grp>summary{font-size:17px;padding:6px 0;cursor:pointer}.sub{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--mut);margin:8px 0 2px}.sub span:first-child{width:10px;height:10px;border-radius:3px;display:inline-block}
-.c>.m{display:block}
-.c b{display:block}.m{color:var(--mut);font-size:13px}
-</style></head><body>
-<h1>任務看板</h1><div class="m" id="wf"></div><div class="pl" id="pl"></div><div id="redp"></div><div id="perfp"></div><div class="v"><button data-v="g" class="on">關係圖</button><button data-v="l">列表</button></div><div id="gv"></div><div id="lv" hidden><div class="tabs" id="tabs"></div><div id="list">載入中…</div></div>
+:root{--bg:#f5f6f8;--surf:#fff;--fg:#14171f;--mut:#6a7080;--line:#e6e8ee;--acc:#3b5bfd;--acc-bg:#e9edff;
+--red:#e5484d;--red-bg:#fdecec;--grn:#2f9e63;--grn-bg:#e6f6ee;--amb:#d98a1a;--amb-bg:#fdf3df;--gry:#8b90a0;
+--r:14px;--sh:0 1px 2px rgba(20,23,31,.05),0 4px 14px rgba(20,23,31,.04);color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#0d0f14;--surf:#171a22;--fg:#eceef4;--mut:#9aa1b2;--line:#262a35;--acc:#7b93ff;--acc-bg:#1d2340;
+--red:#ff6b70;--red-bg:#2d1a1c;--grn:#4ccb8a;--grn-bg:#15291f;--amb:#f0b04a;--amb-bg:#2c2412;--gry:#7d8394;--sh:none}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;-webkit-text-size-adjust:100%}
+.wrap{max-width:860px;margin:0 auto;padding:16px 16px 56px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 14px}
+h1{font-size:22px;font-weight:700;letter-spacing:-.01em;margin:0}
+.pill{display:inline-flex;align-items:center;gap:6px;max-width:62%;font-size:12px;color:var(--mut);background:var(--surf);border:1px solid var(--line);border-radius:999px;padding:5px 10px;box-shadow:var(--sh)}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--gry);flex:none}.pill.pg i{background:var(--grn)}.pill.pr i{background:var(--red)}.pill.pa i{background:var(--amb)}
+.pill span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;margin:0 0 12px;box-shadow:var(--sh)}
+.card h2{font-size:16px;margin:0 0 2px;font-weight:650}.m{color:var(--mut);font-size:13px}
+.st{display:flex;gap:12px;align-items:flex-start}.st .dot{width:12px;height:12px;border-radius:50%;margin-top:5px;flex:none;background:var(--gry)}
+.st.ok .dot{background:var(--grn)}.st.bad .dot{background:var(--red)}.st.wait .dot{background:var(--amb)}
+.st.bad{border-color:color-mix(in srgb,var(--red) 40%,var(--line))}.st.ok{border-color:color-mix(in srgb,var(--grn) 35%,var(--line))}
+.it{padding:8px 0;border-top:1px solid var(--line);margin-top:8px}.it b{font-weight:600}
+.pipe{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:0 0 6px}
+.side{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0 0 14px}
+.tile{appearance:none;border:1px solid var(--line);background:var(--surf);color:var(--fg);border-radius:12px;padding:10px 4px 8px;text-align:center;cursor:pointer;box-shadow:var(--sh);font:inherit}
+.tile b{display:block;font-size:22px;line-height:1.1;font-weight:700;font-variant-numeric:tabular-nums}.tile span{display:block;font-size:12px;color:var(--mut);margin-top:2px}
+.tile.on{background:var(--acc);border-color:var(--acc);color:#fff}.tile.on span{color:#ffffffcc}
+.tile.alert b{color:var(--red)}.tile.on.alert b{color:#fff}
+.seg{display:inline-flex;background:var(--line);border-radius:10px;padding:3px;margin:2px 0 12px}
+.seg button{appearance:none;border:0;background:none;color:var(--mut);font:inherit;font-size:14px;padding:5px 16px;border-radius:8px;cursor:pointer}
+.seg button.on{background:var(--surf);color:var(--fg);font-weight:600;box-shadow:var(--sh)}
+.grp{margin:0 0 12px;background:var(--surf);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh);overflow:hidden}
+.grp>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:13px 16px;font-size:16px;font-weight:650;cursor:pointer}
+.grp>summary::-webkit-details-marker{display:none}.grp>summary::after{content:"›";margin-left:auto;color:var(--mut);transition:transform .15s}
+.grp[open]>summary::after{transform:rotate(90deg)}
+.grp .n{font-size:12px;font-weight:600;color:var(--mut);background:var(--bg);border-radius:999px;padding:1px 8px}
+.sub{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--mut);padding:8px 16px 4px;background:var(--bg)}
+.sub i{width:8px;height:8px;border-radius:50%}
+.c{padding:11px 16px;border-top:1px solid var(--line)}
+.c .t{display:flex;gap:8px;align-items:baseline}.c .id{font-weight:650;font-size:14px}.c .ti{color:var(--mut);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.c .mm{display:flex;flex-wrap:wrap;gap:4px 8px;margin-top:3px;font-size:12.5px;color:var(--mut)}
+.c .why{margin-top:6px;font-size:13px;background:var(--red-bg);color:var(--fg);border-radius:8px;padding:6px 10px}
+.c .wt{margin-top:6px;font-size:13px;background:var(--amb-bg);border-radius:8px;padding:6px 10px}
+.c details{margin-top:4px}.c summary{cursor:pointer;color:var(--mut);font-size:12px}
+.chip{display:inline-block;font-size:11.5px;font-weight:600;border-radius:999px;padding:1px 8px;background:var(--acc-bg);color:var(--acc)}
+.chip.red{background:var(--red-bg);color:var(--red)}.chip.amb{background:var(--amb-bg);color:var(--amb)}.chip.grn{background:var(--grn-bg);color:var(--grn)}.chip.gry{background:var(--line);color:var(--mut)}
+.g{overflow-x:auto;background:var(--surf);border:1px solid var(--line);border-radius:var(--r);padding:8px;margin:0 0 12px}.g svg{display:block}.g text{fill:#fff;font:600 11px -apple-system,sans-serif;pointer-events:none}.g .gn{cursor:pointer}.g .sel{stroke:var(--fg);stroke-width:3}.g path{fill:none;stroke:var(--gry);stroke-width:1.5}
+.lg{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;color:var(--mut);margin:0 0 10px}.lg i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:4px}
+.btn{appearance:none;border:1px solid var(--line);background:var(--surf);color:var(--fg);font:inherit;font-size:13px;border-radius:999px;padding:5px 12px;cursor:pointer}.btn.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.perf svg{display:block;margin:8px 0 4px}.perf summary{cursor:pointer;color:var(--mut);font-size:13px;margin-top:8px}
+a{color:var(--acc)}
+@media(min-width:640px){.wrap{padding:28px 24px 72px}h1{font-size:26px}.tile b{font-size:26px}}
+</style></head><body><div class="wrap">
+<header><h1>任務看板</h1><div class="pill" id="wf"><i></i><span>載入中…</span></div></header>
+<div id="redp"></div>
+<div class="pipe" id="pl"></div><div class="side" id="pl2"></div>
+<div id="perfp"></div>
+<div class="seg" id="seg"><button data-v="l">列表</button><button data-v="g">關係圖</button></div>
+<div id="gv"></div><div id="lv" hidden><div id="list">載入中…</div></div>
+</div>
 <script>
 const S={rejected:'退回要修',new:'剛開卡',developing:'開發中',reviewing:'等審查',selftesting:'自測中',wait_queue:'等排隊',batching:'批測中',wait_parent:'已放行・等父卡',done_wait:'自測完畢・等父卡',waiting_parent:'暫緩・等接手卡',merged:'已合併',dropping:'放棄待查',dropped:'放棄'};
-// 列表分大組（照流程走）；空的組不顯示；已合併、放棄預設收合
-// 頁首流程摘要：只用少數大階段，子狀態合併計數；點一個階段只看那一類的卡
-const PIPE=[['開卡',['new']],['開發',['developing']],['審查',['reviewing']],['自測',['selftesting','wait_queue','batching']],['已合併',['merged']],'|',['退回',['rejected']],['等父卡',['wait_parent','done_wait','waiting_parent']],['放棄',['dropping','dropped']]];
-let focus=null;
-function pipeDraw(){
-  const chip=x=>`<button data-p="${x[0]}" class="${focus===x[0]?'on':''}">${x[0]}<b>${cards.filter(c=>x[1].includes(c.stage)).length}</b></button>`;
-  const i=PIPE.indexOf('|');
-  pl.innerHTML=PIPE.slice(0,i).map(chip).join('<i>→</i>')+'<span class="sep">｜</span>'+PIPE.slice(i+1).map(chip).join('');
-}
-pl.onclick=e=>{const b=e.target.closest('button[data-p]');if(!b)return;focus=focus===b.dataset.p?null:b.dataset.p;view='l';try{localStorage.setItem('rv','l')}catch(x){}draw()};
+const COL={new:'#8e8e93',developing:'#3b5bfd',reviewing:'#a05af0',selftesting:'#ff9f0a',wait_parent:'#d9a030',done_wait:'#d9a030',wait_queue:'#c9b060',batching:'#e08a00',merged:'#2f9e63',rejected:'#e5484d',waiting_parent:'#c9a227',dropping:'#8e6a3c',dropped:'#636366'};
+const CHIP={rejected:'red',wait_parent:'amb',done_wait:'amb',waiting_parent:'amb',wait_queue:'amb',merged:'grn',dropped:'gry',dropping:'gry',new:'gry'};
+// 頁首：主流程五格＋旁支三格（點一格只看那一類）
+const MAIN=[['開卡',['new']],['開發',['developing']],['審查',['reviewing']],['自測',['selftesting','wait_queue','batching']],['已合併',['merged']]];
+const SIDE=[['退回',['rejected']],['等父卡',['wait_parent','done_wait','waiting_parent']],['放棄',['dropping','dropped']]];
+const PIPE=MAIN.concat(SIDE);
 const GROUPS=[['要處理',['rejected','new','developing','reviewing'],true],['測試中',['selftesting','wait_queue','batching'],true],['等父卡',['wait_parent','done_wait','waiting_parent'],true],['完成',['merged'],false],['放棄',['dropping','dropped'],false]];
-const COL={new:'#8e8e93',developing:'#0a84ff',reviewing:'#bf5af2',selftesting:'#ff9f0a',wait_parent:'#e0a030',done_wait:'#e0a030',wait_queue:'#d9b65c',batching:'#e08a00',merged:'#30a05a',rejected:'#ff453a',waiting_parent:'#c9a227',dropping:'#8e6a3c',dropped:'#636366'};
-let cards=[],cur='reviewing',view='g',sel=null,showDone=false;
-try{view=localStorage.getItem('rv')||'g'}catch(e){}
+let cards=[],view='l',sel=null,showDone=false,focus=null,tok='';
+try{view=localStorage.getItem('rv')||'l'}catch(e){}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-function cardHtml(c){
-    const r=c.rejected;
-    const why=r?`<span class="m">${r.source==='review'?'審查退回':(r.halted?'排隊器暫停':'排隊器退回')}：${esc(r.reason||'')}${(r.failed_items||[]).length?'（紅項 '+(r.failed_items||[]).map(f=>esc(f.item_id)).join('、')+'）':''}</span>${(r.failed_items||[]).filter(f=>f.summary).map(f=>`<details class="m"><summary>${esc(f.item_id)} 失敗原因</summary><pre style="white-space:pre-wrap;margin:4px 0;font-size:12px">${esc(f.summary)}</pre></details>`).join('')}`:'';
-    return `<div class="c"><b>${esc(c.id)}　${esc(c.title)}</b><span class="m">${esc(S[c.stage])}・優先 ${c.priority}${c.area?'・'+esc(c.area):''}${c.owner?'・'+esc(c.owner):''}${c.branch?'・'+esc(c.branch):''}</span>${c.stage==='waiting_parent'&&c.dropped&&c.dropped.superseded_by?`<span class="m">等接手卡 ${esc(c.dropped.superseded_by)} 進 main${c.dropped.discard_reason?'：'+esc(c.dropped.discard_reason):''}</span>`:''}${c.parent?`<span class="m">父卡 ${esc(c.parent)}（${esc(S[c.parent_stage]||c.parent_stage)}）${c.parent_blocked?'・父卡被放棄或不存在，需改接':(c.waiting_parent?'・等父卡合併':'')}</span>`:''}${why}</div>`}
-// 關係圖：有父子關係的卡依父鏈分層由上往下畫（一串卡一條鏈）；沒有關係的卡收在下面的小方塊。已合併、放棄預設收起。
+const fmt=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
+function tiles(arr,alertName){return arr.map(x=>{const n=cards.filter(c=>x[1].includes(c.stage)).length;return `<button class="tile${focus===x[0]?' on':''}${x[0]===alertName&&n?' alert':''}" data-p="${x[0]}"><b>${n}</b><span>${x[0]}</span></button>`}).join('')}
+function pipeDraw(){pl.innerHTML=tiles(MAIN);pl2.innerHTML=tiles(SIDE,'退回')}
+function pipeClick(e){const b=e.target.closest('button[data-p]');if(!b)return;focus=focus===b.dataset.p?null:b.dataset.p;view='l';try{localStorage.setItem('rv','l')}catch(x){}draw()}
+pl.onclick=pl2.onclick=pipeClick;
+function cardHtml(c,nochip){
+  const r=c.rejected,fi=r?(r.failed_items||[]):[];
+  const why=r?`<div class="why">${r.source==='review'?'審查退回':(r.halted?'排隊器暫停':'排隊器退回')}：${esc(r.reason||'')}${fi.length?'（紅項 '+fi.map(f=>esc(f.item_id)).join('、')+'）':''}${fi.filter(f=>f.summary).map(f=>`<details><summary>${esc(f.item_id)} 失敗原因</summary><pre style="white-space:pre-wrap;margin:4px 0;font-size:12px">${esc(f.summary)}</pre></details>`).join('')}</div>`:'';
+  const sup=c.stage==='waiting_parent'&&c.dropped&&c.dropped.superseded_by?`<div class="wt">等接手卡 ${esc(c.dropped.superseded_by)} 進 main${c.dropped.discard_reason?'：'+esc(c.dropped.discard_reason):''}</div>`:'';
+  const par=c.parent?`<div class="wt">父卡 ${esc(c.parent)}（${esc(S[c.parent_stage]||c.parent_stage)}）${c.parent_blocked?'・父卡被放棄或不存在，需改接':(c.waiting_parent?'・等父卡合併':'')}</div>`:'';
+  const more=[c.area&&'區域 '+esc(c.area),c.owner&&'負責 '+esc(c.owner),c.branch&&'分支 '+esc(c.branch)].filter(Boolean);
+  return `<div class="c"><div class="t"><span class="id">${esc(c.id)}</span><span class="ti">${esc(c.title)}</span></div><div class="mm">${nochip?'':`<span class="chip ${CHIP[c.stage]||''}">${esc(S[c.stage])}</span>`}<span>優先 ${c.priority}</span></div>${why}${sup}${par}${more.length?`<details><summary>詳細</summary><div class="mm">${more.map(x=>`<span>${x}</span>`).join('')}</div></details>`:''}</div>`}
+function subs(ks){return ks.map(k=>{const l=cards.filter(c=>c.stage===k);return l.length?`<div class="sub"><i style="background:${COL[k]}"></i>${S[k]}<span>${l.length}</span></div>`+l.map(c=>cardHtml(c,1)).join(''):''}).join('')}
 function graph(){
   const done=c=>c.stage==='merged'||c.stage==='dropped';
-  const vis=cards.filter(c=>showDone||!done(c)), by=new Map(vis.map(c=>[c.id,c]));
+  const vis=cards.filter(c=>showDone||!done(c)),by=new Map(vis.map(c=>[c.id,c]));
   const kids=new Map(),hasP=new Set();
   vis.forEach(c=>{if(c.parent&&by.has(c.parent)){hasP.add(c.id);(kids.get(c.parent)||kids.set(c.parent,[]).get(c.parent)).push(c.id)}});
-  const rel=vis.filter(c=>hasP.has(c.id)||kids.has(c.id)), alone=vis.filter(c=>!hasP.has(c.id)&&!kids.has(c.id));
+  const rel=vis.filter(c=>hasP.has(c.id)||kids.has(c.id)),alone=vis.filter(c=>!hasP.has(c.id)&&!kids.has(c.id));
   const W=118,H=34,GX=10,GY=34;let out='';
-  // 連通分量
   const seen=new Set(),comps=[];
   const adj=id=>[...(kids.get(id)||[]),...(by.get(id).parent&&by.has(by.get(id).parent)?[by.get(id).parent]:[])];
   rel.forEach(c=>{if(seen.has(c.id))return;const q=[c.id],m=[];seen.add(c.id);while(q.length){const x=q.pop();m.push(x);adj(x).forEach(y=>{if(!seen.has(y)){seen.add(y);q.push(y)}})}comps.push(m)});
+  const node=(c,x,y)=>`<g class="gn" data-id="${esc(c.id)}"><rect x="${x}" y="${y}" width="${W}" height="${H}" rx="8" fill="${COL[c.stage]||'#888'}" class="${sel===c.id?'sel':''}"/><text x="${x+8}" y="${y+14}">${esc(c.id.slice(0,16))}</text><text x="${x+8}" y="${y+27}" opacity=".85">${esc(S[c.stage])}</text></g>`;
   comps.forEach(m=>{
     const depth={};const d=id=>{if(depth[id]!=null)return depth[id];depth[id]=0;const p=by.get(id).parent;return depth[id]=p&&by.has(p)?d(p)+1:0};m.forEach(d);
     const layers=[];m.forEach(id=>(layers[depth[id]]=layers[depth[id]]||[]).push(id));
@@ -58,72 +101,79 @@ function graph(){
     layers.forEach((L,i)=>{L.sort((a,b)=>(by.get(a).priority-by.get(b).priority)||a.localeCompare(b));L.forEach((id,j)=>{pos[id]={x:GX+j*(W+GX),y:GX+i*(H+GY)}});wmax=Math.max(wmax,L.length)});
     const w=GX+wmax*(W+GX),h=GX+layers.length*(H+GY)-GY+GX;
     let e='',nd='';
-    m.forEach(id=>{const c=by.get(id),p=c.parent;if(p&&pos[p]){const a=pos[p],b=pos[id];e+=`<path d="M${a.x+W/2} ${a.y+H}C${a.x+W/2} ${a.y+H+GY/2} ${b.x+W/2} ${b.y-GY/2} ${b.x+W/2} ${b.y}"/>`}});
-    m.forEach(id=>{const c=by.get(id),q=pos[id];nd+=`<g class="n" data-id="${esc(id)}"><rect x="${q.x}" y="${q.y}" width="${W}" height="${H}" rx="8" fill="${COL[c.stage]||'#888'}" class="${sel===id?'sel':''}"/><text x="${q.x+8}" y="${q.y+14}">${esc(id.slice(0,16))}</text><text x="${q.x+8}" y="${q.y+27}" opacity=".85">${esc(S[c.stage])}</text></g>`});
+    m.forEach(id=>{const p=by.get(id).parent;if(p&&pos[p]){const a=pos[p],b=pos[id];e+=`<path d="M${a.x+W/2} ${a.y+H}C${a.x+W/2} ${a.y+H+GY/2} ${b.x+W/2} ${b.y-GY/2} ${b.x+W/2} ${b.y}"/>`}});
+    m.forEach(id=>{nd+=node(by.get(id),pos[id].x,pos[id].y)});
     out+=`<div class="g"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${e}${nd}</svg></div>`;
   });
-  if(alone.length)out+=`<div class="m">單張卡（沒有父子關係）</div><div class="g"><svg width="${GX+Math.min(alone.length,3)*(W+GX)}" height="${GX+Math.ceil(alone.length/3)*(H+8)}">${alone.map((c,i)=>{const x=GX+(i%3)*(W+GX),y=GX+Math.floor(i/3)*(H+8);return `<g class="n" data-id="${esc(c.id)}"><rect x="${x}" y="${y}" width="${W}" height="${H}" rx="8" fill="${COL[c.stage]||'#888'}" class="${sel===c.id?'sel':''}"/><text x="${x+8}" y="${y+14}">${esc(c.id.slice(0,16))}</text><text x="${x+8}" y="${y+27}" opacity=".85">${esc(S[c.stage])}</text></g>`}).join('')}</svg></div>`;
+  if(alone.length)out+=`<div class="m" style="margin:6px 2px">單張卡（沒有父子關係）</div><div class="g"><svg width="${GX+Math.min(alone.length,3)*(W+GX)}" height="${GX+Math.ceil(alone.length/3)*(H+8)}">${alone.map((c,i)=>node(c,GX+(i%3)*(W+GX),GX+Math.floor(i/3)*(H+8))).join('')}</svg></div>`;
   const lg=Object.keys(S).map(k=>`<span><i style="background:${COL[k]}"></i>${S[k]}</span>`).join('');
-  gv.innerHTML=`<div class="lg">${lg}</div><div class="v"><button data-done="1" class="${showDone?'on':''}">${showDone?'隱藏':'顯示'}已合併／放棄</button></div>${out||'<div class="m">沒有卡</div>'}<div id="det">${sel&&cards.find(c=>c.id===sel)?cardHtml(cards.find(c=>c.id===sel)):'<div class="m">點一張卡看詳情</div>'}</div>`;
+  const cur=sel&&cards.find(c=>c.id===sel);
+  gv.innerHTML=`<div class="lg">${lg}</div><p><button class="btn${showDone?' on':''}" data-done="1">${showDone?'隱藏':'顯示'}已合併／放棄</button></p>${out||'<div class="m">沒有卡</div>'}<div class="grp" style="margin-top:12px">${cur?cardHtml(cur):'<div class="c m">點一張卡看詳情</div>'}</div>`;
 }
-document.querySelector('.v').onclick=e=>{const v=e.target.dataset.v;if(v){view=v;try{localStorage.setItem('rv',v)}catch(x){}draw()}};
-gv.onclick=e=>{if(e.target.dataset.done){showDone=!showDone;draw();return}const n=e.target.closest('.n');if(n){sel=n.dataset.id;draw()}};
+seg.onclick=e=>{const v=e.target.dataset.v;if(v){view=v;try{localStorage.setItem('rv',v)}catch(x){}draw()}};
+gv.onclick=e=>{if(e.target.dataset.done){showDone=!showDone;draw();return}const n=e.target.closest('.gn');if(n){sel=n.dataset.id;draw()}};
 function draw(){
-  document.querySelectorAll('.v button[data-v]').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
+  seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
   gv.hidden=view!=='g';lv.hidden=view!=='l';
-  if(view==='g'){pipeDraw();graph();return}
-  tabs.hidden=true;
-  let open={};try{open=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(e){open={}}
   pipeDraw();
+  if(view==='g'){graph();return}
+  let open={};try{open=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(e){open={}}
   if(focus){const ks=(PIPE.find(x=>x[0]===focus)||[0,[]])[1];
-    list.innerHTML=`<div class="m">只看「${focus}」・<a href="#" id="clr">顯示全部</a></div>`+ks.map(k=>{const l=cards.filter(c=>c.stage===k);return l.length?`<div class="sub"><span style="background:${COL[k]}"></span>${S[k]} <span class="m">${l.length}</span></div>`+l.map(cardHtml).join(''):''}).join('')||'<div class="m">沒有卡</div>';
-    const c=document.getElementById('clr');if(c)c.onclick=e=>{e.preventDefault();focus=null;draw()};return}
+    list.innerHTML=`<div class="m" style="margin:0 2px 10px">只看「${focus}」・<a href="#" id="clr">顯示全部</a></div><div class="grp">${subs(ks)||'<div class="c m">沒有卡</div>'}</div>`;
+    document.getElementById('clr').onclick=e=>{e.preventDefault();focus=null;draw()};return}
   list.innerHTML=GROUPS.map(([name,ks,def])=>{
     const tot=cards.filter(c=>ks.includes(c.stage)).length;
     if(!tot)return '';
     const isOpen=open[name]===undefined?def:open[name];
-    return `<details class="grp" data-g="${name}" ${isOpen?'open':''}><summary><b>${name}</b> <span class="m">${tot}</span></summary>`+ks.map(k=>{const l=cards.filter(c=>c.stage===k);return l.length?`<div class="sub"><span style="background:${COL[k]}"></span>${S[k]} <span class="m">${l.length}</span></div>`+l.map(cardHtml).join(''):''}).join('')+'</details>';
+    return `<details class="grp" data-g="${name}" ${isOpen?'open':''}><summary>${name}<span class="n">${tot}</span></summary>${subs(ks)}</details>`;
   }).join('')||'<div class="m">沒有卡</div>';
 }
-list.addEventListener('toggle',e=>{const d=e.target;if(d.dataset&&d.dataset.g){let o={};try{o=JSON.parse(localStorage.getItem('rg')||'{}')}catch(x){}o[d.dataset.g]=d.open;try{localStorage.setItem('rg',JSON.stringify(o))}catch(x){}}},true);
-tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
+list.addEventListener('toggle',e=>{const d=e.target;if(d.dataset&&d.dataset.g){let o={};try{o=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(x){}o[d.dataset.g]=d.open;try{localStorage.setItem('rg',JSON.stringify(o))}catch(x){}}},true);
+function panel(cls,h,body){redp.innerHTML=`<div class="card st ${cls}"><span class="dot"></span><div style="min-width:0;flex:1"><h2>${h}</h2>${body}</div></div>`}
 function redDraw(w){
   const L=w.red_items||[];
   if(!w.mode){redp.innerHTML='';return}
-  const st=x=>S[x]||x;
-  const lp=w.loop||{},t=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
+  const st=x=>S[x]||x,lp=w.loop||{};
   if(!w.main_red&&!L.length){
-    if(w.mode!=='direct_merge'){redp.innerHTML='<div class="rp"><h2>沒有背景測試</h2><div class="m">目前是閘門批測模式，main 的紅綠看批測結果。</div></div>';return}
-    if(lp.last_result==='green'||lp.state==='green'){redp.innerHTML=`<div class="rp ok"><h2>main 全綠</h2><div class="m">背景測試最後一次通過${lp.last_run_at?'：'+t(lp.last_run_at):''}${lp.main_sha?'（'+esc(String(lp.main_sha).slice(0,8))+'）':''}</div></div>`;return}
-    redp.innerHTML=`<div class="rp"><h2>尚未收到背景測試結果</h2><div class="m">背景測試${lp.state==='running'?'正在跑第一輪':'還沒有完成的結果'}${lp.last_run_at?'（開始 '+t(lp.last_run_at)+'）':''}，跑完才知道 main 紅綠。</div></div>`;return}
-  const sus=(w.triage&&w.triage.suspects)||[];
-  redp.innerHTML=`<div class="rp bad"><h2>main 紅項 ${L.length||'？'} 個${w.triage&&w.triage.status==='pending'?'（等總指揮讀 diff 判斷嫌疑）':''}</h2>`+
-    (L.length?L.map(r=>`<div class="it"><b>${esc(r.item)}</b>${r.summary?`<span class="m"> ${esc(r.summary)}</span>`:''}<br><span class="m">${r.fixers.length?'修理中：'+r.fixers.map(f=>`${esc(f.id)}（${esc(st(f.stage))}${f.owner?'・'+esc(f.owner):''}）`).join('、'):(r.suspects.length?'嫌疑分支：'+r.suspects.map(esc).join('、')+'（驗證中）':'還沒有人在修')}</span></div>`).join(''):'<div class="m">紅項明細還沒回報</div>')+'</div>';
+    if(w.mode!=='direct_merge')return panel('','沒有背景測試','<div class="m">目前是閘門批測模式，main 的紅綠看批測結果。</div>');
+    if(lp.last_result==='green'||lp.state==='green')return panel('ok','main 全綠',`<div class="m">背景測試最後一次通過${lp.last_run_at?'：'+fmt(lp.last_run_at):''}${lp.main_sha?'（'+esc(String(lp.main_sha).slice(0,8))+'）':''}</div>`);
+    return panel('wait','尚未收到背景測試結果',`<div class="m">背景測試${lp.state==='running'?'正在跑第一輪':'還沒有完成的結果'}${lp.last_run_at?'（開始 '+fmt(lp.last_run_at)+'）':''}，跑完才知道 main 紅綠。</div>`);
+  }
+  panel('bad',`main 紅項 ${L.length||'？'} 個${w.triage&&w.triage.status==='pending'?'<span class="m">（等總指揮讀 diff 判斷嫌疑）</span>':''}`,
+    L.length?L.map(r=>`<div class="it"><b>${esc(r.item)}</b>${r.summary?`<span class="m"> ${esc(r.summary)}</span>`:''}<br><span class="m">${r.fixers.length?'修理中：'+r.fixers.map(f=>`${esc(f.id)}（${esc(st(f.stage))}${f.owner?'・'+esc(f.owner):''}）`).join('、'):(r.suspects.length?'嫌疑分支：'+r.suspects.map(esc).join('、')+'（驗證中）':'還沒有人在修')}</span></div>`).join(''):'<div class="m">紅項明細還沒回報</div>');
 }
-const trend=(rr,k,label,col)=>{const v=rr.map(r=>r.metrics&&r.metrics[k]);if(!v.some(x=>x!=null))return '';const mx=Math.max(...v.map(x=>x||0),1),H=36;return `<div class="m" style="margin-top:6px">${label}</div><svg width="${Math.max(rr.length*14,120)}" height="${H}">${v.map((x,i)=>x==null?'':`<rect x="${i*14}" y="${H-Math.max(2,x/mx*H)}" width="10" height="${Math.max(2,x/mx*H)}" rx="2" fill="${col}"><title>${x}</title></rect>`).join('')}</svg>`};
-const rk=(t,a,f)=>(a||[]).length?`<div class="m" style="margin-top:6px">${t}（近幾輪）</div>`+a.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">${f(s)}（${s.runs} 輪）</span></div>`).join(''):'';
+const trend=(rr,k,label,col)=>{const v=rr.map(r=>r.metrics&&r.metrics[k]);if(!v.some(x=>x!=null))return '';const mx=Math.max(...v.map(x=>x||0),1),H=36;return `<div class="m" style="margin-top:8px">${label}</div><svg width="${Math.max(rr.length*14,120)}" height="${H}">${v.map((x,i)=>x==null?'':`<rect x="${i*14}" y="${H-Math.max(2,x/mx*H)}" width="10" height="${Math.max(2,x/mx*H)}" rx="2" fill="${col}"><title>${x}</title></rect>`).join('')}</svg>`};
+const rk=(t,a,f)=>(a||[]).length?`<div class="m" style="margin-top:8px">${t}（近幾輪）</div>`+a.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">${f(s)}（${s.runs} 輪）</span></div>`).join(''):'';
 async function perfDraw(){
   try{
     const p=await(await fetch('/api/perf?n=30',{headers:{authorization:'Bearer '+tok}})).json();
     const R=(p.runs||[]);
     if(!R.length){perfp.innerHTML='';return}
     const rr=R.slice().reverse(),mx=Math.max(...rr.map(r=>r.wall_s),1),W=Math.max(rr.length*14,120),H=50;
-    const bars=rr.map((r,i)=>`<rect x="${i*14}" y="${H-Math.max(2,r.wall_s/mx*H)}" width="10" height="${Math.max(2,r.wall_s/mx*H)}" rx="2" fill="#0a84ff"><title>${esc(new Date(r.at*1000).toLocaleString('zh-TW',{hour12:false}))}　${Math.round(r.wall_s)} 秒　CPU ${r.cpu_util==null?'?':Math.round(r.cpu_util*(r.cpu_util<=1?100:1))}%</title></rect>`).join('');
-    const l=R[0],cpu=x=>x==null?'？':Math.round(x*(x<=1?100:1))+'%',m=s=>s>=120?(s/60).toFixed(1)+' 分':Math.round(s)+' 秒';
-    perfp.innerHTML=`<div class="rp"><h2>背景測試效能</h2><div class="m">最近 ${R.length} 輪總耗時（越高越久；最新在右）</div><svg width="${W}" height="${H}">${bars}</svg><div class="m">最新一輪：${m(l.wall_s)}・CPU ${cpu(l.cpu_util)}・${l.cores??'？'} 核・${l.items??'？'} 項${l.kind?'・'+esc(l.kind):''}</div>`+
-      (l.metrics?`<div class="m" style="margin-top:6px">畫面：FPS 平均 ${l.metrics.fps_avg??'？'}・最低 ${l.metrics.fps_min??'？'}｜繪製數 平均 ${l.metrics.draw_calls_avg??'？'}・最高 ${l.metrics.draw_calls_max??'？'}</div>`:'')+`<details style="margin-top:6px"><summary class="m">更多（趨勢與排行）</summary>`+(l.metrics?trend(rr,'fps_avg','FPS 平均趨勢','#30a05a')+trend(rr,'draw_calls_avg','繪製數平均趨勢','#bf5af2'):'')+
+    const cpu=x=>x==null?'？':Math.round(x*(x<=1?100:1))+'%',m=s=>s>=120?(s/60).toFixed(1)+' 分':Math.round(s)+' 秒';
+    const bars=rr.map((r,i)=>`<rect x="${i*14}" y="${H-Math.max(2,r.wall_s/mx*H)}" width="10" height="${Math.max(2,r.wall_s/mx*H)}" rx="2" fill="var(--acc)"><title>${esc(fmt(r.at))}　${Math.round(r.wall_s)} 秒　CPU ${cpu(r.cpu_util)}</title></rect>`).join('');
+    const l=R[0];
+    perfp.innerHTML=`<div class="card perf"><h2>背景測試效能</h2><div class="m">最新一輪：${m(l.wall_s)}・CPU ${cpu(l.cpu_util)}・${l.cores??'？'} 核・${l.items??'？'} 項${l.kind?'・'+esc(l.kind):''}</div>`+
+      (l.metrics?`<div class="m">FPS 平均 ${l.metrics.fps_avg??'？'}・最低 ${l.metrics.fps_min??'？'}｜繪製數 平均 ${l.metrics.draw_calls_avg??'？'}・最高 ${l.metrics.draw_calls_max??'？'}</div>`:'')+
+      `<details><summary>更多（趨勢與排行）</summary><div class="m" style="margin-top:8px">最近 ${R.length} 輪總耗時（越高越久；最新在右）</div><svg width="${W}" height="${H}">${bars}</svg>`+
+      (l.metrics?trend(rr,'fps_avg','FPS 平均趨勢','var(--grn)')+trend(rr,'draw_calls_avg','繪製數平均趨勢','var(--amb)'):'')+
       rk('FPS 最低的項目',p.lowest_fps,s=>`平均 ${s.avg}・最低 ${s.min}・最近 ${s.last}`)+rk('繪製數最高的項目',p.most_draw_calls,s=>`平均 ${s.avg}・最高 ${s.max}・最近 ${s.last}`)+
-      ((p.slowest||[]).length?`<div class="m" style="margin-top:6px">最慢項目（近 ${R.length} 輪平均）</div>`+p.slowest.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">平均 ${s.avg_s} 秒・最慢 ${s.max_s} 秒・最近 ${s.last_s} 秒（${s.runs} 輪）</span></div>`).join(''):'')+'</details></div>';
+      ((p.slowest||[]).length?`<div class="m" style="margin-top:8px">最慢項目（近 ${R.length} 輪平均）</div>`+p.slowest.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">平均 ${s.avg_s} 秒・最慢 ${s.max_s} 秒・最近 ${s.last_s} 秒（${s.runs} 輪）</span></div>`).join(''):'')+'</details></div>';
   }catch(e){}
 }
 function wfDraw(w){
   redDraw(w);
   const L=w.loop||{},st={idle:'閒置',running:'測試中',red:'紅燈',bisecting:'找兇手中',green:'綠燈'};
   S.batching=w.mode==='direct_merge'?'待合併':'批測中';
-  const t=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
-  wf.textContent=w.mode?`流程：${w.mode==='direct_merge'?'直接合併（自測綠就合 main，背景循環對 main 跑完整測試）':'閘門批測（攢批測過才合 main）'}`+(w.mode==='direct_merge'&&w.loop?`｜背景循環：${st[L.state]||L.state||'未知'}${L.last_run_at?'・上次 '+t(L.last_run_at):''}${L.last_result?'・結果 '+L.last_result:''}`:'')+(w.triage&&w.triage.status==='pending'?'｜等總指揮讀 diff 判斷嫌疑':'')+(w.main_red?`｜main 紅燈${(w.main_red.failed_items||[]).length?'：'+w.main_red.failed_items.map(x=>x.item||x.name||x).slice(0,5).join('、'):''}`:'')+((w.open_hotfix||[]).length?`｜急修卡 ${(w.open_hotfix||[]).length} 張：${(w.open_hotfix||[]).map(h=>h.id).join('、')}`:''):'';
+  if(!w.mode){wf.className='pill';wf.lastChild.textContent='未設定流程';return}
+  const dm=w.mode==='direct_merge',hot=(w.open_hotfix||[]).length;
+  const red=w.main_red||(w.red_items||[]).length;
+  const cls=red?'pr':(L.state==='green'||L.last_result==='green'?'pg':(dm?'pa':''));
+  wf.className='pill '+cls;
+  wf.title=(dm?'直接合併：自測綠就合 main，背景循環對 main 跑完整測試':'閘門批測：攢批測過才合 main')+(L.last_run_at?'｜上次 '+fmt(L.last_run_at):'');
+  wf.lastChild.textContent=(dm?'直接合併':'閘門批測')+(dm?'・'+(st[L.state]||L.state||'未知'):'')+(hot?'・急修 '+hot:'');
 }
-let tok='';try{tok=localStorage.getItem('rt')||''}catch(e){}
+try{tok=localStorage.getItem('rt')||''}catch(e){}
 // 網址帶 #t=讀取權杖（# 後面不會送到伺服器）：記進瀏覽器後立刻從網址列拿掉，之後直接開網址就行
 try{const q=new URLSearchParams(location.hash.slice(1)).get('t');if(q){tok=q;localStorage.setItem('rt',q);history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
 async function load(){
