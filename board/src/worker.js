@@ -146,7 +146,7 @@ export async function handle(req, env, ctx) {
     const red_items = redList.slice(0, 50).map(f => {
       const item = itemName(f);
       return { item, summary: f && typeof f === 'object' && f.summary ? String(f.summary).slice(0, 300) : null,
-        fixers: hotRows.filter(c => String(c.body || '').includes(item)).map(c => ({ id: c.id, stage: stageOf(c), owner: c.owner, owner_thread: c.owner_thread })),
+        fixers: hotRows.filter(c => item && new RegExp(`(^|[^A-Za-z0-9_.-])${item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^A-Za-z0-9_.-])`).test(String(c.body || ''))).map(c => ({ id: c.id, stage: stageOf(c), owner: c.owner, owner_thread: c.owner_thread })),
         suspects: triage && triage.suspects ? triage.suspects.map(s => s.branch) : [] };
     });
     return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, main_red, red_items, triage: triage ? { main_sha: triage.main_sha, status: triage.status, verdict: triage.verdict ?? null, suspects: triage.suspects ?? null } : null, reported_at: r?.updated_at ?? null, open_hotfix: hot });

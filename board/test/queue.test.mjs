@@ -885,6 +885,10 @@ test('/api/workflow：main 紅項與誰在修（急修卡、嫌疑分支）', as
   w = await (await call(e, 'GET', '/api/workflow')).json();
   const a = w.red_items.find(r => r.item === 'unit_a'), b = w.red_items.find(r => r.item === 'unit_b');
   assert.equal(a.fixers.length, 1); assert.equal(a.fixers[0].id, 'HOTFIX-abcdef12'); assert.equal(b.fixers.length, 0);
+  // 名稱是別項的前綴不能誤配：紅項 unit 不等於 unit_a
+  await hook(e, [{ id: 'x2b', kind: 'loop_red', main_sha: 'abcdef1234567890', failed_items: [{ item: 'unit' }, { item: '' }] }]);
+  w = await (await call(e, 'GET', '/api/workflow')).json();
+  assert.deepEqual(w.red_items.map(r => r.fixers.length), [0, 0]);
   await hook(e, [{ id: 'x3', kind: 'loop_green' }]);
   w = await (await call(e, 'GET', '/api/workflow')).json();
   assert.deepEqual(w.red_items, []);
