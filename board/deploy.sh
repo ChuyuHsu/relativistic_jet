@@ -2,7 +2,8 @@
 # 一鍵部署看板（BD-08）：依序補跑還沒跑過的 migration → 部署 → 印出 Version ID → 打一次 /api/workflow 驗證。
 #
 #   bash deploy.sh                 # 正常部署（遠端資料庫）
-#   bash deploy.sh --baseline 14   # 第一次用：資料庫已經手動跑到 migrate_014、還沒有 schema_version 時，指定它現在的版本
+#   bash deploy.sh --baseline N    # 第一次用：資料庫已經手動跑過 migration、還沒有 schema_version 時，指定它「確實」跑到第幾支（N 以內的都已經跑過）
+#   bash deploy.sh --init          # 資料庫是全新空的（連卡片表都沒有）時才用：跑 schema.sql 建表
 #   bash deploy.sh --dry-run       # 只印出會跑哪些 migration，不動資料庫、不部署
 #
 # 環境變數（都不進 repo）：
@@ -15,38 +16,47 @@ set -euo pipefail
 cd "$(dirname "$0")"
 WR=${WRANGLER:-npx wrangler}
 DB=${DB_NAME:-$(sed -n 's/^database_name *= *"\(.*\)"/\1/p' wrangler.toml | head -1)}
-BASELINE=""; DRY=0
+BASELINE=""; DRY=0; INIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --baseline) BASELINE="${2:?--baseline 要帶版本號}"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    --init) INIT=1; shift ;;
     *) echo "不認得的參數：$1" >&2; exit 2 ;;
   esac
 done
 [ -n "$DB" ] || { echo "找不到資料庫名稱（wrangler.toml 的 database_name 或 DB_NAME）" >&2; exit 2; }
 
 # 目前 schema 版本（空字串＝沒有）；資料庫是否已有卡片表
-q() { $WR d1 execute "$DB" --remote --json --command "$1" 2>/dev/null; }
-first() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s)[0].results[0];process.stdout.write(r?String(Object.values(r)[0]):"")}catch(e){}})'; }
+# 查詢失敗或輸出解析不出來一律當錯誤退出（非零）；「查到 0 列」才是空字串。絕不把錯誤當成「沒有」。
+q() { $WR d1 execute "$DB" --remote --json --command "$1"; }
+first() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let r;try{const j=JSON.parse(s);if(!Array.isArray(j)||!j[0]||!Array.isArray(j[0].results))throw 0;r=j[0].results[0]}catch(e){console.error("解析不了 wrangler 的查詢輸出");process.exit(1)}process.stdout.write(r?String(Object.values(r)[0]):"")})'; }
+setver() { $WR d1 execute "$DB" --remote --command "INSERT INTO meta(key,value,updated_at) VALUES('schema_version','$1',strftime('%s','now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at"; }
 HAS_CARDS=$(q "SELECT name FROM sqlite_master WHERE type='table' AND name='cards'" | first)
+HAS_META=$(q "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'" | first)
 CUR=""
-if [ -n "$HAS_CARDS" ]; then CUR=$(q "SELECT value FROM meta WHERE key='schema_version'" | first || true); fi
+if [ -n "$HAS_META" ]; then CUR=$(q "SELECT value FROM meta WHERE key='schema_version'" | first); fi
 LATEST=$(ls migrate_*.sql | sed 's/migrate_0*\([0-9]*\)\.sql/\1/' | sort -n | tail -1)
 
 if [ -z "$HAS_CARDS" ]; then
-  echo "資料庫是空的：跑 schema.sql（已含全部 migration），版本直接記為 $LATEST"
+  if [ $INIT -eq 0 ]; then
+    echo "查到資料庫沒有卡片表（看起來是空的）。如果真的是全新的資料庫，加 --init 才會建表；如果是正式庫，這代表連線或登入有問題，請先確認。" >&2
+    exit 3
+  fi
+  echo "--init：資料庫是空的，跑 schema.sql（已含全部 migration），版本直接記為 $LATEST"
   if [ $DRY -eq 0 ]; then
     $WR d1 execute "$DB" --remote --file=schema.sql
-    $WR d1 execute "$DB" --remote --command "INSERT INTO meta(key,value,updated_at) VALUES('schema_version','$LATEST',strftime('%s','now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+    setver "$LATEST"
   fi
   CUR=$LATEST
 elif [ -z "$CUR" ]; then
   if [ -z "$BASELINE" ]; then
-    echo "資料庫還沒有 schema_version。請確認它現在實際跑到第幾支 migration，再用 --baseline <N> 指定（例如手動跑到 migrate_014 就是 --baseline 14）。" >&2
+    echo "資料庫還沒有 schema_version。請確認它現在實際跑到第幾支 migration，再用 --baseline <N> 指定。" >&2
     exit 3
   fi
   CUR=$BASELINE
   echo "以 --baseline $BASELINE 為起點"
+  [ $DRY -eq 0 ] && setver "$BASELINE"
 fi
 echo "資料庫版本 $CUR，最新 migration $LATEST"
 
@@ -56,11 +66,11 @@ for f in $(ls migrate_*.sql | sort); do
   echo "→ 跑 $f"
   if [ $DRY -eq 0 ]; then
     $WR d1 execute "$DB" --remote --file="$f"
-    $WR d1 execute "$DB" --remote --command "INSERT INTO meta(key,value,updated_at) VALUES('schema_version','$n',strftime('%s','now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at"
+    setver "$n"
   fi
   CUR=$n
 done
-[ $DRY -eq 1 ] && { echo "（dry-run：到此為止，沒有部署）"; exit 0; }
+if [ $DRY -eq 1 ]; then echo "（dry-run：到此為止，沒有部署）"; exit 0; fi
 
 OUT=$($WR deploy 2>&1) || { echo "$OUT" >&2; echo "部署失敗" >&2; exit 1; }
 echo "$OUT"
@@ -68,7 +78,7 @@ VID=$(echo "$OUT" | sed -n 's/.*Version ID: *\([0-9a-fA-F-]\{8,\}\).*/\1/p' | ta
 [ -n "$VID" ] && echo "Version ID: $VID" || echo "沒有在 wrangler 輸出找到 Version ID，請人工確認部署成功" >&2
 
 if [ -n "${BOARD_URL:-}" ]; then
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer ${READ_TOKEN:-${TOKEN:-}}" "${BOARD_URL%/}/api/workflow")
+  CODE=$(curl -s -A board-deploy -o /dev/null -w '%{http_code}' -H "authorization: Bearer ${READ_TOKEN:-${TOKEN:-}}" "${BOARD_URL%/}/api/workflow")
   echo "驗證 /api/workflow：HTTP $CODE"
   [ "$CODE" = "200" ] || { echo "驗證失敗" >&2; exit 1; }
 else
