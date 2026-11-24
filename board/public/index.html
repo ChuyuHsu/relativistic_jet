@@ -52,6 +52,7 @@ a{color:var(--acc)}
 @media(min-width:640px){.wrap{padding:28px 24px 72px}h1{font-size:26px}.tile b{font-size:26px}}
 </style></head><body><div class="wrap">
 <header><h1>任務看板</h1><div class="pill" id="wf"><i></i><span>載入中…</span></div></header>
+<div id="nightp" class="m" style="margin:2px 2px 8px"></div>
 <div id="redp"></div>
 <div class="pipe" id="pl"></div><div class="side" id="pl2"></div>
 <div id="perfp"></div>
@@ -184,6 +185,13 @@ function wfDraw(w){
 try{tok=localStorage.getItem('rt')||''}catch(e){}
 // 網址帶 #t=讀取權杖（# 後面不會送到伺服器）：記進瀏覽器後立刻從網址列拿掉，之後直接開網址就行
 try{const q=new URLSearchParams(location.hash.slice(1)).get('t');if(q){tok=q;localStorage.setItem('rt',q);history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
+function nightDraw(n){
+  const l=n&&n.latest;
+  if(!l){nightp.textContent='最近一次完整層：還沒有結果';return}
+  const rd=l.red||[],to=l.timeouts||[],t=l.finished_at||l.at;
+  const nm=a=>a.slice(0,3).map(x=>esc(x.item)).join('、')+(a.length>3?'…':'');
+  nightp.innerHTML=`最近一次完整層：${fmt(t)}・main ${esc(String(l.main_sha||'').slice(0,8))}・共 ${l.total} 項・`+(rd.length||to.length?`<b style="color:var(--bad,#e5484d)">${rd.length?'紅 '+rd.length+'（'+nm(rd)+'）':''}${rd.length&&to.length?'、':''}${to.length?'逾時 '+to.length+'（'+nm(to)+'）':''}</b>`:'全綠');
+}
 async function load(){
   try{
     const g=await gj('/api/cards');
@@ -197,6 +205,7 @@ async function load(){
       cards.forEach(c=>{if(c.stage==='selftesting'&&c.phase!=='selftesting')c.stage=c.waiting_parent?'wait_parent':'wait_queue';else if(c.stage==='batching'&&c.waiting_parent)c.stage='done_wait'});
     }
     perfDraw();
+    try{const nt=await gj('/api/nightly');if(nt.data)nightDraw(nt.data)}catch(e){}
     try{const w=await gj('/api/workflow');if(w.data)wfDraw(w.data)}catch(e){}
     draw()
   }catch(e){list.textContent='讀取失敗'}

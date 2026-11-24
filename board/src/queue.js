@@ -111,6 +111,15 @@ export async function handleHook(req, env, ctx) {
         q('DELETE FROM loop_perf WHERE n NOT IN (SELECT n FROM loop_perf ORDER BY n DESC LIMIT 200)');
         applied++; return;
       }
+      if (kind === 'full_result') {   // 每晚（或發版前）完整層一輪的結果：{main_sha, started_at, finished_at, total, red:[{item,summary}], timeouts:[{item,summary}]}；留最近 14 次
+        const num = v => (v == null || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
+        const items = a => (Array.isArray(a) ? a : []).slice(0, 100).map(x => (x && typeof x === 'object') ? { item: String(x.item ?? x.item_id ?? x.name ?? '').slice(0, 120), summary: x.summary ? String(x.summary).slice(0, 800) : null } : { item: String(x).slice(0, 120), summary: null });
+        const red = items(e.red ?? e.failed_items), timeouts = items(e.timeouts ?? e.timeout_items);
+        if (!e.main_sha || num(e.total) == null || [...red, ...timeouts].some(x => !x.item)) { stale++; hl(e, 'full_result 要帶 main_sha、total（數字），紅項與逾時項每筆都要有名字'); return; }
+        q('INSERT INTO nightly(at,main_sha,started_at,finished_at,total,red,timeouts) VALUES(?,?,?,?,?,?,?)', T, String(e.main_sha).slice(0, 40), num(e.started_at), num(e.finished_at), num(e.total), JSON.stringify(red), JSON.stringify(timeouts));
+        q('DELETE FROM nightly WHERE n NOT IN (SELECT n FROM nightly ORDER BY n DESC LIMIT 14)');
+        applied++; return;
+      }
       if (kind === 'loop_red' || kind === 'loop_green') {   // 背景循環在 main 上紅／恢復綠：只記錄 main 紅狀態（顯示用），不開卡；開卡在 loop_culprit
         if (kind === 'loop_green') { q("DELETE FROM meta WHERE key='main_red'"); q("DELETE FROM meta WHERE key='triage'"); }
         else q("INSERT INTO meta(key,value,updated_at) VALUES('main_red',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify({ since: e.since ?? T, main_sha: e.main_sha ? String(e.main_sha).slice(0, 40) : null, failed_items: Array.isArray(e.failed_items) ? e.failed_items.slice(0, 20) : null, detail: e.detail ? String(e.detail).slice(0, 300) : null }).slice(0, 3000), T);

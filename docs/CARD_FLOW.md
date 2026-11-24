@@ -215,6 +215,19 @@
 - 快照對帳改成 `merged` 時，與一般 `merged` 事件做一樣的事：等這張卡（當接手卡）的「等待父卡」卡自動結案並通知（`waiting_done`），接龍到底。
 - 快照不改 `last_result`；送不出去不影響排隊器調度，下一份會補上。舊版排隊器不送快照，行為不變。
 
+### `full_result`（每晚／發版前完整層的結果，NIGHT-02）
+
+排隊器跑完一輪完整層後送一筆（不對應任何卡）：
+
+```json
+{"id": "<事件編號>", "kind": "full_result", "main_sha": "<跑的 main 提交>", "started_at": <unix 秒>, "finished_at": <unix 秒>,
+ "total": 120, "red": [{"item": "<項目名>", "summary": "<失敗摘要，最多 800 字>"}], "timeouts": [{"item": "<逾時項名>", "summary": "…"}]}
+```
+
+- `main_sha`、`total`（數字）必填；`red`（也收 `failed_items`）與 `timeouts` 每筆都要有名字，沒名字整筆拒收（`stale`）。紅項、逾時項各最多 100 筆。全綠就送空陣列。
+- 看板存最近 14 次（`nightly` 表，`migrate_019.sql`）。`GET /api/nightly`（READ／寫入權杖，帶 etag、304）回 `{latest, history}`，`latest` 沒有結果時是 `null`；每筆 `{at, main_sha, started_at, finished_at, total, red, timeouts}`。網頁頁首一行顯示最近一次。
+- 兜底排程（NIGHT-03）讀這個端點；`at` 是看板收到的時間。
+
 ### `drop_checked`（放棄待查的結果）
 
 `{kind:'drop_checked', card, branch, target, unmerged:true|false, covered:true|false, missing_count, missing_files:[…最多 20]}`。`unmerged` 是這條分支有沒有不在 main 的改動；`covered` 是接手的卡（`superseded_by_branch`）是否涵蓋。只對 `dropping` 的卡有效，其他情況當過期丟掉。

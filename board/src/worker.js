@@ -155,7 +155,7 @@ async function desired(req, env) {
 export async function handle(req, env, ctx) {
   return handleInner(req, env, ctx);
 }
-const GATED = new Set(['/api/cards', '/api/workflow', '/api/stats', '/api/perf']);   // 帶 etag、版本沒變回 304 的讀取端點
+const GATED = new Set(['/api/cards', '/api/workflow', '/api/stats', '/api/perf', '/api/nightly']);   // 帶 etag、版本沒變回 304 的讀取端點
 async function handleInner(req, env, ctx, gated = false) {
   const url = new URL(req.url);
   const path = url.pathname;
@@ -228,6 +228,12 @@ async function handleInner(req, env, ctx, gated = false) {
     // 所有指向 from 的舊轉址不用動（解析時會一路走到新的）；卡片直接改成最終的串
     const r = await db.prepare("UPDATE cards SET owner_thread=?,updated_at=? WHERE owner_thread=? AND status IN ('open','claimed','waiting')").bind(dest, t, from).run();
     return json({ from, to, resolved: dest, cards_updated: r.meta.changes });
+  }
+  if (path === '/api/nightly' && req.method === 'GET') {   // 每晚完整層：最新一次與歷史（最近 14 次）；沒有結果時 latest 是 null
+    const rows = (await db.prepare('SELECT * FROM nightly ORDER BY n DESC LIMIT 14').all()).results;
+    const one = r => { const j = v => { try { return JSON.parse(v || '[]'); } catch { return []; } }; return { at: r.at, main_sha: r.main_sha, started_at: r.started_at, finished_at: r.finished_at, total: r.total, red: j(r.red), timeouts: j(r.timeouts) }; };
+    const hist = rows.map(one);
+    return json({ latest: hist[0] ?? null, history: hist });
   }
   if (req.method === 'GET' && path === '/api/stats') {   // 各階段張數（頁首用）：進行中的卡算出階段，已合併與已放棄只數張數不讀內容
     const act = (await db.prepare('SELECT * FROM cards WHERE ' + ACTIVE_SQL).all()).results;

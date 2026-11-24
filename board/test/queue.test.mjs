@@ -1113,3 +1113,21 @@ test('BD-07：鏈式轉址一路解析、超過 10 跳或繞圈不卡死', async
   await e2.DB.prepare("INSERT INTO outbox(owner_thread,card_id,kind,at) VALUES('n0','k1','stuck',1)").run();
   assert.equal((await mailTo(e2))[0].to_thread, 'n10');
 });
+
+// ---- NIGHT-02：每晚完整層結果 ----
+test('NIGHT-02：full_result 存下，/api/nightly 回最新一次與歷史（最多 14 次），rev 與 304 照常', async () => {
+  const e = mkenv();
+  const empty = await (await call(e, 'GET', '/api/nightly')).json(); assert.deepEqual(empty, { latest: null, history: [] });
+  const full = (i, extra = {}) => hook(e, [{ id: 7000 + i, kind: 'full_result', main_sha: SHA, started_at: 100 + i, finished_at: 200 + i, total: 50, red: [{ item: 'godot_x', summary: '炸了' }], timeouts: [{ item: 'perf_y' }], ...extra }]);
+  const before = await revOf(e);
+  assert.equal((await (await full(1)).json()).applied, 1);
+  assert.ok(await revOf(e) > before);
+  const n = await (await call(e, 'GET', '/api/nightly')).json();
+  assert.deepEqual([n.latest.main_sha, n.latest.total, n.latest.red[0].item, n.latest.red[0].summary, n.latest.timeouts[0].item, n.latest.started_at], [SHA, 50, 'godot_x', '炸了', 'perf_y', 101]);
+  assert.equal((await (await full(2, { red: [{ summary: '沒名字' }] })).json()).stale, 1);       // 紅項沒名字：拒收
+  assert.equal((await (await full(3, { main_sha: undefined })).json()).stale, 1);
+  assert.equal((await (await full(1)).json()).duplicate, 1);                                           // 同編號重送去重
+  for (let i = 10; i < 30; i++) await full(i);
+  const h = await (await call(e, 'GET', '/api/nightly')).json(); assert.equal(h.history.length, 14); assert.equal(h.latest.started_at, 129);
+  const r1 = await getRaw(e, '/api/nightly'); assert.equal((await getRaw(e, '/api/nightly', { 'if-none-match': r1.headers.get('etag') })).status, 304);
+});
