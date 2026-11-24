@@ -196,6 +196,22 @@
 
 排隊器自己的問題（當機、暫停、機器異常）不是任何一張卡的事件，另外通知管理者，卡片狀態不動。
 
+### `state_snapshot`（排隊器現況快照，BD-06）
+
+進度事件有可能被看板當成過期丟掉（放行版本或重測次數對不上、事件先後顛倒），卡就會一直停在舊階段。排隊器定期（建議每 300 秒，JET-02）送一份「現況快照」，看板照它對帳：
+
+```json
+{"id": "<事件編號，不重複>", "kind": "state_snapshot", "at": <快照取樣的 unix 秒，可省略>,
+ "branches": [{"branch": "dev/x", "state": "selftesting", "commit": "<分支現在的提交>", "approved_sha": "<排隊器手上的放行版本>", "retest": 0}]}
+```
+
+- `branches` 是排隊器管理中的每一條分支（最多 500 筆）；`state` 是排隊器的分支狀態名（與一般事件的 `state`／`to` 同一套，小寫英文與底線）。
+- **對帳規則**（只看已認領、已放行、沒在放棄待查、`phase` 還不是 `merged` 的卡）：
+  - 快照有這條分支，且 `approved_sha`（前綴比對）與 `retest` 都跟看板上的卡對得上、`state` 不同於卡的 `phase`、卡的 `phase_at` 不比快照的 `at` 新：照快照把 `phase` 改過去，記一則「快照對帳」事件；改成 `rejected` 通知領卡串、`halted` 通知管理者、`merged` 同時把 `status` 寫成 `merged`。
+  - `approved_sha` 或 `retest` 對不上（卡已重新送審、重測）：不採用，不覆蓋。
+  - 卡已放行超過 10 分鐘，快照裡卻沒有它：發一則 `queue_error` 給管理者，同一個放行版本只發一次。
+- 快照不改 `last_result`；送不出去不影響排隊器調度，下一份會補上。舊版排隊器不送快照，行為不變。
+
 ### `drop_checked`（放棄待查的結果）
 
 `{kind:'drop_checked', card, branch, target, unmerged:true|false, covered:true|false, missing_count, missing_files:[…最多 20]}`。`unmerged` 是這條分支有沒有不在 main 的改動；`covered` 是接手的卡（`superseded_by_branch`）是否涵蓋。只對 `dropping` 的卡有效，其他情況當過期丟掉。

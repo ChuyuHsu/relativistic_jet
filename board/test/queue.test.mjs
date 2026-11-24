@@ -1019,3 +1019,46 @@ test('BD-03：沒有 rev（還沒跑 migrate_016）時照常回答，不帶 etag
   await e.DB.prepare("DELETE FROM meta WHERE key='rev'").run();
   const r = await getRaw(e, '/api/queue/desired'); assert.equal(r.status, 200); assert.equal(r.headers.get('etag'), null);
 });
+
+// ---- BD-06：排隊器現況快照對帳 ----
+const snap = (e, branches, extra = {}) => hook(e, [{ id: ++ev.n, kind: 'state_snapshot', branches, ...extra }]);
+const phaseOf = async (e, id) => (await e.DB.prepare('SELECT phase FROM cards WHERE id=?').bind(id).first()).phase;
+const pending = async e => (await e.DB.prepare("SELECT kind,card_id FROM outbox WHERE sent_at IS NULL ORDER BY n").all()).results;
+
+test('BD-06：進度事件被當成過期丟掉後，下一份快照把階段修正', async () => {
+  const e = mkenv(); await approved(e, 'c1');
+  await ev(e, 'c1', { kind: 'tested_green', approved_sha: SHA, retest: 5 });                     // retest 對不上：被當成過期丟掉
+  assert.equal(await stageOf(e, 'c1'), 'selftesting'); assert.equal(await phaseOf(e, 'c1'), null);
+  const r = await (await snap(e, [{ branch: 'dev/c1', state: 'selftest_green', commit: SHA, approved_sha: SHA, retest: 0 }])).json();
+  assert.equal(r.applied, 1);
+  assert.equal(await phaseOf(e, 'c1'), 'selftest_green'); assert.equal(await stageOf(e, 'c1'), 'batching');
+  assert.ok((await getCard(e, 'c1')).events.some(x => x.note.includes('快照對帳：階段 無 → selftest_green')));
+  assert.equal((await (await snap(e, [{ branch: 'dev/c1', state: 'selftest_green', approved_sha: SHA, retest: 0 }])).json()).applied, 0);   // 同樣的快照再來：沒東西可改
+  await snap(e, [{ branch: 'dev/c1', state: 'merged', approved_sha: SHA, retest: 0 }]);
+  assert.equal(await stageOf(e, 'c1'), 'merged');
+  assert.equal((await e.DB.prepare("SELECT status FROM cards WHERE id='c1'").first()).status, 'merged');   // 同 BD-01：離開 claimed
+});
+
+test('BD-06：快照不會覆蓋已重新送審、版本或重測對不上的卡', async () => {
+  const e = mkenv(); await approved(e, 'c1'); await approved(e, 'c2'); await approved(e, 'c3');
+  await act(e, 'c1', 'submit', { commit: SHA2, actor: 'w' });                                    // c1 重新送審：放行清掉
+  await snap(e, [
+    { branch: 'dev/c1', state: 'batching', approved_sha: SHA, retest: 0 },                       // 舊放行版本的快照
+    { branch: 'dev/c2', state: 'batching', approved_sha: SHA2, retest: 0 },                      // 版本對不上
+    { branch: 'dev/c3', state: 'batching', approved_sha: SHA, retest: 3 }]);                     // 重測次數對不上
+  for (const id of ['c1', 'c2', 'c3']) assert.equal(await phaseOf(e, id), null, id);
+  assert.equal(await stageOf(e, 'c1'), 'reviewing');
+  await e.DB.prepare("UPDATE cards SET phase_at=? WHERE id='c3'").bind(Math.floor(Date.now() / 1000) + 100).run();   // 卡的階段比快照新：不覆蓋
+  await snap(e, [{ branch: 'dev/c3', state: 'batching', approved_sha: SHA, retest: 0 }], { at: Math.floor(Date.now() / 1000) });
+  assert.equal(await phaseOf(e, 'c3'), null);
+  assert.equal((await (await snap(e, 'bad')).json()).stale, 1);                                  // 格式不對
+});
+
+test('BD-06：已放行超過 10 分鐘卻不在快照裡：發一次 queue_error，同一個放行版本不重發', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'boss' }); await approved(e, 'c1'); await approved(e, 'c2');
+  await e.DB.prepare("UPDATE cards SET approved_at=? WHERE id='c1'").bind(Math.floor(Date.now() / 1000) - 700).run();   // c1 放行 11 分鐘前；c2 剛放行
+  await snap(e, [{ branch: 'dev/c2', state: 'selftesting', approved_sha: SHA, retest: 0 }]);
+  assert.deepEqual((await pending(e)).filter(x => x.kind === 'queue_error').map(x => x.card_id), ['c1']);
+  await snap(e, []); await snap(e, []);
+  assert.equal((await pending(e)).filter(x => x.kind === 'queue_error' && x.card_id === 'c1').length, 1);
+});

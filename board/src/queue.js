@@ -125,6 +125,40 @@ export async function handleHook(req, env, ctx) {
         post([...new Set([cul?.owner_thread || '', ...(admins.length ? admins : [])])], { id: hid }, 'loop_culprit', null, `急修卡 ${hid}：${bodyText}`.slice(0, 500));
         return;
       }
+      if (kind === 'state_snapshot') {   // 排隊器現況快照：{at?, branches:[{branch,state,commit,approved_sha,retest}]}；補回被當成過期丟掉的進度事件（BD-06）
+        const arr = Array.isArray(e.branches) ? e.branches.slice(0, 500) : null;
+        if (!arr) { stale++; hl(e, 'state_snapshot 要帶 branches 陣列'); return; }
+        const snap = new Map(arr.filter(b => b && typeof b === 'object' && b.branch).map(b => [String(b.branch), b]));
+        const snapAt = Number(e.at) || T;
+        const cands = (await db.prepare("SELECT * FROM cards WHERE status='claimed' AND approved_commit IS NOT NULL AND dropping_at IS NULL AND branch IS NOT NULL AND IFNULL(phase,'')!='merged'").all()).results;
+        let fixed = 0;
+        for (const c of cands) {
+          const b = snap.get(c.branch);
+          if (!b) {   // 已放行超過 10 分鐘卻不在快照裡：排隊器沒在管它。同一個放行版本只提醒一次
+            if (!c.approved_at || T - c.approved_at < 600) continue;
+            const note = `快照對帳：放行版本 ${String(c.approved_commit).slice(0, 8)} 已超過 10 分鐘仍不在排隊器快照裡`;
+            if (await db.prepare('SELECT 1 FROM events WHERE card_id=? AND note=?').bind(c.id, note).first()) continue;
+            logEv(c.id, note);
+            post(admins.length ? admins : [''], c, 'queue_error', c.branch, `${note}（階段：${c.phase || '無'}），請查排隊器有沒有漏掉這條分支`.slice(0, 500));
+            fixed++; continue;
+          }
+          const st = typeof b.state === 'string' && /^[a-z_]{3,20}$/.test(b.state) ? b.state : null;
+          // 放行版本與重測次數對不上＝這份快照講的是別的版本（卡已重新送審、重測），不採用；卡的階段比快照新也不覆蓋
+          if (!st || st === c.phase) continue;
+          if (!b.approved_sha || !sameCommit(String(b.approved_sha), c.approved_commit)) continue;
+          if (b.retest != null && Number(b.retest) !== c.retest) continue;
+          if (c.phase_at && c.phase_at > snapAt) continue;
+          const was = c.phase || '無';
+          patch(c, { phase: st, phase_at: T, updated_at: T });
+          if (st === 'merged') patch(c, { status: 'merged' });
+          logEv(c.id, `快照對帳：階段 ${was} → ${st}`);
+          if (st === 'rejected') post([c.owner_thread || ''], c, 'rejected', c.branch, '排隊器快照顯示這張卡已被退回（進度事件被當成過期丟掉了），請看自測結果');
+          else if (st === 'halted') post(admins.length ? admins : [c.owner_thread || ''], c, 'halted', c.branch, '排隊器快照顯示這條分支暫停');
+          fixed++;
+        }
+        if (fixed) applied++;
+        return;
+      }
       let card = branch ? byBranch.get(branch) : null;
       if (!card && kind === 'drop_checked' && e.card) card = byId.get(String(e.card));
       if (!card && kind === 'drop_checked' && branch) { const d = derived.get(branch); if (d) card = byId.get(d.id); }
