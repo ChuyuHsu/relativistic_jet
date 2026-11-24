@@ -97,9 +97,9 @@ async function perfDraw(){
     const bars=rr.map((r,i)=>`<rect x="${i*14}" y="${H-Math.max(2,r.wall_s/mx*H)}" width="10" height="${Math.max(2,r.wall_s/mx*H)}" rx="2" fill="#0a84ff"><title>${esc(new Date(r.at*1000).toLocaleString('zh-TW',{hour12:false}))}　${Math.round(r.wall_s)} 秒　CPU ${r.cpu_util==null?'?':Math.round(r.cpu_util*(r.cpu_util<=1?100:1))}%</title></rect>`).join('');
     const l=R[0],cpu=x=>x==null?'？':Math.round(x*(x<=1?100:1))+'%',m=s=>s>=120?(s/60).toFixed(1)+' 分':Math.round(s)+' 秒';
     perfp.innerHTML=`<div class="rp"><h2>背景測試效能</h2><div class="m">最近 ${R.length} 輪總耗時（越高越久；最新在右）</div><svg width="${W}" height="${H}">${bars}</svg><div class="m">最新一輪：${m(l.wall_s)}・CPU ${cpu(l.cpu_util)}・${l.cores??'？'} 核・${l.items??'？'} 項${l.kind?'・'+esc(l.kind):''}</div>`+
-      (l.metrics?`<div class="m" style="margin-top:6px">畫面：FPS 平均 ${l.metrics.fps_avg??'？'}・最低 ${l.metrics.fps_min??'？'}｜繪製數 平均 ${l.metrics.draw_calls_avg??'？'}・最高 ${l.metrics.draw_calls_max??'？'}</div>`+trend(rr,'fps_avg','FPS 平均趨勢','#30a05a')+trend(rr,'draw_calls_avg','繪製數平均趨勢','#bf5af2'):'')+
+      (l.metrics?`<div class="m" style="margin-top:6px">畫面：FPS 平均 ${l.metrics.fps_avg??'？'}・最低 ${l.metrics.fps_min??'？'}｜繪製數 平均 ${l.metrics.draw_calls_avg??'？'}・最高 ${l.metrics.draw_calls_max??'？'}</div>`:'')+`<details style="margin-top:6px"><summary class="m">更多（趨勢與排行）</summary>`+(l.metrics?trend(rr,'fps_avg','FPS 平均趨勢','#30a05a')+trend(rr,'draw_calls_avg','繪製數平均趨勢','#bf5af2'):'')+
       rk('FPS 最低的項目',p.lowest_fps,s=>`平均 ${s.avg}・最低 ${s.min}・最近 ${s.last}`)+rk('繪製數最高的項目',p.most_draw_calls,s=>`平均 ${s.avg}・最高 ${s.max}・最近 ${s.last}`)+
-      ((p.slowest||[]).length?`<div class="m" style="margin-top:6px">最慢項目（近 ${R.length} 輪平均）</div>`+p.slowest.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">平均 ${s.avg_s} 秒・最慢 ${s.max_s} 秒・最近 ${s.last_s} 秒（${s.runs} 輪）</span></div>`).join(''):'')+'</div>';
+      ((p.slowest||[]).length?`<div class="m" style="margin-top:6px">最慢項目（近 ${R.length} 輪平均）</div>`+p.slowest.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">平均 ${s.avg_s} 秒・最慢 ${s.max_s} 秒・最近 ${s.last_s} 秒（${s.runs} 輪）</span></div>`).join(''):'')+'</details></div>';
   }catch(e){}
 }
 function wfDraw(w){
