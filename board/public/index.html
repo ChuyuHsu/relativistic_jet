@@ -11,9 +11,10 @@ h1{font-size:20px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 .v{display:flex;gap:6px;margin:8px 0}.v button{border:0;border-radius:14px;padding:6px 14px;background:var(--card);color:var(--fg);font-size:14px}.v button.on{background:#0a84ff;color:#fff}
 .g{overflow-x:auto;background:var(--card);border-radius:12px;padding:8px;margin:8px 0}.g svg{display:block}.g text{fill:#fff;font:600 11px -apple-system,sans-serif;pointer-events:none}.g .n{cursor:pointer}.g .sel{stroke:var(--fg);stroke-width:3}.g path{fill:none;stroke:var(--mut);stroke-width:1.5}
 .lg{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;margin:6px 0}.lg i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px}
+.rp{border-radius:12px;padding:10px 12px;margin:8px 0;background:var(--card)}.rp.bad{border-left:5px solid #ff453a}.rp.ok{border-left:5px solid #30a05a}.rp h2{font-size:16px;margin:0 0 6px}.rp .it{padding:4px 0;border-top:1px solid #8883}.rp .it b{display:inline}
 .c b{display:block}.m{color:var(--mut);font-size:13px}
 </style></head><body>
-<h1>任務看板</h1><div class="m" id="wf"></div><div class="v"><button data-v="g" class="on">關係圖</button><button data-v="l">列表</button></div><div id="gv"></div><div id="lv" hidden><div class="tabs" id="tabs"></div><div id="list">載入中…</div></div>
+<h1>任務看板</h1><div class="m" id="wf"></div><div id="redp"></div><div class="v"><button data-v="g" class="on">關係圖</button><button data-v="l">列表</button></div><div id="gv"></div><div id="lv" hidden><div class="tabs" id="tabs"></div><div id="list">載入中…</div></div>
 <script>
 const S={new:'剛開卡',developing:'開發中',reviewing:'審查中',selftesting:'審查通過自測中',batching:'自測完畢批測中',merged:'已合併',rejected:'退回',waiting_parent:'等待父卡',dropping:'放棄待查',dropped:'放棄'};
 const COL={new:'#8e8e93',developing:'#0a84ff',reviewing:'#bf5af2',selftesting:'#ff9f0a',batching:'#e08a00',merged:'#30a05a',rejected:'#ff453a',waiting_parent:'#c9a227',dropping:'#8e6a3c',dropped:'#636366'};
@@ -63,7 +64,17 @@ function draw(){
   list.innerHTML=l.length?l.map(cardHtml).join(''):'<div class="m">沒有</div>';
 }
 tabs.onclick=e=>{if(e.target.dataset.k){cur=e.target.dataset.k;draw()}};
+function redDraw(w){
+  const L=w.red_items||[];
+  if(!w.mode){redp.innerHTML='';return}
+  const st=x=>S[x]||x;
+  if(!w.main_red&&!L.length){redp.innerHTML='<div class="rp ok"><h2>main 全綠</h2></div>';return}
+  const sus=(w.triage&&w.triage.suspects)||[];
+  redp.innerHTML=`<div class="rp bad"><h2>main 紅項 ${L.length||'？'} 個${w.triage&&w.triage.status==='pending'?'（等總指揮讀 diff 判斷嫌疑）':''}</h2>`+
+    (L.length?L.map(r=>`<div class="it"><b>${esc(r.item)}</b>${r.summary?`<span class="m"> ${esc(r.summary)}</span>`:''}<br><span class="m">${r.fixers.length?'修理中：'+r.fixers.map(f=>`${esc(f.id)}（${esc(st(f.stage))}${f.owner?'・'+esc(f.owner):''}）`).join('、'):(r.suspects.length?'嫌疑分支：'+r.suspects.map(esc).join('、')+'（驗證中）':'還沒有人在修')}</span></div>`).join(''):'<div class="m">紅項明細還沒回報</div>')+'</div>';
+}
 function wfDraw(w){
+  redDraw(w);
   const L=w.loop||{},st={idle:'閒置',running:'測試中',red:'紅燈',bisecting:'找兇手中',green:'綠燈'};
   S.batching=w.mode==='direct_merge'?'自測完畢待合併':'自測完畢批測中';
   const t=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';

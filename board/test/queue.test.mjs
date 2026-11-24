@@ -874,3 +874,18 @@ test('紅燈判斷：最大的 loop_triage 讀回來仍是完整 JSON；急修�
   await hook(e, [{ id: 'k2', kind: 'loop_culprit', main_sha: 'a'.repeat(40) }]);   // 急修卡已存在，仍要把判斷標 resolved
   assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage.status, 'resolved');
 });
+
+test('/api/workflow：main 紅項與誰在修（急修卡、嫌疑分支）', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  await claim(e, 'cul', 'thcul');
+  await hook(e, [{ id: 'x1', kind: 'loop_red', main_sha: 'abcdef1234567890', failed_items: [{ item: 'unit_a', summary: 'boom' }, { item: 'unit_b' }] }]);
+  let w = await (await call(e, 'GET', '/api/workflow')).json();
+  assert.deepEqual(w.red_items.map(r => [r.item, r.fixers.length]), [['unit_a', 0], ['unit_b', 0]]);
+  await hook(e, [{ id: 'x2', kind: 'loop_culprit', main_sha: 'abcdef1234567890', culprit_card: 'cul', failed_items: [{ item: 'unit_a' }] }]);
+  w = await (await call(e, 'GET', '/api/workflow')).json();
+  const a = w.red_items.find(r => r.item === 'unit_a'), b = w.red_items.find(r => r.item === 'unit_b');
+  assert.equal(a.fixers.length, 1); assert.equal(a.fixers[0].id, 'HOTFIX-abcdef12'); assert.equal(b.fixers.length, 0);
+  await hook(e, [{ id: 'x3', kind: 'loop_green' }]);
+  w = await (await call(e, 'GET', '/api/workflow')).json();
+  assert.deepEqual(w.red_items, []);
+});

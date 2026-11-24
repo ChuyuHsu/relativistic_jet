@@ -135,11 +135,21 @@ export async function handle(req, env, ctx) {
   if (req.method === 'GET' && path === '/api/workflow') {   // 目前流程模式（gate_batch｜direct_merge）與背景循環狀態；排隊器用 workflow_status 事件回報
     const r = await db.prepare("SELECT value,updated_at FROM meta WHERE key='workflow'").first();
     let wf = null; try { wf = r ? JSON.parse(r.value) : null; } catch { /* 壞值當沒有 */ }
-    const hot = (await db.prepare("SELECT id,title,status,owner,priority FROM cards WHERE area='hotfix' AND phase IS NOT 'merged' AND status!='dropped' ORDER BY created_at").all()).results;
+    const hotRows = (await db.prepare("SELECT * FROM cards WHERE area='hotfix' AND phase IS NOT 'merged' AND status!='dropped' ORDER BY created_at").all()).results;
+    const hot = hotRows.map(c => ({ id: c.id, title: c.title, status: c.status, owner: c.owner, priority: c.priority }));
     const mr = await db.prepare("SELECT value,updated_at FROM meta WHERE key='main_red'").first();
     let main_red = null; try { main_red = mr ? JSON.parse(mr.value) : null; } catch { /* 壞值當沒有 */ }
     const triage = await getTriage(db);
-    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, main_red, triage: triage ? { main_sha: triage.main_sha, status: triage.status, verdict: triage.verdict ?? null, suspects: triage.suspects ?? null } : null, reported_at: r?.updated_at ?? null, open_hotfix: hot });
+    // main 現在的紅項，以及每個紅項誰在修：急修卡（內文提到該紅項）、被指出的嫌疑分支
+    const itemName = f => String((f && (f.item ?? f.item_id ?? f.name)) ?? f);
+    const redList = (main_red && main_red.failed_items && main_red.failed_items.length ? main_red.failed_items : (triage && triage.failed_items) || []);
+    const red_items = redList.slice(0, 50).map(f => {
+      const item = itemName(f);
+      return { item, summary: f && typeof f === 'object' && f.summary ? String(f.summary).slice(0, 300) : null,
+        fixers: hotRows.filter(c => String(c.body || '').includes(item)).map(c => ({ id: c.id, stage: stageOf(c), owner: c.owner, owner_thread: c.owner_thread })),
+        suspects: triage && triage.suspects ? triage.suspects.map(s => s.branch) : [] };
+    });
+    return json({ mode: wf?.mode ?? null, loop: wf?.loop ?? null, main_red, red_items, triage: triage ? { main_sha: triage.main_sha, status: triage.status, verdict: triage.verdict ?? null, suspects: triage.suspects ?? null } : null, reported_at: r?.updated_at ?? null, open_hotfix: hot });
   }
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
