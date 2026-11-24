@@ -799,3 +799,116 @@ class SlotsWithBatch(Base):
             if self.s.batch is not None or store.list_branches(self.con, "queued"):
                 peak_with_batch = max(peak_with_batch, n)
         self.assertLessEqual(peak_with_batch, 2)
+
+
+class TruncateBatch(Base):
+    def test_member_push_only_drops_that_member_and_after(self):
+        self.mk(delay=30)
+        for n in "abcd":
+            self.repo.add(n)
+        self.go(5); self.approve_all("a", "b", "c", "d")
+        self.go(400, until=lambda: self.s.batch is not None and len(self.s.batch.members) == 4)
+        self.repo.push_new("c", files=("src/c2.py",))
+        self.go(10, until=lambda: self.s.batch is None or len(self.s.batch.members) != 4)
+        b = self.s.batch
+        self.assertIsNotNone(b)                              # 批沒有整個作廢
+        self.assertEqual([m[0] for m in b.members], ["a", "b"])   # 只剩 c 之前
+        self.go(600, until=lambda: {"a", "b"} <= self.merged())
+
+
+class DirectMerge(Base):
+    def test_direct_merge_each_after_selftest(self):
+        self.mk(workflow={"mode": "direct_merge"})
+        for n in "ab":
+            self.repo.add(n)
+        self.go(5); self.approve_all("a", "b")
+        self.go(80, until=lambda: self.merged() == {"a", "b"})
+        self.assertEqual(len(self.repo.ff_log), 2)           # 各自快轉，沒有批
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 0)
+
+    def test_unapproved_not_merged(self):
+        self.mk(workflow={"mode": "direct_merge"})
+        self.repo.add("a")
+        self.go(40)
+        self.assertEqual(self.merged(), set())
+
+    def test_bad_mode_rejected(self):
+        with self.assertRaises(Exception):
+            self.mk(workflow={"mode": "nope"})
+
+    def test_loop_tests_latest_main_and_bisects(self):
+        import json as _j
+        from types import SimpleNamespace as NS
+        s = self.mk(workflow={"mode": "direct_merge"})
+        self.repo.add("a")
+        self.go(4)
+        self.go(30, until=lambda: store.get_meta(self.con, "loop_tested") == self.repo.main)   # 背景 loop 測了最新 main
+        # 二分：5 個提交，第 3 個（索引 2）開始紅
+        cands = ["c0", "c1", "c2", "c3", "c4"]
+        self.con.execute("INSERT OR IGNORE INTO branches(name,state,head_sha,content_id,seen_at,merged_sha,updated_at) VALUES('bad','merged','h','x',0,'c2',0)")
+        store.set_meta(self.con, "loop_bisect", _j.dumps({"items": ["t1"], "cands": cands, "lo": -1, "hi": 4}))
+        for sha, red in (("c1", False), ("c2", True)):
+            s._on_loopprobe(NS(head_sha=sha), NS(status="fail" if red else "pass", failed_items=["t1"] if red else []))
+        st = _j.loads(store.get_meta(self.con, "loop_bisect"))
+        self.assertEqual((st["lo"], st["hi"]), (1, 2))
+        s._loop_conclude(st)
+        ev = self.con.execute("SELECT branch,detail FROM events WHERE kind='loop_culprit'").fetchone()
+        self.assertEqual(ev["branch"], "bad")
+        from jet import notify
+        e = notify._enrich(self.con, self.con.execute("SELECT * FROM events WHERE kind='loop_culprit'").fetchone())
+        self.assertEqual((e["culprit_branch"], e["culprit_commit"], e["hotfix_id"]), ("bad", "c2", "HOTFIX-c2"))
+        self.assertEqual(e["failed_items"], ["t1"])
+        st = self.con.execute("SELECT detail FROM events WHERE kind='workflow_status' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertIn('"mode": "direct_merge"', st[0])
+
+    def test_triage_code_first_then_verify(self):
+        import json as _j
+        from types import SimpleNamespace as NS
+        s = self.mk(workflow={"mode": "direct_merge", "loop": {"triage": "code_first", "triage_wait_s": 900}})
+        self.repo.commits_between = lambda a, b: ["c0", "c1", "c2", "c3"]
+        self.con.execute("INSERT OR IGNORE INTO branches(name,state,head_sha,content_id,seen_at,merged_sha,updated_at) VALUES('bad','merged','h','x',0,'c2',0)")
+        store.set_meta(self.con, "loop_green", "greensha")
+        s._loop_result("redsha000000", NS(status="fail", failed_items=["t1"]), {"t1": "boom at x.gd:3"})
+        st = _j.loads(store.get_meta(self.con, "loop_bisect"))
+        self.assertEqual(st["phase"], "triage")
+        ev = self.con.execute("SELECT detail FROM events WHERE kind='loop_triage'").fetchone()
+        d = _j.loads(ev[0])
+        self.assertEqual([c["branch"] for c in d["commits"]], [None, None, "bad", None])
+        self.assertEqual(d["failed_items"][0]["summary"], "boom at x.gd:3")
+        # 看板回嫌疑
+        s.source = NS(drops=NS(suspect={"main_sha": "redsha000000", "branch": "bad"}))
+        self.assertEqual(s._loop_suspect_idx(st), 2)
+        s.source = NS(drops=NS(suspect={"main_sha": "other", "branch": "bad"}))
+        self.assertIsNone(s._loop_suspect_idx(st))      # 對不上這次紅的 main：不採用
+
+    def test_loop_perf_item_times(self):
+        import os as _os
+        from types import SimpleNamespace as NS
+        from jet import ops
+        s = self.mk(workflow={"mode": "direct_merge"}, commands={"test": ["t"], "times_file": "tmp/t/times.tsv", "metrics_file": "tmp/t/perf_metrics.json"})
+        wd = _os.path.join(self.t.name, "wd"); _os.makedirs(_os.path.join(wd, "tmp/t"))
+        with open(_os.path.join(wd, "tmp/t/times.tsv"), "w") as f:
+            f.write("slow\t100\t160\nfast\t100\t101.5\nbad line\n")
+        with open(_os.path.join(wd, "tmp/t/perf_metrics.json"), "w") as f:
+            f.write('{"schema":1,"items":{"slow":{"secs":60,"draw_calls_avg":900,"draw_calls_max":1500,"fps_avg":28.5,"fps_min":12,"objects":3000,"mem_mb":400},"fast":{"fps_avg":60}}}')
+        self.con.execute("INSERT INTO runs(id,kind,status,started_at,finished_at,workdir,cores,timeout_s,units,layer,commit_sha) VALUES(900,'baseline','pass',100,170,'x','1',1,2,'gate','m1')")
+        j = NS(run_id=900, kind="baseline", workdir=wd, head_sha="m1", units=2, cores=[1, 2])
+        s._record_item_times(j); s._record_item_metrics(j)
+        s._record_loop_run(j, NS(status="pass", cpu_s=84.0, duration_s=70.0))
+        d = ops.query_perf(self.con)
+        self.assertEqual([i["item"] for i in d["items"]], ["slow", "fast"])
+        self.assertEqual((d["runs"][0]["wall_s"], d["runs"][0]["cpu_util"], d["runs"][0]["items_n"]), (70.0, 0.6, 2))
+        ev = self.con.execute("SELECT detail FROM events WHERE kind='loop_perf'").fetchone()
+        self.assertIn('"slow"', ev[0])
+        import json as _j
+        m = _j.loads(ev[0])["perf"]["metrics"]
+        self.assertEqual((m["fps_min"], m["draw_calls_max"], m["lowest_fps"][0]["item"]), (12.0, 1500.0, "slow"))
+        self.assertEqual(d["metrics"][0]["item"], "slow")
+
+
+class ShortHashApproval(Base):
+    def test_short_prefix_counts_as_approved(self):
+        s = self.mk()
+        row = {"name": "a", "head_sha": "abcdef0123456789abcdef0123456789abcdef01", "content_id": "x"}
+        self.assertEqual(s._judge_approved(row, "abcdef0123"), "yes")
+        self.assertEqual(s._judge_approved(row, "abcdef0123456789abcdef0123456789abcdef01"), "yes")

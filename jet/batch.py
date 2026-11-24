@@ -34,6 +34,14 @@ def judge(n: int, results: Dict[int, str], probes: Optional[Dict[int, str]] = No
     - 還有 pending 就等（infra 錯誤也算 pending，由呼叫端重跑）。
     """
     pts = ladder(n, points)
+    results = dict(results)
+    gmax = max([p for p in pts if results.get(p) == GREEN], default=0)
+    for p in pts:                       # 前綴 gmax 綠＝比它小的前綴一定也乾淨（紅了是雜訊或重跑中），不必等它們
+        if p < gmax:
+            results[p] = GREEN
+    firstred = next((p for p in pts if results.get(p) == RED), None)
+    if firstred is not None:            # 最小紅點之後的點對判決沒用，不必等
+        pts = [p for p in pts if p <= firstred]
     if any(results.get(p, PENDING) == PENDING for p in pts):
         return Verdict("wait")
     reds = [p for p in pts if results[p] == RED]
@@ -45,6 +53,9 @@ def judge(n: int, results: Dict[int, str], probes: Optional[Dict[int, str]] = No
     cands = list(range(g + 1, r))
     probes = probes or {}
     if cands:
+        if g > 0 and any(probes.get(c, PENDING) == PENDING for c in cands):
+            # 已證明乾淨的前 g 條先合進 main（不等兇手找出來）；其餘回隊伍最前面，下一批再測
+            return Verdict("done", merge_upto=g)
         if any(probes.get(c, PENDING) == PENDING for c in cands):
             return Verdict("probe", probe=cands)
         red_c = [c for c in cands if probes[c] == RED]

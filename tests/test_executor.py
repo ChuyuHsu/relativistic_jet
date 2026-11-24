@@ -554,3 +554,12 @@ class FailureExcerptTest(unittest.TestCase):
             json.dump({"items": [{"id": "u", "status": "fail", "summary": " 原因 "}, {"id": "v", "status": "fail"},
                                  {"id": "w", "status": "pass", "summary": "x"}]}, f)
         self.assertEqual(ex.read_report_summaries(rep), {"u": "原因"})
+
+
+class CpuSecondsTest(Base):
+    def test_cpu_seconds_recorded_on_normal_exit(self):
+        j = self.ok_job("exec('import time\\nt=time.time()\\nwhile time.time()-t<0.6: pass')")
+        _, r = self.run_job(j)
+        self.assertEqual(r.status, "pass")
+        self.assertIsNotNone(r.cpu_s)
+        self.assertGreater(r.cpu_s, 0.2)

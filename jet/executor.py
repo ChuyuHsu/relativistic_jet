@@ -37,6 +37,7 @@ class Job:
     log_path: str
     only: Optional[str] = None  # 插隊跑指定測試項目
     argv: Optional[List[str]] = None   # 指令範本；沒給就用 Executor 建構時的 test_cmd
+    env_extra: Optional[dict] = None   # 額外環境變數（例如 ALLOW_STRINGS_REWRITE=1）
 
 
 @dataclass
@@ -80,6 +81,8 @@ class Handle:
     log: Optional[IO] = None
     result: Optional[JobResult] = None
     cpu_s: Optional[float] = None
+    cpu_max: float = 0.0          # 跑的途中取樣到的群組 CPU 秒數最大值（結束後孫行程消失，只靠結束當下量會漏）
+    cpu_at: float = 0.0           # 上次取樣的時間
     overloaded: bool = False
 
     @property
@@ -283,6 +286,8 @@ class Executor:
             env = dict(os.environ)       # 讓測試指令知道自己分到幾顆核，好把 -j、引擎執行緒數壓在這個數字內
             env["JET_CORES"] = ",".join(str(c) for c in sorted(cores))
             env["JET_NCORES"] = str(len(cores))
+            if job.env_extra:
+                env.update(job.env_extra)
             proc = subprocess.Popen(
                 launch, cwd=job.workdir, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True, close_fds=True)
@@ -329,8 +334,19 @@ class Executor:
         except ChildProcessError:
             exited = True
         if exited:
+            try:
+                handle.cpu_s = max(handle.cpu_max, _cores.group_cpu_seconds(handle.pgid), _cores.proc_cpu_seconds(handle.pgid))   # 領頭的已是殭屍：它自己的加上已回收子行程
+            except Exception:
+                handle.cpu_s = handle.cpu_max or None
             self._sweep(handle, signal.SIGKILL, wait_s=5.0)   # 領頭的走了，留下的孫行程一律清掉
             return self._finish(handle, None)
+        nowm = time.monotonic()
+        if nowm - handle.cpu_at >= 10.0:                       # 每 10 秒取樣一次整群組的 CPU 秒數（背景性能量測用）
+            handle.cpu_at = nowm
+            try:
+                handle.cpu_max = max(handle.cpu_max, _cores.group_cpu_seconds(handle.pgid))
+            except Exception:
+                pass
         if time.monotonic() >= handle.deadline:
             cpu = _cores.group_cpu_seconds(handle.pgid)        # 殺之前先量
             handle.cpu_s = cpu

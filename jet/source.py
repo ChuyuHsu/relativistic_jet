@@ -59,6 +59,7 @@ def parse_list(data) -> List[dict]:
 class Drops(list):
     """放棄查核請求清單；form 記清單本體是 array 還是 object（診斷：網址沒帶 with 對方就回 array）。"""
     form = "array"
+    suspect = None      # 看板回報的背景測試嫌疑：{"main_sha": ..., "branch": ...}（workflow.loop.triage=code_first 用）
 
 
 def parse_payload(data):
@@ -89,6 +90,10 @@ def parse_payload(data):
             if d.get("dropping_at") is not None:       # 看板用來分辨是哪一次放棄，原樣帶回事件
                 item["dropping_at"] = d["dropping_at"]
             drops.append(item)
+        ls = data.get("loop_suspect")
+        if isinstance(ls, dict) and isinstance(ls.get("main_sha"), str) and isinstance(ls.get("branch"), str) \
+                and ls["main_sha"] and ls["branch"]:
+            drops.suspect = {"main_sha": ls["main_sha"], "branch": ls["branch"]}
         data = raw
     return parse_list(data), drops
 
