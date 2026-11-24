@@ -45,11 +45,12 @@ const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 async function withParent(db, cards, pool) {
   const need = cards.filter(c => c.parent);
   if (!need.length) return cards;
-  let by;
-  if (pool) by = new Map(pool.map(r => [r.id, r]));
-  else {
-    const ids = [...new Set(need.map(c => c.parent))];
-    by = new Map((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results.map(r => [r.id, r]));
+  const by = new Map((pool || []).map(r => [r.id, r]));
+  // 父卡不在手上的（例如已合併、列表預設不回）用 IN 補查，一次最多 80 個
+  const ids = [...new Set(need.map(c => c.parent))].filter(id => !by.has(id));
+  for (let i = 0; i < ids.length; i += 80) {
+    const ch = ids.slice(i, i + 80);
+    for (const r of (await db.prepare(`SELECT * FROM cards WHERE id IN (${ch.map(() => '?').join(',')})`).bind(...ch).all()).results) by.set(r.id, r);
   }
   return cards.map(c => {
     if (!c.parent) return c;
@@ -57,6 +58,11 @@ async function withParent(db, cards, pool) {
     return { ...c, parent_stage: ps, waiting_parent: ps !== 'merged', parent_blocked: ps === 'dropped' || ps === 'missing' };
   });
 }
+
+// 列表的 SQL 預篩：每個階段對到哪些 status／欄位（最後仍用 stageOf 精確比對）
+const STAGE_SQL = { merged: "(status='merged' OR phase='merged')", dropped: "status='dropped'", waiting_parent: "status='waiting'", dropping: 'dropping_at IS NOT NULL' };
+const ACTIVE_SQL = "(status IN ('open','claimed','waiting') OR (dropping_at IS NOT NULL AND status NOT IN ('dropped','merged')))";   // 預設：進行中（不含已合併、已放棄）
+const sqlForStages = ss => ss.length ? `(${[...new Set(ss.map(x => STAGE_SQL[x] ?? "status IN ('open','claimed')"))].join(' OR ')})` : ACTIVE_SQL;
 
 // 回應快取（Cache API，每個機房各自存幾秒）：輪詢的人很多，同一份答案算一次就好。權杖在快取前已檢查，快取鍵只有網址。
 async function cached(req, ctx, ttl, produce) {
@@ -194,14 +200,24 @@ async function handleInner(req, env, ctx) {
   }
   let m;
   if (req.method === 'GET' && path === '/api/cards') {
-    const status = url.searchParams.get('status');
-    const rows = status
-      ? await db.prepare('SELECT * FROM cards WHERE status=? ORDER BY priority,created_at').bind(status).all()
-      : await db.prepare('SELECT * FROM cards ORDER BY priority,created_at').all();
-    let out = (await withParent(db, rows.results.map(view), status ? null : rows.results));
-    const sf = url.searchParams.get('stage');
-    if (sf) { const want = new Set(sf.split(',')); out = out.filter(c => want.has(c.stage)); }
+    // 預設只回進行中的卡（open／claimed／waiting 與放棄待查）；?all=1 回全部；?stage=merged,dropped 指名歷史；?status= 照舊
+    const sp = url.searchParams, status = sp.get('status'), all = sp.get('all') === '1';
+    const want = sp.get('stage') ? sp.get('stage').split(',').filter(Boolean) : [];
+    let sql = 'SELECT * FROM cards', args = [];
+    if (status) { sql += ' WHERE status=?'; args = [status]; }
+    else if (!all) sql += ' WHERE ' + sqlForStages(want);
+    const rows = await db.prepare(sql + ' ORDER BY priority,created_at').bind(...args).all();
+    let out = (await withParent(db, rows.results.map(view), rows.results));
+    if (want.length) { const w = new Set(want); out = out.filter(c => w.has(c.stage)); }
+    else if (!all && !status) out = out.filter(c => c.stage !== 'merged' && c.stage !== 'dropped');
     return json(out);
+  }
+  if (req.method === 'GET' && path === '/api/stats') {   // 各階段張數（頁首用）：進行中的卡算出階段，已合併與已放棄只數張數不讀內容
+    const act = (await db.prepare('SELECT * FROM cards WHERE ' + ACTIVE_SQL).all()).results;
+    const stages = Object.fromEntries(STAGES.map(k => [k, 0]));
+    for (const c of act) stages[stageOf(c)]++;
+    for (const r of (await db.prepare("SELECT status, count(*) AS n FROM cards WHERE status IN ('merged','dropped') GROUP BY status").all()).results) stages[r.status] += r.n;
+    return json({ stages, total: Object.values(stages).reduce((a, b) => a + b, 0) });
   }
   if (req.method === 'GET' && (m = path.match(/^\/api\/cards\/([^/]+)\/tests$/))) {
     const c = await db.prepare('SELECT * FROM cards WHERE id=?').bind(m[1]).first();

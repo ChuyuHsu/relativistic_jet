@@ -67,11 +67,16 @@ const MAIN=[['開卡',['new']],['開發',['developing']],['審查',['reviewing']
 const SIDE=[['退回',['rejected']],['等父卡',['wait_parent','done_wait','waiting_parent']],['放棄',['dropping','dropped']]];
 const PIPE=MAIN.concat(SIDE);
 const GROUPS=[['要處理',['rejected','new','developing','reviewing'],true],['測試中',['selftesting','wait_queue','batching'],true],['等父卡',['wait_parent','done_wait','waiting_parent'],true],['完成',['merged'],false],['放棄',['dropping','dropped'],false]];
-let cards=[],view='l',sel=null,showDone=false,focus=null,tok='';
+let cards=[],stats=null,hist={merged:null,dropped:null},histBusy={},view='l',sel=null,showDone=false,focus=null,tok='';
 try{view=localStorage.getItem('rv')||'l'}catch(e){}
 const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const fmt=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
-function tiles(arr,alertName){return arr.map(x=>{const n=cards.filter(c=>x[1].includes(c.stage)).length;return `<button class="tile${focus===x[0]?' on':''}${x[0]===alertName&&n?' alert':''}" data-p="${x[0]}"><b>${n}</b><span>${x[0]}</span></button>`}).join('')}
+// 已合併／放棄只在 /api/stats 有張數，內容要展開才載入（列表預設不回歷史，省資料庫讀取）
+const HK=['merged','dropped'];
+const cnt=ks=>ks.reduce((n,k)=>n+(HK.includes(k)&&stats?(stats.stages[k]||0):cards.filter(c=>c.stage===k).length),0);
+const pool=()=>cards.concat(hist.merged||[],hist.dropped||[]);
+function ensureHist(ks){const miss=ks.filter(k=>HK.includes(k)&&hist[k]==null&&!histBusy[k]);miss.forEach(async k=>{histBusy[k]=1;try{const r=await fetch('/api/cards?stage='+k,{headers:{authorization:'Bearer '+tok}});if(r.ok)hist[k]=await r.json()}catch(e){}if(hist[k]==null)hist[k]=[];histBusy[k]=0;draw()})}
+function tiles(arr,alertName){return arr.map(x=>{const n=cnt(x[1]);return `<button class="tile${focus===x[0]?' on':''}${x[0]===alertName&&n?' alert':''}" data-p="${x[0]}"><b>${n}</b><span>${x[0]}</span></button>`}).join('')}
 function pipeDraw(){pl.innerHTML=tiles(MAIN);pl2.innerHTML=tiles(SIDE,'退回')}
 function pipeClick(e){const b=e.target.closest('button[data-p]');if(!b)return;focus=focus===b.dataset.p?null:b.dataset.p;view='l';try{localStorage.setItem('rv','l')}catch(x){}draw()}
 pl.onclick=pl2.onclick=pipeClick;
@@ -82,10 +87,10 @@ function cardHtml(c,nochip){
   const par=c.parent?`<div class="wt">父卡 ${esc(c.parent)}（${esc(S[c.parent_stage]||c.parent_stage)}）${c.parent_blocked?'・父卡被放棄或不存在，需改接':(c.waiting_parent?'・等父卡合併':'')}</div>`:'';
   const more=[c.area&&'區域 '+esc(c.area),c.owner&&'負責 '+esc(c.owner),c.branch&&'分支 '+esc(c.branch)].filter(Boolean);
   return `<div class="c"><div class="t"><span class="id">${esc(c.id)}</span><span class="ti">${esc(c.title)}</span></div><div class="mm">${nochip?'':`<span class="chip ${CHIP[c.stage]||''}">${esc(S[c.stage])}</span>`}<span>優先 ${c.priority}</span></div>${why}${sup}${par}${more.length?`<details><summary>詳細</summary><div class="mm">${more.map(x=>`<span>${x}</span>`).join('')}</div></details>`:''}</div>`}
-function subs(ks){return ks.map(k=>{const l=cards.filter(c=>c.stage===k);return l.length?`<div class="sub"><i style="background:${COL[k]}"></i>${S[k]}<span>${l.length}</span></div>`+l.map(c=>cardHtml(c,1)).join(''):''}).join('')}
+function subs(ks){ensureHist(ks);return ks.map(k=>{const l=pool().filter(c=>c.stage===k);return l.length?`<div class="sub"><i style="background:${COL[k]}"></i>${S[k]}<span>${l.length}</span></div>`+l.map(c=>cardHtml(c,1)).join(''):''}).join('')}
 function graph(){
   const done=c=>c.stage==='merged'||c.stage==='dropped';
-  const vis=cards.filter(c=>showDone||!done(c)),by=new Map(vis.map(c=>[c.id,c]));
+  if(showDone)ensureHist(HK);const vis=pool().filter(c=>showDone||!done(c)),by=new Map(vis.map(c=>[c.id,c]));
   const kids=new Map(),hasP=new Set();
   vis.forEach(c=>{if(c.parent&&by.has(c.parent)){hasP.add(c.id);(kids.get(c.parent)||kids.set(c.parent,[]).get(c.parent)).push(c.id)}});
   const rel=vis.filter(c=>hasP.has(c.id)||kids.has(c.id)),alone=vis.filter(c=>!hasP.has(c.id)&&!kids.has(c.id));
@@ -107,7 +112,7 @@ function graph(){
   });
   if(alone.length)out+=`<div class="m" style="margin:6px 2px">單張卡（沒有父子關係）</div><div class="g"><svg width="${GX+Math.min(alone.length,3)*(W+GX)}" height="${GX+Math.ceil(alone.length/3)*(H+8)}">${alone.map((c,i)=>node(c,GX+(i%3)*(W+GX),GX+Math.floor(i/3)*(H+8))).join('')}</svg></div>`;
   const lg=Object.keys(S).map(k=>`<span><i style="background:${COL[k]}"></i>${S[k]}</span>`).join('');
-  const cur=sel&&cards.find(c=>c.id===sel);
+  const cur=sel&&pool().find(c=>c.id===sel);
   gv.innerHTML=`<div class="lg">${lg}</div><p><button class="btn${showDone?' on':''}" data-done="1">${showDone?'隱藏':'顯示'}已合併／放棄</button></p>${out||'<div class="m">沒有卡</div>'}<div class="grp" style="margin-top:12px">${cur?cardHtml(cur):'<div class="c m">點一張卡看詳情</div>'}</div>`;
 }
 seg.onclick=e=>{const v=e.target.dataset.v;if(v){view=v;try{localStorage.setItem('rv',v)}catch(x){}draw()}};
@@ -122,13 +127,13 @@ function draw(){
     list.innerHTML=`<div class="m" style="margin:0 2px 10px">只看「${focus}」・<a href="#" id="clr">顯示全部</a></div><div class="grp">${subs(ks)||'<div class="c m">沒有卡</div>'}</div>`;
     document.getElementById('clr').onclick=e=>{e.preventDefault();focus=null;draw()};return}
   list.innerHTML=GROUPS.map(([name,ks,def])=>{
-    const tot=cards.filter(c=>ks.includes(c.stage)).length;
+    const tot=cnt(ks);
     if(!tot)return '';
     const isOpen=open[name]===undefined?def:open[name];
-    return `<details class="grp" data-g="${name}" ${isOpen?'open':''}><summary>${name}<span class="n">${tot}</span></summary>${subs(ks)}</details>`;
+    return `<details class="grp" data-g="${name}" data-k="${ks.join(',')}" ${isOpen?'open':''}><summary>${name}<span class="n">${tot}</span></summary>${isOpen?subs(ks):''}</details>`;
   }).join('')||'<div class="m">沒有卡</div>';
 }
-list.addEventListener('toggle',e=>{const d=e.target;if(d.dataset&&d.dataset.g){let o={};try{o=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(x){}o[d.dataset.g]=d.open;try{localStorage.setItem('rg',JSON.stringify(o))}catch(x){}}},true);
+list.addEventListener('toggle',e=>{const d=e.target;if(d.dataset&&d.dataset.g){let o={};try{o=JSON.parse(localStorage.getItem('rg')||'{}')||{}}catch(x){}o[d.dataset.g]=d.open;try{localStorage.setItem('rg',JSON.stringify(o))}catch(x){}if(d.open)ensureHist((d.dataset.k||'').split(','))}},true);
 function panel(cls,h,body){redp.innerHTML=`<div class="card st ${cls}"><span class="dot"></span><div style="min-width:0;flex:1"><h2>${h}</h2>${body}</div></div>`}
 function redDraw(w){
   const L=w.red_items||[];
@@ -179,6 +184,7 @@ try{const q=new URLSearchParams(location.hash.slice(1)).get('t');if(q){tok=q;loc
 async function load(){
   try{
     const r=await fetch('/api/cards?v=1',{headers:{authorization:'Bearer '+tok}});
+    try{const sr=await fetch('/api/stats',{headers:{authorization:'Bearer '+tok}});if(sr.ok){stats=await sr.json();HK.forEach(k=>{if(hist[k]&&hist[k].length!==stats.stages[k])hist[k]=null})}}catch(e){}
     if(r.status===401){tok=prompt('輸入讀取權杖')||'';try{localStorage.setItem('rt',tok)}catch(e){}; if(!tok){list.textContent='需要權杖';return} return load()}
     cards=await r.json();
     // 「審查通過自測中」只算排隊器真的在跑的（phase=selftesting）；還沒開始的分成等父卡（父卡沒進 main）與等排隊
