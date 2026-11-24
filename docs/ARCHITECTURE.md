@@ -14,7 +14,14 @@ jet/            核心套件（只用標準庫，Python ≥ 3.9）
   cores.py      核池（專屬核、不共用）            ← 已實作（含 foreign_busy、/proc 掃描）
   gitops.py     Git 介面（只定 Protocol）
   executor.py   執行器（行程群組、綁核、逾時殺群）  ← 已實作
-  scheduler.py  主迴圈 tick 順序
+  scheduler.py  主迴圈 tick 順序、掃 Git、派工與收工、放行→排隊（`Scheduler` 繼承下列模組，行為不變）
+  sched_common.py   共用常數與資料類別（Running、ActiveBatch）
+  sched_source.py   外部來源：清單、放行與父卡
+  sched_drop.py     放棄查驗（drop_checks）
+  sched_selftest.py 自測派工與收結果、紅項複驗
+  sched_loop.py     direct_merge、背景 loop 與二分、每日完整層、現況快照、main 紅燈
+  sched_docs.py     純文件卡保險
+  sched_batch.py    批測（gate_batch）
   api.py        HTTP 路由表
   notify.py     通知（M1）
   source.py     外部來源輪詢（清單格式檢查、背景拉取、保留上一份成功的）
