@@ -91,10 +91,10 @@ export async function handleHook(req, env, ctx) {
       }
       if (kind === 'loop_triage') {   // 背景循環紅了：先請人讀 diff 判斷嫌疑分支（比二分快）；存起來、通知管理者，回報走 POST /api/triage
         const cut = (v, n) => String(v ?? '').slice(0, n);
-        const range = (Array.isArray(e.commits) ? e.commits : Array.isArray(e.range) ? e.range : []).slice(0, 200).map(r => ({ commit: cut(r && (r.sha ?? r.commit), 40), branch: cut(r && r.branch, 120), subject: cut(r && r.subject, 160) }));
-        const failed = (Array.isArray(e.failed_items) ? e.failed_items : []).slice(0, 20).map(f => (f && typeof f === 'object') ? { item: cut(f.item ?? f.item_id ?? f.name, 120), summary: cut(f.summary, 1200) } : { item: cut(f, 120) });
+        const range = (Array.isArray(e.commits) ? e.commits : Array.isArray(e.range) ? e.range : []).slice(0, 100).map(r => ({ commit: cut(r && (r.sha ?? r.commit), 40), branch: cut(r && r.branch, 120), subject: cut(r && r.subject, 160) }));
+        const failed = (Array.isArray(e.failed_items) ? e.failed_items : []).slice(0, 20).map(f => (f && typeof f === 'object') ? { item: cut(f.item ?? f.item_id ?? f.name, 120), summary: cut(f.summary, 800) } : { item: cut(f, 120) });   // 筆數與長度先限好，整份 JSON 不超過約 5 萬字（不切 JSON 字串，切斷讀回來會是壞值）
         const tri = { main_sha: cut(e.main_sha, 40), last_green_sha: cut(e.green_sha ?? e.last_green_sha, 40), deadline_at: e.deadline_at ?? null, range, failed_items: failed, detail: cut(e.detail, 500), status: 'pending', at: T };
-        q("INSERT INTO meta(key,value,updated_at) VALUES('triage',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify(tri).slice(0, 60000), T);
+        q("INSERT INTO meta(key,value,updated_at) VALUES('triage',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify(tri), T);
         const brs = [...new Set(range.map(r => r.branch).filter(Boolean))];
         post(admins.length ? admins : [''], null, 'loop_triage', null, `main 紅燈 ${tri.main_sha.slice(0, 8)}（上次綠 ${tri.last_green_sha.slice(0, 8)}）：區間 ${range.length} 筆提交，分支 ${brs.slice(0, 8).join('、')}${brs.length > 8 ? '…' : ''}；紅項 ${failed.map(f => f.item).slice(0, 5).join('、')}。請讀 diff 判斷嫌疑分支，再 POST /api/triage 回報（或回「看不出來」）。`.slice(0, 500));
         applied++; return;
@@ -102,11 +102,11 @@ export async function handleHook(req, env, ctx) {
       if (kind === 'loop_culprit') {   // 背景循環 bisect 出兇手（事件帶兇手分支名）：自動開一張急修卡（priority 0、area hotfix），通知兇手卡的負責串與管理者；同一個 id 只開一次
         const hid = String(e.hotfix_id || `HOTFIX-${String(e.main_sha || e.culprit_commit || e.commit || e.id || T).slice(0, 8)}`).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60);
         const cul = (e.culprit_card && byId.get(String(e.culprit_card))) || (e.culprit_branch && byBranch.get(String(e.culprit_branch))) || (branch && byBranch.get(branch)) || null;
+        q("UPDATE meta SET value=json_set(value,'$.status','resolved'),updated_at=? WHERE key='triage'", T);   // 兇手已確認：紅燈判斷結案（即使急修卡已存在也要結，desired 才不會一直帶 loop_suspect）
         if (hotNew.has(hid) || await db.prepare('SELECT 1 FROM cards WHERE id=?').bind(hid).first()) { stale++; hl(e, `急修卡 ${hid} 已存在`); return; }
         const items = Array.isArray(e.failed_items) ? e.failed_items.slice(0, 20).map(x => String((x && x.item) || (x && x.name) || x)).join('、') : '';
         const bodyText = `背景循環在 main ${String(e.main_sha || '').slice(0, 12)} 測出紅項${items ? '：' + items : ''}。兇手提交 ${String(e.culprit_commit || '不明').slice(0, 12)}${cul ? `（來自卡 ${cul.id}）` : ''}。${e.detail ? String(e.detail).slice(0, 500) : ''}`.slice(0, 1500);
-        hotNew.add(hid);
-        q("UPDATE meta SET value=json_set(value,'$.status','resolved'),updated_at=? WHERE key='triage'", T);   // 同一批裡重複的急修卡 id：資料庫還查不到前一筆，用這個擋
+        hotNew.add(hid);   // 同一批裡重複的急修卡 id：資料庫還查不到前一筆，用這個擋
         applied++;
         q("INSERT INTO cards(id,title,body,area,priority,parent,owner_thread,created_at,updated_at) VALUES(?,?,?,'hotfix',0,NULL,?,?,?)", hid, `急修：main 紅燈${cul ? '（' + cul.id + '）' : ''}`, bodyText, cul?.owner_thread ?? null, T, T);
         q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', hid, T, source, '建立（背景循環紅燈自動開卡）');

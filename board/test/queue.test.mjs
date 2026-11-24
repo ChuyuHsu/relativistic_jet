@@ -859,3 +859,18 @@ test('紅燈判斷：loop_triage 存下並通知管理者；總指揮 POST /api/
   await hook(e, [{ id: 't3', kind: 'loop_green' }]);
   assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage, null);
 });
+
+test('紅燈判斷：最大的 loop_triage 讀回來仍是完整 JSON；急修卡已存在時 loop_culprit 仍結案判斷', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  const big = { id: 'b1', kind: 'loop_triage', main_sha: 'a'.repeat(40), green_sha: 'b'.repeat(40), detail: 'd'.repeat(900),
+    commits: Array.from({ length: 150 }, (_, i) => ({ sha: 'c'.repeat(60), branch: 'b'.repeat(200), subject: 's'.repeat(300) })),
+    failed_items: Array.from({ length: 30 }, (_, i) => ({ item_id: 'i'.repeat(200), summary: 'x'.repeat(3000) })) };
+  await hook(e, [big]);
+  const g = (await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage;
+  assert.ok(g && g.range.length === 100 && g.failed_items.length === 20);
+  await hook(e, [{ id: 'k1', kind: 'loop_culprit', main_sha: 'a'.repeat(40) }]);   // 開卡並結案
+  await hook(e, [{ id: 'b2', kind: 'loop_triage', main_sha: 'a'.repeat(40), green_sha: 'b', commits: [], failed_items: [] }]);   // 同 sha 又來一輪判斷
+  await call(e, 'POST', '/api/triage', { verdict: 'suspects', suspects: [{ branch: 'dev/z' }] });
+  await hook(e, [{ id: 'k2', kind: 'loop_culprit', main_sha: 'a'.repeat(40) }]);   // 急修卡已存在，仍要把判斷標 resolved
+  assert.equal((await (await call(e, 'GET', '/api/triage', undefined, 'h')).json()).triage.status, 'resolved');
+});

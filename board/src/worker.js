@@ -236,7 +236,7 @@ export async function handle(req, env, ctx) {
     const sus = (Array.isArray(body.suspects) ? body.suspects : []).slice(0, 20).map(s => ({ branch: String(s && s.branch || '').slice(0, 120), commit: s && s.commit ? String(s.commit).slice(0, 40) : null, reason: s && s.reason ? String(s.reason).slice(0, 300) : null })).filter(s => s.branch);
     if (body.verdict === 'suspects' && !sus.length) return json({ error: 'suspects 至少要有一個帶 branch 的嫌疑' }, 400);
     const next = { ...tri, status: 'answered', verdict: body.verdict, suspects: body.verdict === 'suspects' ? sus : [], answered_by: actor, answered_at: now(), note: body.note ? String(body.note).slice(0, 500) : null };
-    await db.prepare("UPDATE meta SET value=?,updated_at=? WHERE key='triage'").bind(JSON.stringify(next).slice(0, 60000), now()).run();
+    await db.prepare("UPDATE meta SET value=?,updated_at=? WHERE key='triage'").bind(JSON.stringify(next), now()).run();
     return json({ ok: true, triage: next });
   }
   if (req.method === 'POST' && path === '/api/cards') {
