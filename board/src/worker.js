@@ -241,11 +241,18 @@ export async function handle(req, env, ctx) {
   if (path === '/api/perf' && req.method === 'GET') {   // 背景測試效能：最近各輪總耗時與 CPU 使用率、最慢項目排行（最近 N 輪平均與最大）
     const n = Math.min(Math.max(Number(url.searchParams.get('n')) || 30, 1), 200);
     const rows = (await db.prepare('SELECT * FROM loop_perf ORDER BY n DESC LIMIT ?').bind(n).all()).results;
-    const runs = rows.map(r => { let top = []; try { top = JSON.parse(r.top || '[]'); } catch { /* 壞值當空 */ } return { at: r.at, main_sha: r.main_sha, kind: r.kind, wall_s: r.wall_s, cores: r.cores, cpu_util: r.cpu_util, items: r.items, top }; });
+    const runs = rows.map(r => { let top = []; try { top = JSON.parse(r.top || '[]'); } catch { /* 壞值當空 */ } return { at: r.at, main_sha: r.main_sha, kind: r.kind, wall_s: r.wall_s, cores: r.cores, cpu_util: r.cpu_util, items: r.items, top, metrics: (() => { try { return r.metrics ? JSON.parse(r.metrics) : null; } catch { return null; } })() }; });
     const agg = new Map();
     for (const r of runs) for (const t of r.top) { const a = agg.get(t.item) || { item: t.item, runs: 0, sum: 0, max: 0, last: null }; a.runs++; a.sum += t.secs; a.max = Math.max(a.max, t.secs); if (a.last == null) a.last = t.secs; agg.set(t.item, a); }   // runs 由新到舊，第一個遇到的是最近一次
     const slowest = [...agg.values()].map(a => ({ item: a.item, runs: a.runs, avg_s: Math.round(a.sum / a.runs * 10) / 10, max_s: a.max, last_s: a.last })).sort((a, b) => b.avg_s - a.avg_s).slice(0, 20);
-    return json({ runs, slowest });
+    // 畫面量測排行：各項目在這 n 輪裡的 FPS（低的在前）與繪製數（高的在前）
+    const fa = new Map(), da = new Map();
+    const add = (m, list, r) => { for (const t of list || []) { const a = m.get(t.item) || { item: t.item, runs: 0, sum: 0, min: Infinity, max: -Infinity, last: null }; a.runs++; a.sum += t.value; a.min = Math.min(a.min, t.value); a.max = Math.max(a.max, t.value); if (a.last == null) a.last = t.value; m.set(t.item, a); } };
+    for (const r of runs) if (r.metrics) { add(fa, r.metrics.lowest_fps); add(da, r.metrics.most_draw_calls); }
+    const r1 = x => Math.round(x * 10) / 10;
+    const lowest_fps = [...fa.values()].map(a => ({ item: a.item, runs: a.runs, avg: r1(a.sum / a.runs), min: a.min, last: a.last })).sort((a, b) => a.avg - b.avg).slice(0, 15);
+    const most_draw_calls = [...da.values()].map(a => ({ item: a.item, runs: a.runs, avg: r1(a.sum / a.runs), max: a.max, last: a.last })).sort((a, b) => b.avg - a.avg).slice(0, 15);
+    return json({ runs, slowest, lowest_fps, most_draw_calls });
   }
   if (path === '/api/triage' && req.method === 'POST') {   // 總指揮讀完 diff 回報嫌疑分支（或看不出來）
     const tri = await getTriage(db);

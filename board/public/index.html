@@ -77,6 +77,8 @@ function redDraw(w){
   redp.innerHTML=`<div class="rp bad"><h2>main 紅項 ${L.length||'？'} 個${w.triage&&w.triage.status==='pending'?'（等總指揮讀 diff 判斷嫌疑）':''}</h2>`+
     (L.length?L.map(r=>`<div class="it"><b>${esc(r.item)}</b>${r.summary?`<span class="m"> ${esc(r.summary)}</span>`:''}<br><span class="m">${r.fixers.length?'修理中：'+r.fixers.map(f=>`${esc(f.id)}（${esc(st(f.stage))}${f.owner?'・'+esc(f.owner):''}）`).join('、'):(r.suspects.length?'嫌疑分支：'+r.suspects.map(esc).join('、')+'（驗證中）':'還沒有人在修')}</span></div>`).join(''):'<div class="m">紅項明細還沒回報</div>')+'</div>';
 }
+const trend=(rr,k,label,col)=>{const v=rr.map(r=>r.metrics&&r.metrics[k]);if(!v.some(x=>x!=null))return '';const mx=Math.max(...v.map(x=>x||0),1),H=36;return `<div class="m" style="margin-top:6px">${label}</div><svg width="${Math.max(rr.length*14,120)}" height="${H}">${v.map((x,i)=>x==null?'':`<rect x="${i*14}" y="${H-Math.max(2,x/mx*H)}" width="10" height="${Math.max(2,x/mx*H)}" rx="2" fill="${col}"><title>${x}</title></rect>`).join('')}</svg>`};
+const rk=(t,a,f)=>(a||[]).length?`<div class="m" style="margin-top:6px">${t}（近幾輪）</div>`+a.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">${f(s)}（${s.runs} 輪）</span></div>`).join(''):'';
 async function perfDraw(){
   try{
     const p=await(await fetch('/api/perf?n=30',{headers:{authorization:'Bearer '+tok}})).json();
@@ -86,6 +88,8 @@ async function perfDraw(){
     const bars=rr.map((r,i)=>`<rect x="${i*14}" y="${H-Math.max(2,r.wall_s/mx*H)}" width="10" height="${Math.max(2,r.wall_s/mx*H)}" rx="2" fill="#0a84ff"><title>${esc(new Date(r.at*1000).toLocaleString('zh-TW',{hour12:false}))}　${Math.round(r.wall_s)} 秒　CPU ${r.cpu_util==null?'?':Math.round(r.cpu_util*(r.cpu_util<=1?100:1))}%</title></rect>`).join('');
     const l=R[0],cpu=x=>x==null?'？':Math.round(x*(x<=1?100:1))+'%',m=s=>s>=120?(s/60).toFixed(1)+' 分':Math.round(s)+' 秒';
     perfp.innerHTML=`<div class="rp"><h2>背景測試效能</h2><div class="m">最近 ${R.length} 輪總耗時（越高越久；最新在右）</div><svg width="${W}" height="${H}">${bars}</svg><div class="m">最新一輪：${m(l.wall_s)}・CPU ${cpu(l.cpu_util)}・${l.cores??'？'} 核・${l.items??'？'} 項${l.kind?'・'+esc(l.kind):''}</div>`+
+      (l.metrics?`<div class="m" style="margin-top:6px">畫面：FPS 平均 ${l.metrics.fps_avg??'？'}・最低 ${l.metrics.fps_min??'？'}｜繪製數 平均 ${l.metrics.draw_calls_avg??'？'}・最高 ${l.metrics.draw_calls_max??'？'}</div>`+trend(rr,'fps_avg','FPS 平均趨勢','#30a05a')+trend(rr,'draw_calls_avg','繪製數平均趨勢','#bf5af2'):'')+
+      rk('FPS 最低的項目',p.lowest_fps,s=>`平均 ${s.avg}・最低 ${s.min}・最近 ${s.last}`)+rk('繪製數最高的項目',p.most_draw_calls,s=>`平均 ${s.avg}・最高 ${s.max}・最近 ${s.last}`)+
       ((p.slowest||[]).length?`<div class="m" style="margin-top:6px">最慢項目（近 ${R.length} 輪平均）</div>`+p.slowest.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">平均 ${s.avg_s} 秒・最慢 ${s.max_s} 秒・最近 ${s.last_s} 秒（${s.runs} 輪）</span></div>`).join(''):'')+'</div>';
   }catch(e){}
 }

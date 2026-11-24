@@ -896,7 +896,7 @@ test('/api/workflow：main 紅項與誰在修（急修卡、嫌疑分支）', as
 
 test('背景測試效能：loop_perf 存下、/api/perf 回各輪與最慢項目排行', async () => {
   const e = mkenv();
-  assert.deepEqual(await (await call(e, 'GET', '/api/perf')).json(), { runs: [], slowest: [] });
+  assert.deepEqual(await (await call(e, 'GET', '/api/perf')).json(), { runs: [], slowest: [], lowest_fps: [], most_draw_calls: [] });
   assert.equal((await (await hook(e, [{ id: 'p0', kind: 'loop_perf', main_sha: 'a', perf: {} }])).json()).stale, 1);
   await hook(e, [{ id: 'p1', kind: 'loop_perf', main_sha: 'aaa', perf: { kind: 'full', wall_s: 600, cores: 16, cpu_util: 0.5, items: 100, top: [{ item: 'slow_a', secs: 100 }, { item: 'slow_b', secs: 50 }] } }]);
   await hook(e, [{ id: 'p2', kind: 'loop_perf', main_sha: 'bbb', perf: { kind: 'full', wall_s: 500, cores: 16, cpu_util: 40, items: 100, top: [{ item_id: 'slow_a', secs: 60 }, { item: 'slow_c', secs: 70 }] } }]);
@@ -904,4 +904,16 @@ test('背景測試效能：loop_perf 存下、/api/perf 回各輪與最慢項目
   assert.equal(p.runs.length, 2); assert.equal(p.runs[0].main_sha, 'bbb');   // 新的在前
   assert.deepEqual(p.slowest.map(s => [s.item, s.avg_s, s.max_s, s.last_s, s.runs]), [['slow_a', 80, 100, 60, 2], ['slow_c', 70, 70, 70, 1], ['slow_b', 50, 50, 50, 1]]);
   assert.equal((await call(e, 'GET', '/api/perf', undefined, 'bad')).status, 401);
+});
+
+test('背景測試效能：畫面量測（FPS、繪製數）存下並出排行與趨勢資料', async () => {
+  const e = mkenv();
+  const m = (fa, da, low, hi) => ({ items: 2, fps_avg: fa, fps_min: fa - 10, draw_calls_avg: da, draw_calls_max: da + 50, lowest_fps: low, most_draw_calls: hi });
+  await hook(e, [{ id: 'm1', kind: 'loop_perf', main_sha: 'a', perf: { wall_s: 10, metrics: m(40, 200, [{ item: 'shop_a', value: 20 }, { item: 'shop_b', value: 35 }], [{ item: 'shop_a', value: 300 }]) } }]);
+  await hook(e, [{ id: 'm2', kind: 'loop_perf', main_sha: 'b', perf: { wall_s: 11, metrics: m(45, 180, [{ item: 'shop_a', value: 30 }], [{ item: 'shop_a', value: 250 }, { item: 'shop_c', value: 260 }]) } }]);
+  await hook(e, [{ id: 'm3', kind: 'loop_perf', main_sha: 'c', perf: { wall_s: 12 } }]);   // 沒帶畫面量測也收
+  const p = await (await call(e, 'GET', '/api/perf')).json();
+  assert.equal(p.runs.length, 3); assert.equal(p.runs[2].metrics.fps_avg, 40); assert.equal(p.runs[0].metrics, null);
+  assert.deepEqual(p.lowest_fps.map(s => [s.item, s.avg, s.min, s.last, s.runs]), [['shop_a', 25, 20, 30, 2], ['shop_b', 35, 35, 35, 1]]);
+  assert.deepEqual(p.most_draw_calls.map(s => [s.item, s.avg, s.max, s.last]), [['shop_a', 275, 300, 250], ['shop_c', 260, 260, 260]]);
 });

@@ -89,7 +89,10 @@ export async function handleHook(req, env, ctx) {
         const num = v => (v == null || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
         if (!p || num(p.wall_s) == null) { stale++; hl(e, 'loop_perf 要帶 perf.wall_s（數字）'); return; }
         const top = (Array.isArray(p.top) ? p.top : []).slice(0, 30).map(x => ({ item: String((x && (x.item ?? x.item_id ?? x.name)) ?? x).slice(0, 120), secs: num(x && x.secs) ?? 0 }));
-        q('INSERT INTO loop_perf(at,main_sha,kind,wall_s,cores,cpu_util,items,top) VALUES(?,?,?,?,?,?,?,?)', T, e.main_sha ? String(e.main_sha).slice(0, 40) : null, p.kind ? String(p.kind).slice(0, 40) : null, num(p.wall_s), num(p.cores), num(p.cpu_util), num(p.items), JSON.stringify(top));
+        const mt = p.metrics && typeof p.metrics === 'object' ? p.metrics : null;   // 畫面量測：{items, fps_avg, fps_min, draw_calls_avg, draw_calls_max, lowest_fps:[{item,value}], most_draw_calls:[{item,value}]}
+        const rank = a => (Array.isArray(a) ? a : []).slice(0, 10).map(x => ({ item: String((x && (x.item ?? x.item_id ?? x.name)) ?? x).slice(0, 120), value: num(x && x.value) ?? 0 }));
+        const metrics = mt ? JSON.stringify({ items: num(mt.items), fps_avg: num(mt.fps_avg), fps_min: num(mt.fps_min), draw_calls_avg: num(mt.draw_calls_avg), draw_calls_max: num(mt.draw_calls_max), lowest_fps: rank(mt.lowest_fps), most_draw_calls: rank(mt.most_draw_calls) }) : null;
+        q('INSERT INTO loop_perf(at,main_sha,kind,wall_s,cores,cpu_util,items,top,metrics) VALUES(?,?,?,?,?,?,?,?,?)', T, e.main_sha ? String(e.main_sha).slice(0, 40) : null, p.kind ? String(p.kind).slice(0, 40) : null, num(p.wall_s), num(p.cores), num(p.cpu_util), num(p.items), JSON.stringify(top), metrics);
         q('DELETE FROM loop_perf WHERE n NOT IN (SELECT n FROM loop_perf ORDER BY n DESC LIMIT 200)');
         applied++; return;
       }

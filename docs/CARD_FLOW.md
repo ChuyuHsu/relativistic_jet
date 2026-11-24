@@ -275,3 +275,5 @@
 ### 背景測試效能（loop_perf）
 
 排隊器每輪背景測試結束送事件 `loop_perf`：`{kind, id, main_sha, perf:{kind, wall_s, cores, cpu_util, items, top:[{item, secs}]}}`（`perf.wall_s` 必填；`top` 是最慢的項目）。看板留最近 200 輪（`loop_perf` 表，`migrate_012.sql`）。`GET /api/perf?n=30`（TOKEN 或 READ_TOKEN）回 `{runs:[新到舊], slowest:[{item, runs, avg_s, max_s, last_s}]}`，`slowest` 是這 n 輪裡各項目的平均、最慢與最近耗時排行。看板頁首的「背景測試效能」區塊顯示每輪總耗時長條（滑過看時間與 CPU）、最新一輪的耗時／CPU／核數／項數，以及最慢項目排行。
+
+`perf` 也可帶畫面量測 `metrics:{items, fps_avg, fps_min, draw_calls_avg, draw_calls_max, lowest_fps:[{item,value}], most_draw_calls:[{item,value}]}`（`migrate_013.sql` 加欄位）。`GET /api/perf` 另回 `lowest_fps`（各項目近 n 輪 FPS，低的在前：平均／最低／最近）與 `most_draw_calls`（繪製數，高的在前：平均／最高／最近）；`runs[].metrics` 給趨勢。看板效能區塊多顯示 FPS、繪製數趨勢與兩個排行。
