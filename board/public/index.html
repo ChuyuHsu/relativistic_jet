@@ -75,7 +75,10 @@ const fmt=ts=>ts?new Date(ts*1000).toLocaleString('zh-TW',{hour12:false}):'';
 const HK=['merged','dropped'];
 const cnt=ks=>ks.reduce((n,k)=>n+(HK.includes(k)&&stats?(stats.stages[k]||0):cards.filter(c=>c.stage===k).length),0);
 const pool=()=>cards.concat(hist.merged||[],hist.dropped||[]);
-function ensureHist(ks){const miss=ks.filter(k=>HK.includes(k)&&hist[k]==null&&!histBusy[k]);miss.forEach(async k=>{histBusy[k]=1;try{const r=await fetch('/api/cards?stage='+k,{headers:{authorization:'Bearer '+tok}});if(r.ok)hist[k]=await r.json()}catch(e){}if(hist[k]==null)hist[k]=[];histBusy[k]=0;draw()})}
+// 條件式讀取：記住每個網址上次的 etag，帶 If-None-Match；版本沒變伺服器回 304（只讀一列），沿用上次的資料
+const ec={};
+async function gj(u){const h={authorization:'Bearer '+tok},o=ec[u];if(o)h['if-none-match']=o.etag;const r=await fetch(u,{headers:h,cache:'no-store'});if(r.status===304&&o)return{r,data:o.data,same:true};if(r.status!==200)return{r,data:null,same:false};const data=await r.json(),et=r.headers.get('etag');if(et)ec[u]={etag:et,data};return{r,data,same:false}}
+function ensureHist(ks){const miss=ks.filter(k=>HK.includes(k)&&hist[k]==null&&!histBusy[k]);miss.forEach(async k=>{histBusy[k]=1;try{const g=await gj('/api/cards?stage='+k);if(g.data)hist[k]=g.data}catch(e){}if(hist[k]==null)hist[k]=[];histBusy[k]=0;draw()})}
 function tiles(arr,alertName){return arr.map(x=>{const n=cnt(x[1]);return `<button class="tile${focus===x[0]?' on':''}${x[0]===alertName&&n?' alert':''}" data-p="${x[0]}"><b>${n}</b><span>${x[0]}</span></button>`}).join('')}
 function pipeDraw(){pl.innerHTML=tiles(MAIN);pl2.innerHTML=tiles(SIDE,'退回')}
 function pipeClick(e){const b=e.target.closest('button[data-p]');if(!b)return;focus=focus===b.dataset.p?null:b.dataset.p;view='l';try{localStorage.setItem('rv','l')}catch(x){}draw()}
@@ -151,7 +154,7 @@ const trend=(rr,k,label,col)=>{const v=rr.map(r=>r.metrics&&r.metrics[k]);if(!v.
 const rk=(t,a,f)=>(a||[]).length?`<div class="m" style="margin-top:8px">${t}（近幾輪）</div>`+a.slice(0,10).map(s=>`<div class="it"><b>${esc(s.item)}</b> <span class="m">${f(s)}（${s.runs} 輪）</span></div>`).join(''):'';
 async function perfDraw(){
   try{
-    const p=await(await fetch('/api/perf?n=30&v=1',{headers:{authorization:'Bearer '+tok}})).json();
+    const g=await gj('/api/perf?n=30');if(g.same||!g.data)return;const p=g.data;
     const R=(p.runs||[]);
     if(!R.length){perfp.innerHTML='';return}
     const rr=R.slice().reverse(),mx=Math.max(...rr.map(r=>r.wall_s),1),W=Math.max(rr.length*14,120),H=50;
@@ -183,14 +186,18 @@ try{tok=localStorage.getItem('rt')||''}catch(e){}
 try{const q=new URLSearchParams(location.hash.slice(1)).get('t');if(q){tok=q;localStorage.setItem('rt',q);history.replaceState(null,'',location.pathname+location.search)}}catch(e){}
 async function load(){
   try{
-    const r=await fetch('/api/cards?v=1',{headers:{authorization:'Bearer '+tok}});
-    try{const sr=await fetch('/api/stats',{headers:{authorization:'Bearer '+tok}});if(sr.ok){stats=await sr.json();HK.forEach(k=>{if(hist[k]&&hist[k].length!==stats.stages[k])hist[k]=null})}}catch(e){}
-    if(r.status===401){tok=prompt('輸入讀取權杖')||'';try{localStorage.setItem('rt',tok)}catch(e){}; if(!tok){list.textContent='需要權杖';return} return load()}
-    cards=await r.json();
-    // 「審查通過自測中」只算排隊器真的在跑的（phase=selftesting）；還沒開始的分成等父卡（父卡沒進 main）與等排隊
-    cards.forEach(c=>{if(c.stage==='selftesting'&&c.phase!=='selftesting')c.stage=c.waiting_parent?'wait_parent':'wait_queue';else if(c.stage==='batching'&&c.waiting_parent)c.stage='done_wait'});
+    const g=await gj('/api/cards');
+    if(g.r.status===401){tok=prompt('輸入讀取權杖')||'';try{localStorage.setItem('rt',tok)}catch(e){}; if(!tok){list.textContent='需要權杖';return} return load()}
+    if(!g.data){list.textContent='讀取失敗';return}
+    if(g.same&&stats)return;   // 版本號是全域的：卡片清單沒變，統計、流程、效能也都沒變，不用再問、不用重畫
+    try{const sr=await gj('/api/stats');if(sr.data){stats=sr.data;HK.forEach(k=>{if(hist[k]&&hist[k].length!==stats.stages[k])hist[k]=null})}}catch(e){}
+    if(!g.same){
+      cards=g.data.map(c=>({...c}));
+      // 「審查通過自測中」只算排隊器真的在跑的（phase=selftesting）；還沒開始的分成等父卡（父卡沒進 main）與等排隊
+      cards.forEach(c=>{if(c.stage==='selftesting'&&c.phase!=='selftesting')c.stage=c.waiting_parent?'wait_parent':'wait_queue';else if(c.stage==='batching'&&c.waiting_parent)c.stage='done_wait'});
+    }
     perfDraw();
-    try{const w=await(await fetch('/api/workflow?v=1',{headers:{authorization:'Bearer '+tok}})).json();wfDraw(w)}catch(e){}
+    try{const w=await gj('/api/workflow');if(w.data)wfDraw(w.data)}catch(e){}
     draw()
   }catch(e){list.textContent='讀取失敗'}
 }

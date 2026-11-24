@@ -61,3 +61,12 @@ CREATE INDEX IF NOT EXISTS cards_dropping ON cards(dropping_at) WHERE dropping_a
 CREATE INDEX IF NOT EXISTS cards_area ON cards(area);
 CREATE INDEX IF NOT EXISTS cards_parent ON cards(parent) WHERE parent IS NOT NULL;
 CREATE INDEX IF NOT EXISTS cards_superseded ON cards(superseded_by) WHERE superseded_by IS NOT NULL;
+-- BD-03 版本號與 304：meta.rev 是全域版本號，卡片、流程狀態、效能表任何變動都加一（用觸發器，不靠程式記得加）
+INSERT OR IGNORE INTO meta(key,value,updated_at) VALUES('rev','0',0);
+CREATE TRIGGER IF NOT EXISTS rev_cards_i AFTER INSERT ON cards BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+CREATE TRIGGER IF NOT EXISTS rev_cards_u AFTER UPDATE ON cards BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+CREATE TRIGGER IF NOT EXISTS rev_cards_d AFTER DELETE ON cards BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+CREATE TRIGGER IF NOT EXISTS rev_meta_i AFTER INSERT ON meta WHEN NEW.key!='rev' BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+CREATE TRIGGER IF NOT EXISTS rev_meta_u AFTER UPDATE ON meta WHEN NEW.key!='rev' BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+CREATE TRIGGER IF NOT EXISTS rev_meta_d AFTER DELETE ON meta WHEN OLD.key!='rev' BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;
+CREATE TRIGGER IF NOT EXISTS rev_perf_i AFTER INSERT ON loop_perf BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='rev'; END;

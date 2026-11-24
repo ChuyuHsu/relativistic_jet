@@ -64,17 +64,19 @@ const STAGE_SQL = { merged: "(status='merged' OR phase='merged')", dropped: "sta
 const ACTIVE_SQL = "(status IN ('open','claimed','waiting') OR (dropping_at IS NOT NULL AND status NOT IN ('dropped','merged')))";   // 預設：進行中（不含已合併、已放棄）
 const sqlForStages = ss => ss.length ? `(${[...new Set(ss.map(x => STAGE_SQL[x] ?? "status IN ('open','claimed')"))].join(' OR ')})` : ACTIVE_SQL;
 
-// 回應快取（Cache API，每個機房各自存幾秒）：輪詢的人很多，同一份答案算一次就好。權杖在快取前已檢查，快取鍵只有網址。
-async function cached(req, ctx, ttl, produce) {
-  if (typeof caches === 'undefined' || !ctx || req.method !== 'GET') return produce();
-  const key = new Request(new URL(req.url).toString(), { method: 'GET' });
-  try { const hit = await caches.default.match(key); if (hit) return hit; } catch { /* 沒快取就照算 */ }
+// 版本號條件式讀取（BD-03）：meta.rev 由資料庫觸發器在任何卡片、流程狀態、效能表變動時加一。
+// 輪詢的人帶 If-None-Match 或 ?rev=，版本沒變就只讀 rev 一列、回 304；回應的 etag 用「產生答案之前」讀到的版本，
+// 產生中途有寫入也只會讓下一次多拉一次，不會拿到舊資料。權杖必須在呼叫前已檢查。
+async function revGate(req, env, produce) {
+  let r;
+  try { r = await env.DB.prepare("SELECT value FROM meta WHERE key='rev'").first(); } catch { return json({ error: '看板內部錯誤' }, 500); }
+  const rev = r ? String(r.value) : null;
+  if (rev == null) return produce();   // 還沒跑 migrate_016：不支援，照常回答
+  const etag = `W/"${rev}"`;
+  const inm = req.headers.get('if-none-match'), q = new URL(req.url).searchParams.get('rev');
+  if ((inm && inm.split(',').some(x => x.trim() === etag || x.trim() === `"${rev}"`)) || q === rev) return new Response(null, { status: 304, headers: { etag, 'cache-control': 'no-cache' } });
   const res = await produce();
-  if (res.status === 200) {
-    const copy = new Response(res.clone().body, res);
-    copy.headers.set('cache-control', `public, max-age=${ttl}`);
-    ctx.waitUntil(caches.default.put(key, copy).catch(() => {}));
-  }
+  if (res.status === 200) { const h = new Headers(res.headers); h.set('etag', etag); h.set('cache-control', 'no-cache'); return new Response(res.body, { status: 200, headers: h }); }
   return res;
 }
 
@@ -150,27 +152,24 @@ async function desired(req, env) {
   } catch { return json({ error: '看板內部錯誤' }, 500); }
 }
 
-// 網頁輪詢才帶 v：讀取權杖驗過後快取 10 秒；指令稿直接讀（不帶 v）永遠是最新
 export async function handle(req, env, ctx) {
-  if (req.method === 'GET' && typeof caches !== 'undefined') {
-    const u = new URL(req.url);
-    if (u.searchParams.has('v') && ['/api/cards', '/api/workflow', '/api/perf'].includes(u.pathname)) {
-      if (!bearerIs(req, env.TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
-      return cached(req, ctx, 10, () => handleInner(req, env, ctx));
-    }
-  }
   return handleInner(req, env, ctx);
 }
-async function handleInner(req, env, ctx) {
+const GATED = new Set(['/api/cards', '/api/workflow', '/api/stats', '/api/perf']);   // 帶 etag、版本沒變回 304 的讀取端點
+async function handleInner(req, env, ctx, gated = false) {
   const url = new URL(req.url);
   const path = url.pathname;
   const db = env.DB;
+  if (!gated && req.method === 'GET' && GATED.has(path)) {
+    if (!bearerIs(req, env.TOKEN, env.READ_TOKEN)) return json({ error: 'unauthorized' }, 401);
+    return revGate(req, env, () => handleInner(req, env, ctx, true));
+  }
   if (path === '/hooks/queue') return handleHook(req, env, ctx);
   const write = req.method !== 'GET';
   // 排隊器拉清單：HOOK_TOKEN 或 READ_TOKEN；其餘寫入要 TOKEN，讀取要 TOKEN 或 READ_TOKEN
   if (path === '/api/queue/desired') {
     if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
-    return cached(req, ctx, 5, () => desired(req, env));   // 排隊器輪詢：5 秒內同一份答案
+    return revGate(req, env, () => desired(req, env));   // 排隊器輪詢：版本沒變回 304
   }
   if (path === '/api/outbox/pending') return outboxPending(req, env);
   if (path === '/api/triage' && req.method === 'GET') {   // 排隊器讀：目前的紅燈判斷（含總指揮的回報）

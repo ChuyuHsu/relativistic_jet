@@ -972,3 +972,50 @@ test('BD-02：列表預設只回進行中的卡；?all=1、?stage=merged,dropped
   const st = await (await call(e, 'GET', '/api/stats')).json();
   assert.deepEqual([st.stages.merged, st.stages.dropped, st.stages.developing, st.stages.new, st.total], [1, 1, 1, 1, 4]);
 });
+
+// ---- BD-03：版本號 rev 與 304 ----
+const revOf = async e => Number((await e.DB.prepare("SELECT value FROM meta WHERE key='rev'").first()).value);
+const getRaw = (e, path, headers = {}, token = 't') => handle(new Request('http://x' + path, { headers: { authorization: `Bearer ${token}`, ...headers } }), e, {});
+
+test('BD-03：任何卡片動作、排隊器事件、流程狀態之後 rev 都會變', async () => {
+  const e = mkenv(); const seen = [await revOf(e)];
+  const bumped = async what => { const r = await revOf(e); assert.ok(r > seen[seen.length - 1], what); seen.push(r); };
+  await call(e, 'POST', '/api/cards', { id: 'c1', title: 'c1' }); await bumped('開卡');
+  await call(e, 'POST', '/api/claim', { id: 'c1', owner: 'w', owner_thread: 'a' }); await bumped('領卡');
+  await act(e, 'c1', 'submit', { commit: SHA, actor: 'w' }); await bumped('送審');
+  await act(e, 'c1', 'approve', { commit: SHA, actor: 'rev' }); await bumped('放行');
+  await ev(e, 'c1', { kind: 'tested_green', approved_sha: SHA }); await bumped('排隊器事件');
+  await hook(e, [{ id: 9001, kind: 'workflow_status', mode: 'direct_merge', loop: { state: 'green' } }]); await bumped('流程狀態（meta 寫入）');
+  await hook(e, [{ id: 9002, kind: 'loop_perf', main_sha: 'a'.repeat(40), perf: { kind: 'loop', wall_s: 12 } }]); await bumped('效能（loop_perf）');
+  await e.DB.prepare("DELETE FROM meta WHERE key='workflow'").run(); await bumped('meta 刪除');
+  await e.DB.prepare("DELETE FROM cards WHERE id='c1'").run(); await bumped('卡片刪除');
+  assert.equal(Number((await e.DB.prepare("SELECT count(*) n FROM meta WHERE key='rev'").first()).n), 1);   // rev 自己不會被複製或遞迴
+});
+
+test('BD-03：讀取端點帶 etag；If-None-Match 或 ?rev= 相同回 304，不同或沒帶回 200；沒權杖照樣 401', async () => {
+  const e = mkenv(); await claim(e, 'c1');
+  for (const path of ['/api/cards', '/api/stats', '/api/workflow', '/api/perf', '/api/queue/desired']) {
+    const r1 = await getRaw(e, path); assert.equal(r1.status, 200, path);
+    const et = r1.headers.get('etag'); assert.ok(et, path + ' 要帶 etag');
+    const r2 = await getRaw(e, path, { 'if-none-match': et }); assert.equal(r2.status, 304, path); assert.equal(await r2.text(), '');
+    assert.equal((await getRaw(e, path + (path.includes('?') ? '&' : '?') + 'rev=' + (await revOf(e)))).status, 304, path + ' ?rev=');
+    assert.equal((await getRaw(e, path, { 'if-none-match': 'W/"0"' })).status, 200, path);
+    assert.equal((await getRaw(e, path, { 'if-none-match': et }, 'bad')).status, 401, path + ' 沒權杖不能靠 304 探測');
+  }
+  const et = (await getRaw(e, '/api/cards')).headers.get('etag');
+  await call(e, 'POST', '/api/cards', { id: 'c2', title: 'c2' });
+  const r3 = await getRaw(e, '/api/cards', { 'if-none-match': et }); assert.equal(r3.status, 200); assert.notEqual(r3.headers.get('etag'), et);
+  assert.equal((await r3.json()).length, 2);
+});
+
+test('BD-03：沒有 rev（還沒跑 migrate_016）時照常回答，不帶 etag；閒置輪詢讀取列數為 1', async () => {
+  const e = mkenv(); await claim(e, 'c1');
+  const et = (await getRaw(e, '/api/queue/desired')).headers.get('etag');
+  let reads = 0; const real = e.DB.prepare.bind(e.DB);
+  e.DB.prepare = sql => { reads++; return real(sql); };
+  assert.equal((await getRaw(e, '/api/queue/desired', { 'if-none-match': et })).status, 304);
+  assert.equal(reads, 1, '304 只做一次查詢（讀 rev 一列）');
+  e.DB.prepare = real;
+  await e.DB.prepare("DELETE FROM meta WHERE key='rev'").run();
+  const r = await getRaw(e, '/api/queue/desired'); assert.equal(r.status, 200); assert.equal(r.headers.get('etag'), null);
+});
