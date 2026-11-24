@@ -23,11 +23,11 @@ class SnapshotTest(Base):
         s = self.mk2()
         self.repo.add("a")
         s.tick()
-        self.assertEqual(len(snaps(self.con)), 1)
+        self.assertEqual([x["at"] for x in snaps(self.con)], [1000.0])
         s.tick(); self.now[0] += 299; s.tick()
-        self.assertEqual(len(snaps(self.con)), 1)
+        self.assertEqual([x["at"] for x in snaps(self.con)], [1000.0])      # 還沒到間隔
         self.now[0] += 2; s.tick()
-        self.assertEqual(len(snaps(self.con)), 2)
+        self.assertEqual([x["at"] for x in snaps(self.con)], [1301.0])      # 新的取代舊的（只留最新一筆）
 
     def test_content_and_merged_excluded(self):
         s = self.mk2()
@@ -55,7 +55,7 @@ class SnapshotTest(Base):
     def test_interval_configurable_and_validated(self):
         s = self.mk2(notify={"snapshot_seconds": 60})
         s.tick(); self.now[0] += 61; s.tick()
-        self.assertEqual(len(snaps(self.con)), 2)
+        self.assertEqual([x["at"] for x in snaps(self.con)], [1061.0])
         with self.assertRaises(config.ConfigError):
             self.mk(notify={"snapshot_seconds": -1})
 
