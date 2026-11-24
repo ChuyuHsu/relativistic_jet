@@ -771,3 +771,23 @@ test('等待父卡：接手卡沒進 main 先列等待父卡，接手卡合併�
   const box = (await e.DB.prepare("SELECT owner_thread FROM outbox WHERE kind='waiting_done'").all()).results.map(r => r.owner_thread);
   assert.ok(box.includes('thw') && box.includes('adm'));
 });
+
+test('等待父卡接龍：A 等 B、B 等 C，C 合併後一路結案；接手卡被直接放棄時通知等它的卡', async () => {
+  const e = mkenv({ ADMIN_THREADS: 'adm' });
+  for (const id of ['A', 'B', 'C']) await claim(e, id, 'th' + id);
+  await act(e, 'C', 'submit', { commit: SHA, actor: 'w' }); await act(e, 'C', 'approve', { commit: SHA, actor: 'rev' });
+  for (const [x, y] of [['B', 'C'], ['A', 'B']]) {
+    await call(e, 'PATCH', `/api/cards/${x}`, { status: 'dropped', superseded_by: y });
+    await ev(e, x, { kind: 'drop_checked', unmerged: true, covered: true });
+    assert.equal(await stageOf(e, x), 'waiting_parent');
+  }
+  await ev(e, 'C', { kind: 'merged', commit: SHA, approved_sha: SHA });
+  assert.equal(await stageOf(e, 'B'), 'dropped'); assert.equal(await stageOf(e, 'A'), 'dropped');
+  // 接手卡走「建卡人 10 分鐘內放棄」直接放棄：通知等它的卡
+  await call(e, 'POST', '/api/cards', { id: 'N1', title: 'N1' }); await claim(e, 'W1', 'thw');
+  await act(e, 'W1', 'submit', { commit: SHA, actor: 'w' });
+  await e.DB.prepare("UPDATE cards SET status='waiting',superseded_by='N1' WHERE id='W1'").run();
+  await call(e, 'PATCH', '/api/cards/N1', { status: 'dropped' });
+  const box = (await e.DB.prepare("SELECT card_id FROM outbox WHERE kind='parent_blocked'").all()).results.map(r => r.card_id);
+  assert.ok(box.includes('W1'));
+});

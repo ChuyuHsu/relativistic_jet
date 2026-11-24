@@ -149,11 +149,18 @@ export async function handleHook(req, env, ctx) {
         patch(card, { last_result: JSON.stringify(res) });
       }
       logEv(card.id, `${kind}${to ? ` → ${to}` : ''}${detail ? `：${detail}` : ''}`);
-      if (kind === 'merged') {   // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串
-        for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(card.id).all()).results) {
-          q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
-          logEv(k.id, `接手卡 ${card.id} 已進 main，等待結束：轉放棄（結案）`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T]);
-          post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${card.id} 已進 main，這張卡已結案`, [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T]);
+      if (kind === 'merged') {   // 這張卡是別人的接手卡：等它進 main 的「等待父卡」卡自動結案（轉放棄），通知負責串；接龍（A 等 B、B 等 C）一路結案到底
+        const seen = new Set([card.id]), todo = [card.id];
+        while (todo.length) {
+          const via = todo.shift();
+          for (const k of (await db.prepare("SELECT * FROM cards WHERE superseded_by=? AND status='waiting'").bind(via).all()).results) {
+            if (seen.has(k.id)) continue;
+            seen.add(k.id); todo.push(k.id);
+            const g = [`SELECT 1 FROM cards WHERE id=? AND status='dropped' AND updated_at=?`, k.id, T];
+            q("UPDATE cards SET status='dropped',updated_at=? WHERE id=? AND status='waiting'", T, k.id);
+            logEv(k.id, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），等待結束：轉放棄（結案）`, g);
+            post([...new Set([k.owner_thread || '', ...(admins.length ? admins : [])])], k, 'waiting_done', k.branch, `接手卡 ${via} 已結案（內容進了 main，起點 ${card.id}），這張卡已結案`, g);
+          }
         }
       }
       // 通知：被排隊器退回、內容變了 → 領卡的開發者；暫停、父卡擋住 → 管理者
@@ -358,6 +365,6 @@ export async function outboxPending(req, env) {
 // 卡被放棄後：領了這張卡當父卡的子卡被擋住，通知管理者
 export async function notifyKids(env, id) {
   const admins = list(env.ADMIN_THREADS);
-  const kids = (await env.DB.prepare("SELECT * FROM cards WHERE parent=? AND status='claimed'").bind(id).all()).results;
+  const kids = (await env.DB.prepare("SELECT * FROM cards WHERE (parent=? AND status='claimed') OR (superseded_by=? AND status='waiting')").bind(id, id).all()).results;
   for (const k of kids) for (const o of (admins.length ? admins : [k.owner_thread || ''])) await env.DB.prepare('INSERT INTO outbox(owner_thread,card_id,branch,kind,detail,at) VALUES(?,?,?,?,?,?)').bind(o, k.id, k.branch, 'parent_blocked', `父卡 ${id} 被放棄，請改接別張卡或直接接 main`, now()).run();
 }
