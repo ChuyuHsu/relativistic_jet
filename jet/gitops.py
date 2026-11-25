@@ -328,7 +328,18 @@ class GitRepo:
 
     def conflicts_with(self, branch_sha: str, base_sha: str) -> bool:
         mb = self._merge_base_for(branch_sha, base_sha)
-        return self._merge_tree(base_sha, branch_sha, mb) is None
+        if self._merge_tree(base_sha, branch_sha, mb) is not None:
+            return False
+        return self._retry_plain_base(base_sha, branch_sha, mb) is None
+
+    def _retry_plain_base(self, tip: str, branch_sha: str, used_mb: str) -> Optional[str]:
+        """squashed_tips 挑出的共同祖先只對「疊卡的父被 squash」才對；分支歷史裡剛好有已合入分支的舊尖端
+        （例如退版後又疊回來的卡，歷史含退版提交）時，拿它當祖先會把 main 之後的改動算成雙邊修改而誤判撞檔
+        （某張疊卡連退四次）。這種情況再用普通 merge-base 算一次，乾淨就不算撞檔。"""
+        plain = self._merge_base(branch_sha, tip)
+        if plain == used_mb:
+            return None
+        return self._merge_tree(tip, branch_sha, plain)
 
     def _ref_sha(self, branch: str) -> Optional[str]:
         r = self._git("rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}^{{commit}}", check=False)
@@ -425,6 +436,8 @@ class GitRepo:
             if mb is None:
                 mb = self._merge_base_for(b, tip)
             tree = self._merge_tree(tip, b, mb)
+            if tree is None:
+                tree = self._retry_plain_base(tip, b, mb)     # 用「已合入分支舊尖端」當共同祖先算出撞檔時，再用普通 merge-base 算一次
             if tree is None:
                 continue
             subject = self._out("log", "-1", "--format=%s", b) or "squash"
