@@ -63,7 +63,7 @@ npx wrangler d1 insights task-board --remote --sort-type sum --sort-by reads --l
 | --- | --- | --- | --- | --- |
 | 2026-11-24（BD-01／03 與 11-24 修補上線前） | 上線前 | 全天 1,134,523 列 | 1,134,523 | 部署串量 |
 | 2026-11-24 22:45 UTC（上線後立刻量） | 4f179d76 | 最大三項仍是退回 LIKE、claimed 掃描、outbox 計數 | 1,126,603 | **不能當成效果**：`d1 insights` 最小是近 1 天滾動視窗，仍混著部署前的讀取 |
-| 待補（11-25 21:56 UTC 之後） | | 重量一次 | | 視窗全是新版後再量；或改用看板自己記的每分鐘讀取計數 |
+| 2026-11-25 22:00 UTC 前後（視窗全是新版，舊資料已滑出） | 4f179d76 | 前 40 名合計讀 859,076 列、執行 56,852 次。前七名（讀取列數／次數，括號是平均每次列數）：① `SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped'` 167,860／1,917（87）；② `status='claimed' ORDER BY priority,created_at` 128,719／1,739（74）；③ `SELECT status,count(*) … WHERE status IN ('merged','dropped') GROUP BY status` 107,253／263（407，單次最貴）；④ cards 的 open／claimed／waiting 或 dropping 條件查詢 77,044／361（213），同形另一條 37,872／253（149）；⑤ `DELETE FROM outbox WHERE sent_at …` 56,793／125（454）；⑥ `INSERT INTO meta('workflow')` 40,310／20,155（每次 2，但次數多）；⑦ `SELECT * FROM cards ORDER BY priority,created_at`（全表）37,720／35（1,077） | 859,076（前 40 名） | 部署串量。上線前 1,134,523 是全天總數、這次只加總前 40 名，所以降幅 ≥24% 是保守估計。還是大的：①②是被輪詢的整張卡掃描（卡數成長就跟著長）、③是統計掃已結案的卡（每次 407 列）、⑤outbox 清理每次掃 454 列，後續可考慮加索引或快取。`do_board_deploy.sh` 的 insights 選項可印前 40 名 |
 
 ## 信箱（收信端自己來領）
 
