@@ -135,6 +135,8 @@
 ### `dropping` 放棄待查（放棄防呆）
 
 放棄任何一張卡前，都要先確認沒有改動被漏掉（沒領的卡、沒送審的卡也一樣：遠端可能已經有 `dev/<卡號小寫>` 分支）：
+
+**放棄的端點**：沒有 `/drop`（打了回 404）。放棄走 `PATCH /api/cards/<卡號>`，body `{"status":"dropped","actor":"…","superseded_by":"<接手卡>"}` 或 `{"status":"dropped","actor":"…","discard_reason":"…"}`。回應 200 的卡是 `dropping`（放棄待查），不是已放棄，要等排隊器回 `drop_checked` 才結案。查驗不通過時卡回原階段、`superseded_by` 與 `discard_reason` 會被清掉，要重送。
 - **唯一例外（開錯卡用）**：建卡的人（`actor` 相同）在卡還是 `new`、建卡後 10 分鐘內放棄 → 直接 `dropped`。
 - 其餘一律：放棄請求必須帶 `superseded_by`（由哪張未放棄的另一張卡接手）或 `discard_reason`（真的不要了的原因，非空白），都沒帶回 400。帶了之後卡進 `dropping`（不算已放棄；清單上不再給排隊器測或合，改列在 `drop_checks`；沒人領的卡也不能再被領走；`branch` 欄空時用 `dev/<卡號小寫>` 當分支名送查，分支不存在排隊器回 `unmerged:false` 自然放行）。待查中的卡只能等結果，改任何欄位與其他動作一律 409（重送同一個放棄請求回 200）。`drop_checks` 每筆帶 `dropping_at`，事件若原樣帶回就比對；沒帶時比 `target`（等於現在接手卡的分支，或接手分支還不存在時排隊器回的 `main`）。對不上，就是上一輪晚到的，丟掉。
 - 排隊器查完回 `drop_checked` 事件（第 7 節）。帶 `superseded_by` 的：沒有不在 main 的改動、或接手的卡全都涵蓋（`covered`）才轉 `dropped`；否則放棄不成立，卡回到原階段，通知負責串與管理者（附缺的檔）。只帶 `discard_reason` 的：一律轉 `dropped`；有不在 main 的改動時另發通知給管理者（卡號、原因、缺的檔數），事後看一眼。
