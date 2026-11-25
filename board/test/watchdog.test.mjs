@@ -46,7 +46,7 @@ test('reviewerFor：依卡號首字母分審查串，沒有範圍符合就補位
   assert.equal(reviewerFor({ reviewers: [{ thread: 'only', letters: 'A-C' }] }, 'X1').thread, 'only');   // 沒補位也沒符合：回第一位，不丟
 });
 
-test('送審通知：有名冊就叫名冊裡的全部審查串，沒有名冊用環境變數', async () => {
+test('送審通知：有名冊只叫卡號字母對應的那條審查串，沒有名冊用環境變數全寄', async () => {
   const e = mkenv({ REVIEW_THREADS: 'env1,env2' });
   await call(e, 'POST', '/api/cards', { id: 'A1', title: 'a1' }); await call(e, 'POST', '/api/claim', { id: 'A1', owner: 'w', owner_thread: 'dd' });
   await call(e, 'POST', '/api/cards/A1/submit', { commit: SHA, actor: 'w' });
@@ -55,7 +55,12 @@ test('送審通知：有名冊就叫名冊裡的全部審查串，沒有名冊�
   await call(e, 'POST', '/api/cards', { id: 'B1', title: 'b1' }); await call(e, 'POST', '/api/claim', { id: 'B1', owner: 'w', owner_thread: 'dd' });
   await call(e, 'POST', '/api/cards/B1/submit', { commit: SHA, actor: 'w' });
   const b = (await e.DB.prepare("SELECT owner_thread FROM outbox WHERE kind='review_requested' AND card_id='B1'").all()).results.map(r => r.owner_thread).sort();
-  assert.deepEqual(b, ['r1', 'r2', 'r3', 'r4']);
+  assert.deepEqual(b, ['r1']);                                                  // B 歸審查一，不寄審查二～四
+  for (const [id, th] of [['F2', 'r2'], ['P3', 'r3'], ['9X', 'r4']]) {
+    await call(e, 'POST', '/api/cards', { id, title: id }); await call(e, 'POST', '/api/claim', { id, owner: 'w', owner_thread: 'dd' });
+    await call(e, 'POST', `/api/cards/${id}/submit`, { commit: SHA, actor: 'w' });
+    assert.deepEqual((await e.DB.prepare("SELECT owner_thread FROM outbox WHERE kind='review_requested' AND card_id=?").bind(id).all()).results.map(r => r.owner_thread), [th]);
+  }
 });
 
 test('看門狗：送審 15 分鐘叫該審的審查串、30 分鐘再叫審查四，同一版本各一次', async () => {
