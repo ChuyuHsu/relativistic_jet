@@ -66,6 +66,7 @@ class Config:
     nightly_timeout_s: int = 0        # 完整層逾時；0＝同 limits 的批測逾時
     main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
+    prerun_unapproved: int = 0        # >0＝閒置時預跑：已放行的卡都排完、還有空槽時，最多同時這麼多條「沒放行」的自測（優先序最低、不佔批測用的保留核）；0＝不啟用（嚴格先審後測）
     relative_ratio: float = 0.0       # >0＝計時類項目（timing_items）改比相對值：超過「最近幾輪 main 基準的中位數」這麼多倍才算紅；0＝不啟用
     relative_min_extra: float = 0.0   # 相對判定的下限：除了超過倍數，還要比基準多至少這麼多（單位同項目數字，例如毫秒），防抖動
     relative_keep: int = 5            # 每個計時項目記最近幾輪 main 基準的數字
@@ -168,6 +169,7 @@ def parse(d: dict) -> Config:
         nightly_timeout_s=int(((d.get("workflow") or {}).get("nightly") or {}).get("timeout_s", 0)),
         gate_registry_dir=str(pol.get("gate_registry_dir", "")),
         timing_items=tuple(pol.get("timing_items", ("loadtime", "perf", "timeout", "card_touch", "godot_time_"))),
+        prerun_unapproved=int(pol.get("prerun_unapproved", 0)),
         relative_ratio=float(pol.get("relative_ratio", 0.0)),
         relative_min_extra=float(pol.get("relative_min_extra", 0.0)),
         relative_keep=int(pol.get("relative_keep", 5)),
@@ -223,6 +225,8 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.scope not in ("all", "tracked"):
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
+    if c.prerun_unapproved < 0:
+        raise ConfigError("policy.prerun_unapproved 要是 ≥0 的整數（0＝不啟用）")
     if c.relative_ratio < 0 or (c.relative_ratio and c.relative_ratio < 1) or c.relative_min_extra < 0 or c.relative_keep < 1:
         raise ConfigError("policy.relative_ratio 要是 0（不啟用）或 ≥1；relative_min_extra ≥0；relative_keep ≥1")
     try:

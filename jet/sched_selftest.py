@@ -46,9 +46,18 @@ class SelftestMixin:
         in_use = sum(j.units for j in self.jobs.values() if j.kind == "selftest")
         slots = sum(1 for j in self.jobs.values() if j.kind == "selftest")
         wanted = self.batch is not None or bool(store.list_branches(c, S.QUEUED.value))
+        # 先審後測：已放行的先排；都排完、還有空槽時，才（設了 policy.prerun_unapproved）預跑沒放行的，最多 N 條同時
+        # （放行到了就不用再等；預跑中的自測放行被撤回／內容變了不會被 _enforce_review_first 停掉）
+        pre_left = max(0, self.cfg.prerun_unapproved - sum(1 for j in self.jobs.values()
+                                                           if j.kind == "selftest" and j.branch in self._prerun))
+        rows = [r for r in rows if self._approved(r)] + [r for r in rows if not self._approved(r)] \
+            if self.cfg.order == "review_first" and self.cfg.prerun_unapproved else rows
         for r in rows:
+            pre = False
             if self.cfg.order == "review_first" and not self._approved(r):
-                continue                                      # 先審後測：沒放行的版本不花測試資源
+                if pre_left <= 0:
+                    continue                                  # 先審後測：沒放行的版本不花測試資源（預跑名額用完或沒開）
+                pre = True
             if r["name"] in self._blocked or self._parent_waiting(r):
                 continue
             if self.cfg.max_selftest_slots and slots >= self.cfg.max_selftest_slots:
@@ -79,6 +88,9 @@ class SelftestMixin:
                                 base_sha=self.main, head_sha=r["head_sha"]):
                 break
             store.apply_event(c, r["name"], Event.SELFTEST_START)
+            if pre:
+                self._prerun.add(r["name"])
+                pre_left -= 1
             jr = next((j for j in self.jobs.values() if j.branch == r["name"] and j.kind == "selftest"), None)
             if jr is not None:
                 store.emit(c, "selftest_started", r["name"], {"run_id": jr.run_id, "cores": ",".join(map(str, jr.cores))},
@@ -87,6 +99,7 @@ class SelftestMixin:
             slots += 1
 
     def _on_selftest(self, j, res):
+        self._prerun.discard(j.branch)
         with store.event_ctx(j.branch, j.approved_sha, j.retest):
             self._on_selftest_inner(j, res)
 

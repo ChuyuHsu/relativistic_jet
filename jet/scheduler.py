@@ -97,6 +97,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
         self._repull_retry_at = 0.0
         self._anc_cache: Dict[Tuple[str, str], bool] = {}
         self._cls_ctx = self._cls_dir = self._cls_sha = None   # 分類指令用的 main 檢出（換 main 才換）
+        self._prerun: Set[str] = set()                     # 預跑（沒放行就先自測，policy.prerun_unapproved）中的分支
         self._wait_proven: Set[str] = set()                # 因父卡還沒綠而被重排的子分支：父卡綠了才再測
         self._blocked: Dict[str, str] = {}                 # 被父卡擋住的分支 → 原因
         self._stop = False
@@ -740,6 +741,8 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
 
     def _release_job(self, rid, status):
         j = self.jobs.pop(rid)
+        if j.kind == "selftest":
+            self._prerun.discard(j.branch)
         try:
             self._keep_artifacts(j)
         except Exception as e:                               # 留檔失敗不能影響測試結論

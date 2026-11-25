@@ -318,6 +318,6 @@ class SourceMixin:
         if self.cfg.order != "review_first":
             return
         for r in store.list_branches(self.con, S.SELFTESTING.value):
-            if not self._approved(r):
+            if not self._approved(r) and r["name"] not in self._prerun:
                 self._cancel_jobs(branch=r["name"])
                 store.apply_event(self.con, r["name"], Event.RETRY)

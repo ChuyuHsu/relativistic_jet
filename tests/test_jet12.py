@@ -117,5 +117,57 @@ class UnstableTest(SchedBase):
         self.assertFalse(st.get("hi_ok"))
 
 
+
+class PrerunTest(SchedBase):
+    def _states(self):
+        return {r["name"]: r["state"] for r in store.list_branches(self.con)}
+
+    def _setup(self, n_pre):
+        s = self.mk(delay=6, policy={"order": "review_first", "prerun_unapproved": n_pre}, workflow={"mode": "direct_merge"})
+        for n in "abcd":
+            self.repo.add(n)
+        self.go(2)                       # 還沒有任何放行：開了預跑名額（n_pre 條）才會有自測
+        return s
+
+    def test_off_nothing_runs_without_approval(self):
+        self._setup(0)
+        self.assertEqual([n for n, v in self._states().items() if v == "selftesting"], [])
+        self.approve_all("d")
+        self.go(2)
+        self.assertEqual([n for n, v in self._states().items() if v == "selftesting"], ["d"])
+
+    def test_on_prerun_limited_and_approved_not_limited(self):
+        s = self._setup(2)
+        st = self._states()
+        self.assertEqual(sorted(n for n, v in st.items() if v == "selftesting"), ["a", "b"])   # 沒放行也先跑，但只開 2 條
+        self.assertEqual(s._prerun, {"a", "b"})
+        self.approve_all("d")
+        self.go(2)
+        st = self._states()
+        self.assertEqual(sorted(n for n, v in st.items() if v == "selftesting"), ["a", "b", "d"])   # 放行的不受預跑名額限制
+        self.assertEqual(s._prerun, {"a", "b"})
+
+    def test_prerun_not_cancelled_and_green_waits_for_approval(self):
+        s = self._setup(2)
+        self.go(2)
+        self.assertEqual(s._prerun, {"a", "b"})                       # _enforce_review_first 沒把預跑停掉
+        self.go(60, until=lambda: all(v != "selftesting" for v in self._states().values()) and not s.jobs)
+        st = self._states()
+        self.assertEqual(self.merged(), set())                        # 沒放行的絕不合入，就算自測綠了
+        self.assertTrue(all(st[n] in ("selftest_green", "pending") for n in "abcd"))
+        self.assertEqual(s._prerun, set())                            # 自測結束就從預跑名單拿掉
+        self.approve_all("a")
+        self.go(60, until=lambda: "a" in self.merged())               # 放行一到，已綠的直接排隊合入（不用重測）
+
+    def test_config(self):
+        from jet import config
+        base = {"git": {"remote": "x"}, "paths": {"state_dir": "/tmp/x"}, "commands": {"test": ["t"]},
+                "cores": {"pool": "0-31", "selftest_cores": 1, "batch_cores": 1, "reserve_for_selftest": 4}, "limits": {"batch_max": 16}}
+        with self.assertRaises(config.ConfigError):
+            config.parse({**base, "policy": {"prerun_unapproved": -1}})
+        self.assertEqual(config.parse({**base, "policy": {"prerun_unapproved": 2}}).prerun_unapproved, 2)
+        self.assertEqual(config.parse(base).prerun_unapproved, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
