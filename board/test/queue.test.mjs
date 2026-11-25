@@ -514,8 +514,21 @@ test('信箱 signal：不用權杖、只回 pending 與 latest_id（不含內容
   assert.ok(!txt.includes('祕密') && !txt.includes('th1') && !txt.includes('c1'));
   assert.match(res.headers.get('cache-control') || '', /max-age=\d+/);
   assert.equal((await call(e, 'POST', '/api/outbox/signal', {})).status, 405);
-  await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' });
-  assert.deepEqual(await (await g()).json(), { pending: 0, latest_id: 0 });
+  // 5 秒內再來：不查資料庫（領走了也還是回舊值）；過了 5 秒才重查
+  const real = Date.now; let t0 = real();
+  try {
+    Date.now = () => t0;
+    const e2 = mkenv(); await approved(e2, 'c1', 'th1'); await ev(e2, 'c1', { kind: 'tested_red', approved_sha: SHA });
+    let reads = 0; const prep = e2.DB.prepare.bind(e2.DB);
+    e2.DB.prepare = q => { if (/FROM outbox/.test(q)) reads++; return prep(q); };
+    const g2 = () => call(e2, 'GET', '/api/outbox/signal').then(r => r.json());
+    assert.equal((await g2()).pending, 1); assert.equal(reads, 1);
+    await call(e2, 'POST', '/api/outbox/claim', { actor: '傳令' }); reads = 0;
+    Date.now = () => t0 + 4000;
+    assert.equal((await g2()).pending, 1); assert.equal(reads, 0);        // 快取內：不碰 DB
+    Date.now = () => t0 + 5100;
+    assert.equal((await g2()).pending, 0); assert.equal(reads, 1);        // 過期：重查
+  } finally { Date.now = real; }
 });
 
 test('放棄防呆：沒送審直接放棄；送審過要帶 superseded_by 或 discard_reason，否則 400；放棄待查不算已放棄', async () => {

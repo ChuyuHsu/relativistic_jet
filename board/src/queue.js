@@ -484,12 +484,21 @@ export async function outboxPending(req, env) {
 }
 
 // 公開訊號（不用權杖，給傳令串用 watch_url 訂閱）：只回數字，不含信件內容、收件人、卡號。
-// 短快取（5 秒）：同一時間不論多少人來看，資料庫最多讀一次。
+// 擋連打：isolate 記憶體內快取 5 秒，5 秒內同一個 isolate 的請求不碰資料庫（isolate 之間不共用，
+// 所以每個 isolate 最多每 5 秒讀一次；Worker 動態回應不會被 Cloudflare 依標頭快取，所以不靠 cache-control）。
+const SIGNAL_TTL_MS = 5000;
+const signalCache = new WeakMap();   // env.DB → {t, body}
 export async function outboxSignal(req, env) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'GET only' }, 405);
-  const r = await pendingCount(env.DB);
-  const res = json({ pending: r.n, latest_id: r.m });
-  res.headers.set('cache-control', 'public, max-age=5');
+  let c = signalCache.get(env.DB);
+  const t = Date.now();
+  if (!c || t - c.t >= SIGNAL_TTL_MS || t < c.t) {
+    const r = await pendingCount(env.DB);
+    c = { t, body: { pending: r.n, latest_id: r.m } };
+    signalCache.set(env.DB, c);
+  }
+  const res = json(c.body);
+  res.headers.set('cache-control', 'public, max-age=5');   // 給瀏覽器與中間代理的提示，不是資料庫保護
   return res;
 }
 
