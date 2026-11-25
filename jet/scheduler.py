@@ -884,6 +884,8 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
 
     def _collect(self):
         for rid, j in list(self.jobs.items()):
+            if rid not in self.jobs:          # 同一輪裡前一個項目收尾時已把它取消／放掉（例如基準跑完連帶取消過期探測）：不重複收
+                continue
             res = self.executor.poll(j.handle)
             if res is None:
                 continue
