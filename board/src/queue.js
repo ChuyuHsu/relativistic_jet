@@ -13,7 +13,7 @@ const PHASE_OF = { pushed: 'pending', tested_green: 'selftest_green', tested_red
 // 需要人處理、要叫醒負責串的種類
 const ATTENTION = new Set(['tested_red', 'rejected', 'conflict', 'superseded']);   // → 領卡的開發者
 const ADMIN_KINDS = new Set(['halted', 'parent_blocked', 'queue_error']);        // → 管理者
-const KIND_TEXT = { watchdog_review: '送審太久沒人審', watchdog_dev: '開發串閒置，請領下一張卡', watchdog_nocard: '開發串閒置且看板沒卡可領', drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  waiting_done: '接手卡已進 main，等待中的卡已結案',  loop_culprit: '背景循環在 main 上紅了，已 bisect 出兇手並自動開急修卡',  loop_triage: 'main 紅燈待判斷：請總指揮讀 diff 指出嫌疑分支',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
+const KIND_TEXT = { watchdog_review: '送審太久沒人審', watchdog_dev: '開發串閒置，請領下一張卡', watchdog_nocard: '開發串閒置且看板沒卡可領', watchdog_replace: '開發串閒置超過 2 小時，請換串', drop_rejected: '放棄沒成立：這張卡還有改動不在 main 也不在接手的卡裡', drop_discarded: '卡被放棄，且仍有改動不在 main（事後請看一眼）',  parent_blocked: '父卡被放棄或不存在，子卡被擋住',  waiting_done: '接手卡已進 main，等待中的卡已結案',  loop_culprit: '背景循環在 main 上紅了，已 bisect 出兇手並自動開急修卡',  loop_triage: 'main 紅燈待判斷：請總指揮讀 diff 指出嫌疑分支',  superseded: '送審後內容又改了，要重新送審', stuck: '卡住沒動靜', review_requested: '送審待審', review_rejected: '審查退回，請修改後重新送審', tested_red: '自測紅', rejected: '被退回', conflict: '跟 main 撞檔', halted: '排隊器暫停待人處理', queue_error: '排隊器出狀況' };
 
 // 一批事件在記憶體裡依序處理（卡片狀態用預載的副本，邊處理邊更新），所有寫入收成語句，最後用 D1 batch 一次送出
 // （每個事件的語句整組同進同出，不跨 batch 切開）：一批 50 筆只有幾次往返，一組失敗不會留下做一半的事件。
@@ -405,6 +405,7 @@ const NEXT = {
   loop_triage: 'main 紅了：讀通知裡區間的提交與紅項原文，判斷最可能的分支（看 git diff，不要先跑測試），用 POST /api/triage {actor, main_sha, verdict:"suspects"|"unknown", suspects:[{branch, commit?, reason?}]} 回報；看不出來就 verdict unknown，排隊器會自己二分。',
   watchdog_review: '送審太久沒人審：請馬上審這張（看 git diff，通過就 approve、要改就 reject 寫原因），不要讓子卡與開發機等。',
   watchdog_dev: '你手上沒有在做的卡：請領信裡的下一張卡（POST /api/claim），開工。',
+  watchdog_replace: '開發串閒置超過 2 小時（不再叫醒）：請總指揮決定換串，並更新串名冊。',
   watchdog_nocard: '有開發串閒置、看板沒有可領的新卡：請總指揮補卡。',
   idle_blocked: '開發機現在沒有可測的卡，機器閒著：審查者請先審擋路的卡（清單最前面的），負責串請把被退回或撞檔的父卡修好；擋路的卡處理掉，子卡才會開始自測。',
   loop_culprit: 'main 在背景循環測出紅燈，兇手已 bisect 出來：請負責串優先領急修卡（priority 0）修好，不要等人催。',

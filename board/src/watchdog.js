@@ -3,13 +3,13 @@
 // 沒有名冊時退回環境變數 REVIEW_THREADS／ADMIN_THREADS（原行為）。
 // 看門狗（cron 每 5 分鐘）：
 //   1. 送審超過 15 分鐘沒人審 → 叫「這張卡首字母對應的審查串」；超過 30 分鐘 → 再叫審查四（role 補位，letters='*'）。同一個送審版本各只叫一次。
-//   2. 開發串手上沒有在做的卡（developing／rejected）、而且 15 分鐘沒動 → 叫它開工並附下一張可領的卡號；看板沒有可領的卡 → 叫總指揮補卡。
-//      同一個開發串最多每 30 分鐘叫一次。
+//   2. 開發串手上沒有在做的卡（developing／rejected）、而且閒置 45 分鐘到 2 小時之間 → 叫它開工並附下一張可領的卡號；看板沒有可領的卡 → 叫總指揮補卡。
+//      同一個開發串最多每 30 分鐘叫一次。閒置超過 2 小時的串不叫醒（多半已收工或壞了）：改通知總指揮換串，每段閒置只通知一次（JET-18，使用者定的規則）。
 import { stageOf } from './stage.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const list = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
-export const REVIEW_WAIT_S = 15 * 60, REVIEW_ESCALATE_S = 30 * 60, DEV_IDLE_S = 15 * 60, DEV_REPEAT_S = 30 * 60;
+export const REVIEW_WAIT_S = 15 * 60, REVIEW_ESCALATE_S = 30 * 60, DEV_IDLE_S = 45 * 60, DEV_STALE_S = 2 * 3600, DEV_REPEAT_S = 30 * 60;
 
 export async function loadRoster(db) {
   const r = await db.prepare("SELECT value, updated_at FROM meta WHERE key='roster'").first();
@@ -62,7 +62,7 @@ export async function watchdog(env, tNow) {
   const roster = await loadRoster(db);
   if (!roster) return { skipped: 'no roster' };
   const stmts = [];
-  let review = 0, dev = 0, nocard = 0;
+  let review = 0, dev = 0, nocard = 0, replace = 0;
   // ---- 1. 送審沒人審 ----
   const subs = (await db.prepare("SELECT * FROM cards WHERE status='claimed' AND submitted_commit IS NOT NULL AND approved_commit IS NULL AND rejected_reason IS NULL AND dropping_at IS NULL").all()).results;
   const fallback = (roster.reviewers || []).find(r => r.letters === '*');
@@ -91,11 +91,19 @@ export async function watchdog(env, tNow) {
     const mine = claimed.filter(c => c.owner_thread === d.thread);
     const doing = mine.some(c => ['developing', 'rejected'].includes(stageOf(c)));
     const wd = (await getMeta(db, `wd_dev:${d.thread}`)) || {};
-    if (doing) { if (wd.since) stmts.push(setMeta(db, `wd_dev:${d.thread}`, { notified_at: wd.notified_at || 0 }, t)); continue; }
+    if (doing) { if (wd.since || wd.stale) stmts.push(setMeta(db, `wd_dev:${d.thread}`, { notified_at: wd.notified_at || 0 }, t)); continue; }
     const lastMove = mine.length ? Math.max(...mine.map(c => c.updated_at || 0)) : 0;
     const since = Math.max(wd.since || 0, lastMove) || t;
     if (!wd.since && !lastMove) { stmts.push(setMeta(db, `wd_dev:${d.thread}`, { since: t, notified_at: wd.notified_at || 0 }, t)); continue; }   // 第一次看到它沒事做：從現在開始算
     if (t - since < DEV_IDLE_S) { if (!wd.since && lastMove) stmts.push(setMeta(db, `wd_dev:${d.thread}`, { since: lastMove, notified_at: wd.notified_at || 0 }, t)); continue; }
+    if (t - since >= DEV_STALE_S) {   // 閒置超過 2 小時：不叫醒，通知總指揮換串（每段閒置一次）
+      if (!wd.stale && roster.commander) {
+        stmts.push(push(db, roster.commander, null, 'watchdog_replace', null, `開發串 ${d.name} 手上沒卡、閒置已超過 ${Math.floor((t - since) / 60)} 分鐘（>2 小時，不再叫醒）：請決定換串`, t),
+                   setMeta(db, `wd_dev:${d.thread}`, { since, notified_at: wd.notified_at || 0, stale: t }, t));
+        replace++;
+      }
+      continue;
+    }
     if (t - (wd.notified_at || 0) < DEV_REPEAT_S) continue;
     const next = open.find(c => !taken.has(c.id));
     if (next) {
@@ -109,5 +117,5 @@ export async function watchdog(env, tNow) {
     stmts.push(setMeta(db, `wd_dev:${d.thread}`, { since, notified_at: t }, t));
   }
   for (let i = 0; i < stmts.length; i += 40) await db.batch(stmts.slice(i, i + 40));
-  return { review, dev, nocard };
+  return replace ? { review, dev, nocard, replace } : { review, dev, nocard };
 }
