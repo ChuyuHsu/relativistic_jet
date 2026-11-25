@@ -881,6 +881,28 @@ class DirectMerge(Base):
         s.source = NS(drops=NS(suspect={"main_sha": "other", "branch": "bad"}))
         self.assertIsNone(s._loop_suspect_idx(st))      # 對不上這次紅的 main：不採用
 
+    def test_wf_status_running_keeps_last_result_and_is_not_resent_every_tick(self):
+        """跑背景測試時：上一輪的結果與完成時間沿用（不洗成 null），狀態沒變就不重送（以前每個 tick 一筆）。"""
+        import json as _j
+        from types import SimpleNamespace as NS
+        s = self.mk(workflow={"mode": "direct_merge"})
+        s._wf_status("green", main_sha="aaa", last_run_at=111.0, last_result="green")
+        n0 = self.con.execute("SELECT count(*) FROM events WHERE kind='workflow_status'").fetchone()[0]
+        s.jobs = {1: NS(kind="baseline")}
+        s._loop_step()
+        for _ in range(5):
+            s.clock = lambda: 99999.0 + _                      # 時間一直走：不能因此多送
+            s._loop_step()
+        rows = self.con.execute("SELECT detail FROM events WHERE kind='workflow_status' ORDER BY id").fetchall()
+        self.assertEqual(len(rows), n0 + 1)                    # 只多一筆（green → running）
+        last = _j.loads(rows[-1][0])["loop"]
+        self.assertEqual((last["state"], last["last_result"], last["last_run_at"]), ("running", "green", 111.0))
+        # 紅的結果也沿用（含紅項）
+        s._wf_status("red", main_sha="bbb", last_run_at=222.0, last_result="red", failed_items=["t1"])
+        s._loop_step()
+        last = _j.loads(self.con.execute("SELECT detail FROM events WHERE kind='workflow_status' ORDER BY id DESC LIMIT 1").fetchone()[0])["loop"]
+        self.assertEqual((last["state"], last["last_result"], last["failed_items"]), ("running", "red", ["t1"]))
+
     def test_loop_perf_item_times(self):
         import os as _os
         from types import SimpleNamespace as NS

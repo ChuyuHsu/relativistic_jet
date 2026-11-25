@@ -150,6 +150,13 @@ class LoopMixin:
             store.set_meta(self.con, "wf_status", key)
             store.emit(self.con, "workflow_status", None, d, force=True)
 
+    def _wf_prev(self):
+        """上一筆 workflow_status 的 loop 部分（沒有或壞掉回空 dict）。"""
+        try:
+            return (json.loads(store.get_meta(self.con, "wf_status") or "{}").get("loop") or {})
+        except (ValueError, AttributeError):
+            return {}
+
     def _loop_cfg(self):
         cores = self.cfg.loop_cores or self.cfg.batch_cores
         return cores, (self.cfg.loop_timeout_s or self.cfg.batch_timeout_s)
@@ -159,8 +166,12 @@ class LoopMixin:
         if not self.cfg.loop_enabled:
             return
         if any(j.kind in ("baseline", "loopprobe") for j in self.jobs.values()):
+            # 跑的時候只改 state：上一輪的結果與完成時間沿用（workflow_status 是整份取代，不沿用就會把看板的「最近結果」洗成空，
+            # 而且 last_run_at 每個 tick 都變，會每個 tick 送一筆；一輪 13 分鐘，一天上萬筆）
+            prev = self._wf_prev()
             self._wf_status("bisecting" if store.get_meta(self.con, "loop_bisect") else "running",
-                            last_run_at=self.clock(), main_sha=self.main)
+                            last_run_at=prev.get("last_run_at"), last_result=prev.get("last_result"),
+                            failed_items=prev.get("failed_items", []), main_sha=self.main)
             return
         cores, to = self._loop_cfg()
         raw = store.get_meta(self.con, "loop_bisect")
@@ -194,7 +205,10 @@ class LoopMixin:
         if store.get_meta(self.con, "loop_tested") != main:
             self._launch("baseline", "gate", main, cores, to, base_sha=main)
         else:
-            self._wf_status("green" if store.get_meta(self.con, "loop_green") == main else "idle", main_sha=main)
+            prev = self._wf_prev()
+            self._wf_status("green" if store.get_meta(self.con, "loop_green") == main else "idle", main_sha=main,
+                            last_run_at=prev.get("last_run_at"), last_result=prev.get("last_result"),
+                            failed_items=prev.get("failed_items", []))
 
     def _loop_result(self, sha, res, summ=None):
         """對最新 main 的一次 gate 結果：沒有新紅就記為綠；有新紅就從上次綠的 main 到這個 sha 二分找兇手。"""
