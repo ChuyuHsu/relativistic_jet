@@ -161,7 +161,10 @@ export async function handleHook(req, env, ctx) {
         q("INSERT INTO meta(key,value,updated_at) VALUES('idle_blocked',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify({ sig, at: T, blockers: bl, pending: Number(e.pending) || 0, approved_pending: Number(e.approved_pending) || 0 }), T);
         // 擋路的卡排最前：priority 設成 0 以下的最小值不動資料，改在 meta 留清單，看板頁與送審信排序時照它排
         const cards = bl.map(b => byBranch.get(b.branch)).filter(Boolean);
-        const owners = [...new Set([...list(env.REVIEW_THREADS), ...cards.map(c => c.owner_thread).filter(Boolean), ...admins])];
+        // 負責串只在「要開發者動手」時叫（擋路的卡被退回／暫停＝要修；等審查的卡由審查串處理，不吵負責串）：卡上的 owner_thread 是領卡當時的串 id，
+        // 串結束後卡不會換人，一律叫會把已收工的舊串叫醒
+        const needDev = new Set(bl.filter(b => b.state === 'rejected' || b.state === 'halted').map(b => b.branch));
+        const owners = [...new Set([...list(env.REVIEW_THREADS), ...cards.filter(c => needDev.has(c.branch)).map(c => c.owner_thread).filter(Boolean), ...admins])];
         const text = `開發機沒有可測的卡（待自測 ${Number(e.pending) || 0}、已放行 ${Number(e.approved_pending) || 0}）。請優先處理擋路的卡：` + bl.slice(0, 6).map(b => `${b.branch}（${b.approved ? '已放行' : '待放行'}・${b.state}，擋 ${b.approved_descendants} 張已放行子卡）`).join('、');
         post(owners.length ? owners : [''], cards[0] || null, 'idle_blocked', bl[0].branch, text.slice(0, 500));
         applied++; return;

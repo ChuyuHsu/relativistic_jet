@@ -1217,17 +1217,22 @@ test('idle_blocked：開發機沒有可測的卡 → 叫醒審查串與擋路卡
   const r1 = await (await hook(e, [{ id: 'ib1', kind: 'idle_blocked', pending: 5, approved_pending: 3, blockers, detail: 'x' }])).json();
   assert.equal(r1.applied, 1);
   const box = (await e.DB.prepare("SELECT owner_thread, detail, branch FROM outbox WHERE kind='idle_blocked' ORDER BY owner_thread").all()).results;
-  assert.deepEqual(box.map(r => r.owner_thread).sort(), ['adm', 'dev-par', 'rev1', 'rev2']);          // 審查串＋擋路卡的負責串＋管理者
+  assert.deepEqual(box.map(r => r.owner_thread).sort(), ['adm', 'rev1', 'rev2']);                       // 擋路卡只是等審查：只叫審查串＋管理者，不叫（可能已收工的）負責串
   assert.match(box[0].detail, /開發機沒有可測的卡/);
   assert.match(box[0].detail, new RegExp(br('par')));
   assert.equal(box[0].branch, br('par'));
   // 同一批擋路清單馬上又來：不重送
   const r2 = await (await hook(e, [{ id: 'ib2', kind: 'idle_blocked', pending: 5, approved_pending: 3, blockers }])).json();
   assert.equal(r2.applied, 0);
-  assert.equal((await e.DB.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind='idle_blocked'").first()).n, 4);
+  assert.equal((await e.DB.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind='idle_blocked'").first()).n, 3);
   // 清單變了：重送
   const r3 = await (await hook(e, [{ id: 'ib3', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [{ ...blockers[0], approved: true }] }])).json();
   assert.equal(r3.applied, 1);
+  // 擋路的卡被退回（要開發者修）：這時才叫它的負責串
+  const r3b = await (await hook(e, [{ id: 'ib3b', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [{ ...blockers[0], state: 'rejected' }] }])).json();
+  assert.equal(r3b.applied, 1);
+  const dev = (await e.DB.prepare("SELECT owner_thread FROM outbox WHERE kind='idle_blocked' AND at>=0 ORDER BY n DESC LIMIT 4").all()).results.map(r => r.owner_thread);
+  assert.ok(dev.includes('dev-par'));
   // 沒有 blockers：當過期、不處理
   const r4 = await (await hook(e, [{ id: 'ib4', kind: 'idle_blocked', pending: 4 }])).json();
   assert.equal(r4.applied, 0);
