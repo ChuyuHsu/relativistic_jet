@@ -31,9 +31,6 @@ class RetryPlainBaseTest(unittest.TestCase):
         self.assertFalse(mk("TREE", None).conflicts_with("b", "main"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class EmptySquashTest(unittest.TestCase):
     def _repo(self, rev_list, tips, merge_tree, tree_of_tip="TT"):
@@ -66,3 +63,7 @@ class EmptySquashTest(unittest.TestCase):
         r = self._repo(["H", "OLD"], {"OLD"}, lambda tip, b, mb: "TT" if mb == "OLD" else "NEW")
         res = r.stack("main", [("n", "H")])
         self.assertEqual((res.kept, res.empty), ([0], []))
+
+
+if __name__ == "__main__":
+    unittest.main()
