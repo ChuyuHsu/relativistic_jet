@@ -80,22 +80,22 @@ test('看門狗：送審 15 分鐘叫該審的審查串、30 分鐘再叫審查�
   assert.equal((await watchdog(e, T + 60 * 60)).review, 0);
 });
 
-test('看門狗：開發串沒卡在做 15 分鐘 → 叫它領下一張；沒卡可領 → 叫總指揮補卡；30 分鐘內不重叫', async () => {
+test('看門狗：開發串沒卡在做 45 分鐘 → 叫它領下一張；沒卡可領 → 叫總指揮補卡；30 分鐘內不重叫', async () => {
   const e = mkenv();
   await call(e, 'POST', '/api/roster', { roster: ROSTER });
   await call(e, 'POST', '/api/cards', { id: 'N1', title: '下一張', priority: 5 });
   await call(e, 'POST', '/api/cards', { id: 'N2', title: '第二張', priority: 50 });
   assert.deepEqual(await watchdog(e, T), { review: 0, dev: 0, nocard: 0 });                            // 第一次看到：從現在開始算
-  assert.deepEqual(await watchdog(e, T + 5 * 60), { review: 0, dev: 0, nocard: 0 });
-  const r = await watchdog(e, T + 16 * 60);
+  assert.deepEqual(await watchdog(e, T + 30 * 60), { review: 0, dev: 0, nocard: 0 });                 // 45 分鐘前不叫
+  const r = await watchdog(e, T + 46 * 60);
   assert.equal(r.dev, 2);
   const w = await outbox(e, 'watchdog_dev');
   assert.deepEqual(w.map(x => [x.owner_thread, x.card_id]).sort(), [['d1', 'N1'], ['d2', 'N2']]);      // 兩個閒置的各領不同的卡，優先序小的先
   assert.match(w[0].detail, /請領下一張/);
-  assert.deepEqual(await watchdog(e, T + 20 * 60), { review: 0, dev: 0, nocard: 0 });                  // 30 分鐘內不重叫
+  assert.deepEqual(await watchdog(e, T + 60 * 60), { review: 0, dev: 0, nocard: 0 });                  // 30 分鐘內不重叫
   // 30 分鐘後仍沒領、卡被領光 → 沒卡可領：叫總指揮
-  await e.DB.prepare("UPDATE cards SET status='claimed', owner_thread='other', updated_at=? WHERE id IN ('N1','N2')").bind(T + 30 * 60).run();
-  const r2 = await watchdog(e, T + 50 * 60);
+  await e.DB.prepare("UPDATE cards SET status='claimed', owner_thread='other', updated_at=? WHERE id IN ('N1','N2')").bind(T + 50 * 60).run();
+  const r2 = await watchdog(e, T + 80 * 60);
   assert.equal(r2.nocard, 2);
   assert.deepEqual((await outbox(e, 'watchdog_nocard')).map(x => x.owner_thread), ['cmd', 'cmd']);
 });
@@ -109,4 +109,19 @@ test('看門狗：開發串手上有在做的卡就不叫；沒有名冊就跳�
   await watchdog(e, T);
   assert.deepEqual(await watchdog(e, T + 3600), { review: 0, dev: 0, nocard: 0 });
   assert.equal((await outbox(e, 'watchdog_dev')).length, 0);
+});
+
+test('看門狗：閒置超過 2 小時不叫醒，改通知總指揮換串（每段閒置一次）', async () => {
+  const e = mkenv();
+  await call(e, 'POST', '/api/roster', { roster: { ...ROSTER, devs: [ROSTER.devs[0]] } });
+  await call(e, 'POST', '/api/cards', { id: 'N1', title: 'n1' });
+  await watchdog(e, T);
+  assert.equal((await watchdog(e, T + 50 * 60)).dev, 1);                                               // 45 分鐘～2 小時：叫醒
+  const r = await watchdog(e, T + 125 * 60);
+  assert.equal(r.dev, 0); assert.equal(r.replace, 1);
+  assert.equal((await outbox(e, 'watchdog_dev')).length, 1);                                           // 沒有再叫醒開發串
+  assert.deepEqual((await outbox(e, 'watchdog_replace')).map(x => x.owner_thread), ['cmd']);
+  const r2 = await watchdog(e, T + 200 * 60);
+  assert.equal(r2.replace, undefined);                                                                 // 同一段閒置只通知一次
+  assert.equal((await outbox(e, 'watchdog_replace')).length, 1);
 });
