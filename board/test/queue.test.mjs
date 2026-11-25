@@ -1208,3 +1208,28 @@ test('回歸：D1 的 meta.changes 含觸發器列數時，領卡／送審／放
   const ids = msgs.flatMap(m => m.ids);
   assert.equal((await (await call(e, 'POST', '/api/outbox/ack', { actor: 'c', ids })).json()).acked, ids.length);
 });
+
+test('idle_blocked：開發機沒有可測的卡 → 叫醒審查串與擋路卡的負責串；同一批 10 分鐘內不重送；缺 blockers 不處理', async () => {
+  const e = mkenv({ REVIEW_THREADS: 'rev1,rev2', ADMIN_THREADS: 'adm' });
+  await claim(e, 'par', 'dev-par'); await act(e, 'par', 'submit', { commit: SHA, actor: 'w' });
+  const blockers = [{ branch: br('par'), state: 'pending', approved: false, descendants: 3, approved_descendants: 2 },
+                    { branch: 'dev/ghost', state: 'rejected', approved: false, descendants: 1, approved_descendants: 1 }];
+  const r1 = await (await hook(e, [{ id: 'ib1', kind: 'idle_blocked', pending: 5, approved_pending: 3, blockers, detail: 'x' }])).json();
+  assert.equal(r1.applied, 1);
+  const box = (await e.DB.prepare("SELECT owner_thread, detail, branch FROM outbox WHERE kind='idle_blocked' ORDER BY owner_thread").all()).results;
+  assert.deepEqual(box.map(r => r.owner_thread).sort(), ['adm', 'dev-par', 'rev1', 'rev2']);          // 審查串＋擋路卡的負責串＋管理者
+  assert.match(box[0].detail, /開發機沒有可測的卡/);
+  assert.match(box[0].detail, new RegExp(br('par')));
+  assert.equal(box[0].branch, br('par'));
+  // 同一批擋路清單馬上又來：不重送
+  const r2 = await (await hook(e, [{ id: 'ib2', kind: 'idle_blocked', pending: 5, approved_pending: 3, blockers }])).json();
+  assert.equal(r2.applied, 0);
+  assert.equal((await e.DB.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind='idle_blocked'").first()).n, 4);
+  // 清單變了：重送
+  const r3 = await (await hook(e, [{ id: 'ib3', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [{ ...blockers[0], approved: true }] }])).json();
+  assert.equal(r3.applied, 1);
+  // 沒有 blockers：當過期、不處理
+  const r4 = await (await hook(e, [{ id: 'ib4', kind: 'idle_blocked', pending: 4 }])).json();
+  assert.equal(r4.applied, 0);
+  assert.equal(r4.stale, 1);
+});

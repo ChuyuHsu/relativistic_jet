@@ -34,6 +34,7 @@ from .sched_loop import LoopMixin
 from .sched_docs import DocsMixin
 from .sched_batch import BatchMixin
 from .sched_relative import RelativeMixin
+from .sched_idle import IdleMixin
 
 
 def make_pool(cfg):
@@ -60,7 +61,7 @@ def default_resources_ok(cfg) -> bool:
     return True
 
 
-class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, BatchMixin, RelativeMixin):
+class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, BatchMixin, RelativeMixin, IdleMixin):
     def __init__(self, cfg, con, repo, executor, clock: Callable[[], float] = time.time,
                  resources_ok: Optional[Callable[[], bool]] = None,
                  foreign_busy=_foreign_busy, async_fetch: bool = False, source=None):
@@ -432,6 +433,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
                 self._loop_step()
                 self._direct_merge_step()
                 self._dispatch_selftests()
+                self._idle_step()
             return
         if self.draining:
             if self.batch is not None:

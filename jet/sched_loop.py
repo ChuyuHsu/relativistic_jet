@@ -191,8 +191,18 @@ class LoopMixin:
         """背景 loop：一次只跑一個；先處理二分，沒有二分就測最新 main（測過的 main 不重測）。"""
         if not self.cfg.loop_enabled:
             return
-        if any(j.kind in ("baseline", "loopprobe") for j in self.jobs.values()):
-            # 跑的時候只改 state：上一輪的結果與完成時間沿用（workflow_status 是整份取代，不沿用就會把看板的「最近結果」洗成空，
+        probes = [j for j in self.jobs.values() if j.kind == "loopprobe"]
+        base_running = any(j.kind == "baseline" for j in self.jobs.values())
+        par = max(1, self.cfg.loop_probe_parallel)
+        can_more = False
+        if probes and not base_running and len(probes) < par:      # 二分中還有空位：再開一個探測（JET-15）
+            try:
+                st0 = json.loads(store.get_meta(self.con, "loop_bisect") or "null")
+            except ValueError:
+                st0 = None
+            can_more = bool(st0) and st0.get("phase") == "bisect" and not st0.get("queue") and st0["hi"] - st0["lo"] > 1
+        if (probes or base_running) and not can_more:
+            # 跑的時候只改 state：上一輪的結果與完成時間沿用（workflow_status 是整份取代，不沿用就會把看板的「最近結果」洗成 null，
             # 而且 last_run_at 每個 tick 都變，會每個 tick 送一筆；一輪 13 分鐘，一天上萬筆）
             prev = self._wf_prev()
             self._wf_status("bisecting" if store.get_meta(self.con, "loop_bisect") else "running",
@@ -228,8 +238,24 @@ class LoopMixin:
                     return
                 self._loop_conclude(st)
                 return
-            mid = (st["lo"] + st["hi"]) // 2
-            self._launch("loopprobe", "gate", st["cands"][mid], cores, to, base_sha=st["cands"][mid], head_sha=st["cands"][mid])
+            # 同時開最多 probe_parallel 個探測，平均分佈在 (lo, hi) 之間；par＝1 時就是原本的 (lo+hi)//2
+            lo, hi = st["lo"], st["hi"]
+            inflight = {j.head_sha for j in self.jobs.values() if j.kind == "loopprobe"}
+            want = min(par, hi - lo - 1)
+            targets = []
+            for t in range(1, want + 1):
+                idx = min(max(lo + (hi - lo) * t // (want + 1), lo + 1), hi - 1)
+                if idx not in targets:
+                    targets.append(idx)
+            for idx in targets:
+                sha = st["cands"][idx]
+                if sha in inflight:
+                    continue
+                if len(inflight) >= par:
+                    break
+                if not self._launch("loopprobe", "gate", sha, cores, to, base_sha=sha, head_sha=sha):
+                    break
+                inflight.add(sha)
             return
         main = self.main
         if store.get_meta(self.con, "loop_tested") != main:
@@ -309,6 +335,19 @@ class LoopMixin:
         else:
             st["lo"] = max(st["lo"], idx)
         store.set_meta(self.con, "loop_bisect", json.dumps(st))
+        self._cancel_stale_probes(st)
+
+    def _cancel_stale_probes(self, st):
+        """另一個探測讓區間縮小了：落在 (lo, hi] 之外的探測不用跑了，停掉把核還給別人（只有 probe_parallel>1 才會有）。"""
+        for rid, j in list(self.jobs.items()):
+            if j.kind != "loopprobe" or j.head_sha not in st["cands"]:
+                continue
+            idx = st["cands"].index(j.head_sha)
+            if idx <= st["lo"] or idx > st["hi"]:
+                try:
+                    self.executor.cancel(j.handle)
+                finally:
+                    self._release_job(rid, "cancelled")
 
     def _loop_unstable(self, st):
         """二分結案：最後那個提交重測不紅。發 loop_green（detail 寫明抖動、unstable_items 列項目；不點名任何人，也不新增事件種類，看板不用改），狀態回綠，下一輪照常測最新 main。"""

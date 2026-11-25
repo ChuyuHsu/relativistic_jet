@@ -60,6 +60,7 @@ class Config:
     loop_cores: int = 0               # 背景 loop 每個工作用的核數；0＝同 cores.batch_cores
     loop_triage: str = "bisect"      # 背景測試紅了先怎麼找兇手：bisect＝直接二分；code_first＝先發 loop_triage 事件等看板回嫌疑分支（只驗證一次），逾時才二分
     loop_triage_wait_s: int = 900
+    loop_probe_parallel: int = 1      # 背景二分同時開幾個探測（1＝一次一個；2～3 讓二分更快、機器更滿）
     loop_timeout_s: int = 0           # 0＝同 limits 的批測逾時
     nightly_at: str = ""              # 每日完整層時刻 "HH:MM"（本機時間）；空＝不跑。到點對 main 最新版跑 full 層一次，紅了只記錄、不擋 main、不二分
     nightly_cores: int = 0            # 完整層用的核數；0＝同 cores.batch_cores
@@ -162,6 +163,7 @@ def parse(d: dict) -> Config:
         loop_cores=int(((d.get("workflow") or {}).get("loop") or {}).get("cores", 0)),
         loop_triage=str(((d.get("workflow") or {}).get("loop") or {}).get("triage", "bisect")),
         loop_triage_wait_s=int(((d.get("workflow") or {}).get("loop") or {}).get("triage_wait_s", 900)),
+        loop_probe_parallel=int(((d.get("workflow") or {}).get("loop") or {}).get("probe_parallel", 1)),
         loop_timeout_s=int(((d.get("workflow") or {}).get("loop") or {}).get("timeout_s", 0)),
         nightly_at=_nightly_at((((d.get("workflow") or {}).get("nightly") or {}).get("at", ""))),
         nightly_cores=int(((d.get("workflow") or {}).get("nightly") or {}).get("cores", 0)),
@@ -223,6 +225,8 @@ def _validate(c: Config) -> None:
         raise ConfigError("git.branch_patterns 必須是非空字串陣列")
     if c.scope not in ("all", "tracked"):
         raise ConfigError('git.scope 必須是 "all" 或 "tracked"')
+    if not 1 <= c.loop_probe_parallel <= 4:
+        raise ConfigError("workflow.loop.probe_parallel 要是 1～4 的整數")
     if c.relative_ratio < 0 or (c.relative_ratio and c.relative_ratio < 1) or c.relative_min_extra < 0 or c.relative_keep < 1:
         raise ConfigError("policy.relative_ratio 要是 0（不啟用）或 ≥1；relative_min_extra ≥0；relative_keep ≥1")
     try:

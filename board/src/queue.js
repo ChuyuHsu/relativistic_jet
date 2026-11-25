@@ -47,6 +47,8 @@ export async function handleHook(req, env, ctx) {
     load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
   for (const bs of chunk([...new Set(events.filter(e => e.kind === 'loop_culprit' && e.culprit_branch).map(e => String(e.culprit_branch)))], 90))
     load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
+  for (const bs of chunk([...new Set(events.filter(e => e.kind === 'idle_blocked').flatMap(e => (Array.isArray(e.blockers) ? e.blockers : []).slice(0, 10).map(b => b && b.branch).filter(Boolean)).map(String))], 90))
+    load((await db.prepare(`SELECT * FROM cards WHERE branch IN (${bs.map(() => '?').join(',')})`).bind(...bs).all()).results);
   for (const ids of chunk([...new Set(events.filter(e => e.kind === 'loop_culprit' && e.culprit_card).map(e => String(e.culprit_card)))], 90))
     load((await db.prepare(`SELECT * FROM cards WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).all()).results);
   for (const ids of chunk([...new Set(events.filter(e => e.kind === 'drop_checked').flatMap(e => [e.card].filter(Boolean)).map(String))], 90))
@@ -148,6 +150,21 @@ export async function handleHook(req, env, ctx) {
         q('INSERT INTO events(card_id,at,actor,note) VALUES(?,?,?,?)', hid, T, source, '建立（背景循環紅燈自動開卡）');
         post([...new Set([cul?.owner_thread || '', ...(admins.length ? admins : [])])], { id: hid }, 'loop_culprit', null, `急修卡 ${hid}：${bodyText}`.slice(0, 500));
         return;
+      }
+      if (kind === 'idle_blocked') {   // 開發機沒有可測的卡：{pending, approved_pending, blockers:[{branch,state,approved,descendants,approved_descendants}]}；叫醒擋路卡的審查串與負責串，擋路的排最前（JET-13）
+        const bl = (Array.isArray(e.blockers) ? e.blockers : []).slice(0, 10).filter(b => b && b.branch).map(b => ({ branch: String(b.branch).slice(0, 120), state: String(b.state || '').slice(0, 30), approved: !!b.approved, descendants: Number(b.descendants) || 0, approved_descendants: Number(b.approved_descendants) || 0 }));
+        if (!bl.length) { stale++; hl(e, 'idle_blocked 要帶 blockers 陣列（每筆有 branch）'); return; }
+        const sig = JSON.stringify(bl.map(b => [b.branch, b.state, b.approved]));
+        const prev = await db.prepare("SELECT value FROM meta WHERE key='idle_blocked'").first();
+        let pv = null; try { pv = prev ? JSON.parse(prev.value) : null; } catch { pv = null; }
+        if (pv && pv.sig === sig && T - (Number(pv.at) || 0) < 600) { dup++; return; }   // 同一批擋路清單 10 分鐘內不重送（排隊器每 15 分鐘提醒一次）
+        q("INSERT INTO meta(key,value,updated_at) VALUES('idle_blocked',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify({ sig, at: T, blockers: bl, pending: Number(e.pending) || 0, approved_pending: Number(e.approved_pending) || 0 }), T);
+        // 擋路的卡排最前：priority 設成 0 以下的最小值不動資料，改在 meta 留清單，看板頁與送審信排序時照它排
+        const cards = bl.map(b => byBranch.get(b.branch)).filter(Boolean);
+        const owners = [...new Set([...list(env.REVIEW_THREADS), ...cards.map(c => c.owner_thread).filter(Boolean), ...admins])];
+        const text = `開發機沒有可測的卡（待自測 ${Number(e.pending) || 0}、已放行 ${Number(e.approved_pending) || 0}）。請優先處理擋路的卡：` + bl.slice(0, 6).map(b => `${b.branch}（${b.approved ? '已放行' : '待放行'}・${b.state}，擋 ${b.approved_descendants} 張已放行子卡）`).join('、');
+        post(owners.length ? owners : [''], cards[0] || null, 'idle_blocked', bl[0].branch, text.slice(0, 500));
+        applied++; return;
       }
       if (kind === 'state_snapshot') {   // 排隊器現況快照：{at?, branches:[{branch,state,commit,approved_sha,retest}]}；補回被當成過期丟掉的進度事件（BD-06）
         const arr = Array.isArray(e.branches) ? e.branches.slice(0, 500) : null;
@@ -381,6 +398,7 @@ const NEXT = {
   drop_rejected: '要放棄請先把內容接過去（接手的卡要包含缺的檔），或跟總指揮說真的不要（帶 discard_reason）。卡已回到原階段。',
   drop_discarded: '請事後看一眼：卡號、不在 main 的改動筆數與放棄原因都在上面。',
   loop_triage: 'main 紅了：讀通知裡區間的提交與紅項原文，判斷最可能的分支（看 git diff，不要先跑測試），用 POST /api/triage {actor, main_sha, verdict:"suspects"|"unknown", suspects:[{branch, commit?, reason?}]} 回報；看不出來就 verdict unknown，排隊器會自己二分。',
+  idle_blocked: '開發機現在沒有可測的卡，機器閒著：審查者請先審擋路的卡（清單最前面的），負責串請把被退回或撞檔的父卡修好；擋路的卡處理掉，子卡才會開始自測。',
   loop_culprit: 'main 在背景循環測出紅燈，兇手已 bisect 出來：請負責串優先領急修卡（priority 0）修好，不要等人催。',
   review_requested: '請看 git diff 審查（detail 若帶「上次退回原因」，先確認那一點真的改掉）；通過就在看板對這張卡 approve（帶審過的 commit），要改就 reject 並寫原因。',
   review_rejected: '審查退回：請依原因修改，改好 push 後對這張卡 submit 新版本。',
