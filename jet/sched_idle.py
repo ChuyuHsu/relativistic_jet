@@ -1,6 +1,7 @@
 """沒有可測的卡就立刻通知（JET-13）：自測佇列空、或剩下的卡都被擋（沒放行、父卡沒放行／被退回），整機閒置時
 送一筆機器事件 idle_blocked，內容是「擋路清單」（擋住最多卡的最上游那一張排最前）。看板收到後叫醒該審的審查串、把擋路的卡排最前。
-同一批擋路清單只在第一次發現時送一次，仍然閒置每 IDLE_REMIND_S 秒再提醒一次；有可測的卡或有在跑的自測就重置。"""
+去重鍵是「擋路卡的分支集合」（不含計數、放行與否；退回／暫停的卡加 ! 記號，因為要開發者動手）：同一批只在第一次發現時送一次，仍然閒置每 IDLE_REMIND_S 秒最多再提醒一次，
+集合變了才立即送。有可測的卡或有在跑的自測時不重置去重鍵（機器一下忙一下閒不會洗版）；沒有待自測的卡才清掉。"""
 import json
 from typing import Dict, List
 
@@ -9,7 +10,7 @@ from .sched_common import S
 
 
 class IdleMixin:
-    IDLE_REMIND_S = 900           # 仍然沒人處理：每 15 分鐘再送一次
+    IDLE_REMIND_S = 3600          # 同一批擋路卡仍然沒人處理：每 60 分鐘最多再送一次（擋路卡集合變了才立即送）
     IDLE_TOP = 10                 # 擋路清單最多列幾張
 
     def _testable(self, r) -> bool:
@@ -41,20 +42,20 @@ class IdleMixin:
                 if self._approved(r):
                     e["approved_descendants"] += 1
         out = sorted(by_root.values(), key=lambda e: (-e["approved_descendants"], -e["descendants"], e["approved"], e["branch"]))
-        return out[:self.IDLE_TOP]
+        return out
 
     def _idle_step(self):
         if any(j.kind in ("selftest", "recheck") for j in self.jobs.values()):
-            self._idle_reset()
-            return
+            return                                 # 有自測在跑：不報，也不動去重鍵
         pending = store.list_branches(self.con, S.PENDING.value)
         if not pending or any(self._testable(r) for r in pending):
-            self._idle_reset()                     # 沒有待測的卡（全空）不算擋路；有可測的卡只是在等核
-            if not pending:
-                return
-            return
-        blockers = self._idle_blockers(pending)
-        sig = json.dumps([[b["branch"], b["state"], b["approved"]] for b in blockers], ensure_ascii=False)
+            if not pending:                        # 沒有待自測的卡：清掉去重鍵，之後再有擋路就是新的一批
+                self._idle_reset()
+            return                                 # 有可測的卡只是在等核：不算擋路，也不動去重鍵
+        allb = self._idle_blockers(pending)
+        # 退回／暫停的卡要開發者動手，狀態變成這種算新的一批（加 ! 記號）；其餘狀態與計數、放行與否的變動都不算
+        sig = json.dumps(sorted(b["branch"] + ("!" if b["state"] in ("rejected", "halted") else "") for b in allb), ensure_ascii=False)   # 去重鍵用全部擋路卡（不是只看前 10 名），排名小變動不算新的一批
+        blockers = allb[:self.IDLE_TOP]
         now = self.clock()
         last_sig, last_at = store.get_meta(self.con, "idle_sig"), float(store.get_meta(self.con, "idle_at", "0") or 0)
         if sig == last_sig and now - last_at < self.IDLE_REMIND_S:

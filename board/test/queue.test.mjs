@@ -1225,8 +1225,11 @@ test('idle_blocked：開發機沒有可測的卡 → 叫醒審查串與擋路卡
   const r2 = await (await hook(e, [{ id: 'ib2', kind: 'idle_blocked', pending: 5, approved_pending: 3, blockers }])).json();
   assert.equal(r2.applied, 0);
   assert.equal((await e.DB.prepare("SELECT COUNT(*) AS n FROM outbox WHERE kind='idle_blocked'").first()).n, 3);
-  // 清單變了：重送
-  const r3 = await (await hook(e, [{ id: 'ib3', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [{ ...blockers[0], approved: true }] }])).json();
+  // 只有計數／放行變了（集合同一批）：不重送
+  const r3a = await (await hook(e, [{ id: 'ib3a', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [{ ...blockers[0], approved: true, approved_descendants: 1 }, blockers[1]] }])).json();
+  assert.equal(r3a.applied, 0);
+  // 擋路卡集合變了：立即重送
+  const r3 = await (await hook(e, [{ id: 'ib3', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [blockers[0]] }])).json();
   assert.equal(r3.applied, 1);
   // 擋路的卡被退回（要開發者修）：這時才叫它的負責串
   const r3b = await (await hook(e, [{ id: 'ib3b', kind: 'idle_blocked', pending: 4, approved_pending: 2, blockers: [{ ...blockers[0], state: 'rejected' }] }])).json();

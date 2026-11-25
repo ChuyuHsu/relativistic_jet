@@ -154,10 +154,10 @@ export async function handleHook(req, env, ctx) {
       if (kind === 'idle_blocked') {   // 開發機沒有可測的卡：{pending, approved_pending, blockers:[{branch,state,approved,descendants,approved_descendants}]}；叫醒擋路卡的審查串與負責串，擋路的排最前（JET-13）
         const bl = (Array.isArray(e.blockers) ? e.blockers : []).slice(0, 10).filter(b => b && b.branch).map(b => ({ branch: String(b.branch).slice(0, 120), state: String(b.state || '').slice(0, 30), approved: !!b.approved, descendants: Number(b.descendants) || 0, approved_descendants: Number(b.approved_descendants) || 0 }));
         if (!bl.length) { stale++; hl(e, 'idle_blocked 要帶 blockers 陣列（每筆有 branch）'); return; }
-        const sig = JSON.stringify(bl.map(b => [b.branch, b.state, b.approved]));
+        const sig = JSON.stringify(bl.map(b => b.branch + (b.state === 'rejected' || b.state === 'halted' ? '!' : '')).sort());   // 去重鍵＝擋路卡集合（不含計數／放行；退回／暫停加 !，要開發者動手）
         const prev = await db.prepare("SELECT value FROM meta WHERE key='idle_blocked'").first();
         let pv = null; try { pv = prev ? JSON.parse(prev.value) : null; } catch { pv = null; }
-        if (pv && pv.sig === sig && T - (Number(pv.at) || 0) < 600) { dup++; return; }   // 同一批擋路清單 10 分鐘內不重送（排隊器每 15 分鐘提醒一次）
+        if (pv && pv.sig === sig && T - (Number(pv.at) || 0) < 3600) { dup++; return; }   // 同一批擋路卡 60 分鐘內不重送；集合變了才立即送
         q("INSERT INTO meta(key,value,updated_at) VALUES('idle_blocked',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", JSON.stringify({ sig, at: T, blockers: bl, pending: Number(e.pending) || 0, approved_pending: Number(e.approved_pending) || 0 }), T);
         // 擋路的卡排最前：priority 設成 0 以下的最小值不動資料，改在 meta 留清單，看板頁與送審信排序時照它排
         const cards = bl.map(b => byBranch.get(b.branch)).filter(Boolean);

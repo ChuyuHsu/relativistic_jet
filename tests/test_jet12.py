@@ -150,14 +150,48 @@ class IdleBlockedTest(SchedBase):
         s._idle_step()
         self.assertEqual(len(self._events()), 2)
 
+    def test_dedupe_key_is_blocker_set_not_counts_and_survives_flapping(self):
+        s = self._setup()
+        s.jobs = {}
+        s._idle_step()
+        self.assertEqual(len(self._events()), 1)
+        self.approve_all("a")                             # 放行狀態變了、被擋子卡數變了，但擋路卡集合還是同一批（a 還在 pending）
+        # a 放行後其實變成可測：機器忙一下又閒下來——模擬「有自測在跑」再回到「又沒有可測的卡」
+        s.jobs = {1: NS(kind="selftest", units=1, branch="x")}
+        s._idle_step()
+        s.jobs = {}
+        store.revoke(self.con, "a", "t")                  # 又變回沒放行
+        s._idle_step()
+        self.assertEqual(len(self._events()), 1)          # 同一批擋路卡 60 分鐘內不重送，閃爍也不洗版
+        t0 = s.clock()
+        s.clock = lambda: t0 + s.IDLE_REMIND_S - 5
+        s._idle_step()
+        self.assertEqual(len(self._events()), 1)
+        s.clock = lambda: t0 + s.IDLE_REMIND_S + 5
+        s._idle_step()
+        self.assertEqual(len(self._events()), 2)          # 滿 60 分鐘才再提醒一次
+
+    def test_new_blocker_set_sends_immediately(self):
+        s = self._setup()
+        s.jobs = {}
+        s._idle_step()
+        self.assertEqual(len(self._events()), 1)
+        self.repo.add("z")                                # 多一條沒放行的獨立分支＝多一個擋路卡：集合變了，立即送
+        self.go(2)
+        self.con.execute("DELETE FROM events WHERE kind='idle_blocked' AND id NOT IN (SELECT MAX(id) FROM events WHERE kind='idle_blocked')")
+        s.jobs = {}
+        s._idle_step()
+        names = {b["branch"] for b in self._events()[-1]["blockers"]}
+        self.assertEqual(names, {"a", "z"})
+
     def test_resets_when_testable_or_running(self):
         s = self._setup()
         s.jobs = {}
         s._idle_step()
         self.assertEqual(len(self._events()), 1)
-        self.approve_all("a")                             # 父卡放行了：有可測的卡 → 不再算擋路，重置
+        self.approve_all("a")                             # 父卡放行了：有可測的卡 → 不再算擋路、不送（去重鍵不動，閃爍不洗版）
         s._idle_step()
-        self.assertEqual(store.get_meta(self.con, "idle_sig"), "")
+        self.assertEqual(store.get_meta(self.con, "idle_sig"), '["a"]')
         self.assertEqual(len(self._events()), 1)
         s.jobs = {1: NS(kind="selftest", units=1, branch="x")}   # 有自測在跑：不報
         store.set_meta(self.con, "idle_sig", "")
