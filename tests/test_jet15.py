@@ -42,12 +42,14 @@ class OldParentTipTest(Base):
         s._anc_cache = {}
         self.assertTrue(s._stale_parent(store.get_branch(self.con, "c")))
 
-    def test_squashed_tips_include_parent_history(self):
+    def test_parent_history_goes_to_old_tips_not_global(self):
         s = self._pair()
         self.con.execute("INSERT INTO events(kind,branch,detail,at,commit_sha) VALUES('pushed','p','x',1.0,'oldtip')")
         self.repo.squashed_tips = frozenset()
+        self.repo.old_tips = {}
         s._sync_squashed_tips()
-        self.assertIn("oldtip", self.repo.squashed_tips)
+        self.assertIn("oldtip", self.repo.old_tips.get("p", ()))            # 只放在「未合父卡 → 歷來尖端」，不進全域名單
+        self.assertNotIn("oldtip", self.repo.squashed_tips)
 
 
 if __name__ == "__main__":

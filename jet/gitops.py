@@ -14,7 +14,7 @@ import re
 import shutil
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ContextManager, Dict, Iterator, List, Optional, Protocol, Sequence, Tuple
 
 MIN_GIT = (2, 38)
@@ -43,6 +43,7 @@ class StaleBranch(GitError):
 class StackResult:
     kept: List[int]        # 疊進去的項目在輸入裡的位置（跟前面撞檔的被略過）
     prefixes: List[str]    # prefixes[i]＝疊完 kept[0..i] 之後的提交 sha
+    empty: List[int] = field(default_factory=list)   # 壓出來內容是空的（跟前一個 tree 一樣）的項目位置：不算疊進去，呼叫端不准標已合入
 
 
 class Repo(Protocol):
@@ -99,6 +100,7 @@ class GitRepo:
         self.mirror = os.path.join(self.work_dir, "mirror.git")
         self.wt_root = os.path.join(self.work_dir, "wt")
         self.squashed_tips: frozenset = frozenset()    # 已合入（squash）的分支當時的尖端，由排隊器每輪更新
+        self.old_tips: dict = {}                       # 還沒合的父卡 → 它歷來的尖端；只在同一次 stack 裡對排在它後面的子卡有效
         self._check_version()
         os.makedirs(self.work_dir, exist_ok=True)
         if not os.path.isdir(self.mirror):
@@ -239,17 +241,17 @@ class GitRepo:
             raise GitError("兩個提交沒有共同祖先")
         return r.stdout.strip().split()[0]
 
-    def _merge_base_for(self, branch_sha: str, base_sha: str) -> str:
+    def _merge_base_for(self, branch_sha: str, base_sha: str, extra=()) -> str:
         """分支跟 base 的共同祖先；疊卡的父卡被 squash 進 main 時，要改用「父卡的舊尖端」（squashed_tips）。
         squash 後 main 上只有一個內容相同的新提交，普通 merge-base 會退回父卡開出來之前，三方合併就把父卡的改動
         當成兩邊各改一次（子卡又動到同一處就撞檔）。做法：分支上、不在 base 裡的提交（新→舊）中，第一個是已合入分支的
         舊尖端的，就當共同祖先；沒有就照舊用 merge-base。"""
-        tips = self.squashed_tips
+        tips = self.squashed_tips | frozenset(extra)        # extra：同一次疊裡，前面已疊進去的父卡歷來的尖端（只對這次的子卡有效）
         if tips:
             r = self._git("rev-list", "--topo-order", branch_sha, f"^{base_sha}", check=False)
             if r.returncode == 0:
                 for c in r.stdout.split():
-                    if c in tips:
+                    if c != branch_sha and c in tips:       # 分支自己的尖端不能當共同祖先，否則自己的改動全被當成「已在 main」而壓成空提交
                         return c
         return self._merge_base(branch_sha, base_sha)
 
@@ -427,6 +429,8 @@ class GitRepo:
         kept: List[int] = []
         prefixes: List[str] = []
         kept_heads: List[str] = []
+        empty: List[int] = []
+        chain_old: set = set()                     # 前面已疊進去的項目歷來的尖端（疊卡：父卡舊尖端）
         for i, (_name, b) in enumerate(items):
             # 已疊進去而且是這條祖先的分支（堆疊的父）：以最新的那個當共同祖先
             mb = None
@@ -434,12 +438,21 @@ class GitRepo:
                 if mb is None or self._is_ancestor(mb, c):
                     mb = c
             if mb is None:
-                mb = self._merge_base_for(b, tip)
+                mb = self._merge_base_for(b, tip, chain_old)
             tree = self._merge_tree(tip, b, mb)
             if tree is None:
                 tree = self._retry_plain_base(tip, b, mb)     # 用「已合入分支舊尖端」當共同祖先算出撞檔時，再用普通 merge-base 算一次
             if tree is None:
                 continue
+            tip_tree = self._out("rev-parse", f"{tip}^{{tree}}")
+            if tree == tip_tree:                         # 壓出來什麼都沒變：可能共同祖先挑錯（把自己的改動當成已在 main），改用普通 merge-base 再算
+                alt = self._retry_plain_base(tip, b, mb)
+                if alt is not None and alt != tip_tree:
+                    tree = alt
+                else:
+                    empty.append(i)                      # 真的是空的：不疊（呼叫端要擋，不准標已合入）
+                    continue
+            chain_old |= set(self.old_tips.get(_name, ()))
             subject = self._out("log", "-1", "--format=%s", b) or "squash"
             when = self._out("log", "-1", "--format=%cI", b)
             env = dict(_IDENT, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
@@ -448,7 +461,7 @@ class GitRepo:
             kept.append(i)
             prefixes.append(tip)
             kept_heads.append(b)
-        return StackResult(kept, prefixes)
+        return StackResult(kept, prefixes, empty)
 
     # ---- worktree ----
     def worktree(self, sha: str) -> "_Worktree":

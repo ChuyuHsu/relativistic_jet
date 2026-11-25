@@ -71,6 +71,8 @@ class SelftestMixin:
             res = self.repo.stack(self.main, [(x["name"], x["head_sha"]) for x in chain])
             if len(res.kept) != len(chain):
                 why = "疊不上 main（撞檔）" if len(chain) == 1 else "疊不上 main 加父卡（撞檔）"
+                if getattr(res, "empty", None):
+                    why = "壓合結果是空的（內容已在 main？不測也不合）"
                 store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason=why)
                 store.add_event(c, "conflict", r["name"], "自測前" + why)
                 continue

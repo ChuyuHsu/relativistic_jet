@@ -1105,11 +1105,12 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
                                 (S.MERGED.value, self.SQUASHED_TIPS_MAX)).fetchall()
         tips = {r[1] for r in rows if r[1]}
         tips |= self._hist_heads([r[0] for r in rows[:60]])
+        self.repo.squashed_tips = frozenset(tips)
         parents = {r[0] for r in self.con.execute(
             "SELECT DISTINCT parent FROM branches WHERE parent IS NOT NULL AND state NOT IN (?,?)",
             (S.MERGED.value, S.HALTED.value)).fetchall()}
-        tips |= self._hist_heads(sorted(parents))
-        self.repo.squashed_tips = frozenset(tips)
+        if hasattr(self.repo, "old_tips"):       # 未合父卡的歷來尖端不進全域名單（否則父卡自己疊時會把自己的尖端當共同祖先）
+            self.repo.old_tips = {n: frozenset(self._hist_heads([n])) for n in parents}
 
     def _after_merge(self, names, new_main, failed: Optional[Set[str]], main_before: str):
         """合入後：基準、刪分支、子分支脫離、撞檔檢查。"""

@@ -34,8 +34,9 @@ class LoopMixin:
             main = self.repo.main_sha()
             res = self.repo.stack(main, [(r["name"], r["head_sha"])])
             if len(res.kept) != 1:
-                store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason="疊不上 main（撞檔）")
-                store.add_event(c, "conflict", r["name"], "直接合入前疊不上 main")
+                why = "壓合結果是空的（內容已在 main？不合入，避免標成已合入卻沒有內容）" if getattr(res, "empty", None) else "疊不上 main（撞檔）"
+                store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason=why)
+                store.add_event(c, "conflict", r["name"], "直接合入前" + why)
                 continue
             new = res.prefixes[0]
             store.apply_event(c, r["name"], Event.BATCH_START)
