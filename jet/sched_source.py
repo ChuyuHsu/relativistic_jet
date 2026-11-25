@@ -301,7 +301,17 @@ class SourceMixin:
         key = (p["head_sha"], r["head_sha"])
         if key not in self._anc_cache:
             try:
-                self._anc_cache[key] = bool(self.repo.is_ancestor(p["head_sha"], r["head_sha"]))
+                ok = bool(self.repo.is_ancestor(p["head_sha"], r["head_sha"]))
+                if not ok:
+                    # 父卡改版了，但子卡疊在父卡「更早的某個尖端」上：疊的時候只重放子卡自己那一段（以舊尖端當共同祖先），不算過期（JET-22）
+                    for h in self._hist_heads([p["name"]]):
+                        try:
+                            if h != p["head_sha"] and self.repo.is_ancestor(h, r["head_sha"]):
+                                ok = True
+                                break
+                        except Exception:
+                            continue                          # 舊尖端已不在副本裡：略過這一個
+                self._anc_cache[key] = ok
             except Exception:
                 self._anc_cache[key] = True               # 查不出來就不擋（不誤殺）；真正的疊不上由 stack 擋
             if len(self._anc_cache) > 5000:

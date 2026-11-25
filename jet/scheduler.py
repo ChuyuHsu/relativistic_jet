@@ -1085,13 +1085,31 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
 
     SQUASHED_TIPS_MAX = 300
 
+    def _hist_heads(self, names) -> set:
+        """這些分支「曾經有過」的每一個尖端（事件紀錄裡的提交碼；最近 400 筆）。"""
+        names = [n for n in names if n]
+        if not names:
+            return set()
+        q = ",".join("?" * len(names))
+        rows = self.con.execute(f"SELECT DISTINCT commit_sha FROM events WHERE branch IN ({q}) AND commit_sha IS NOT NULL "
+                                f"ORDER BY id DESC LIMIT 400", names).fetchall()
+        return {r[0] for r in rows if r[0]}
+
     def _sync_squashed_tips(self):
-        """把最近已合入分支的舊尖端交給 git 層：疊卡的父卡 squash 進 main 後，子卡只重放「父卡舊尖端..子卡」那一段。"""
+        """把「舊尖端」交給 git 層當共同祖先：疊卡的父卡 squash 進 main（或父卡改版）後，子卡只重放「父卡舊尖端..子卡」那一段，
+        等於 git rebase --onto main <父卡舊尖端>（JET-22）。除了已合入分支的最後尖端，還包含它們歷來的每個尖端、
+        以及還沒合的父卡歷來的尖端（子卡可能是疊在父卡更早的版本上）。"""
         if not hasattr(self.repo, "squashed_tips"):
             return
-        rows = self.con.execute("SELECT head_sha FROM branches WHERE state=? ORDER BY updated_at DESC LIMIT ?",
+        rows = self.con.execute("SELECT name, head_sha FROM branches WHERE state=? ORDER BY updated_at DESC LIMIT ?",
                                 (S.MERGED.value, self.SQUASHED_TIPS_MAX)).fetchall()
-        self.repo.squashed_tips = frozenset(r[0] for r in rows if r[0])
+        tips = {r[1] for r in rows if r[1]}
+        tips |= self._hist_heads([r[0] for r in rows[:60]])
+        parents = {r[0] for r in self.con.execute(
+            "SELECT DISTINCT parent FROM branches WHERE parent IS NOT NULL AND state NOT IN (?,?)",
+            (S.MERGED.value, S.HALTED.value)).fetchall()}
+        tips |= self._hist_heads(sorted(parents))
+        self.repo.squashed_tips = frozenset(tips)
 
     def _after_merge(self, names, new_main, failed: Optional[Set[str]], main_before: str):
         """合入後：基準、刪分支、子分支脫離、撞檔檢查。"""
