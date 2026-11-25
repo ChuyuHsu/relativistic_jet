@@ -33,6 +33,7 @@ from .sched_selftest import SelftestMixin
 from .sched_loop import LoopMixin
 from .sched_docs import DocsMixin
 from .sched_batch import BatchMixin
+from .sched_relative import RelativeMixin
 
 
 def make_pool(cfg):
@@ -59,7 +60,7 @@ def default_resources_ok(cfg) -> bool:
     return True
 
 
-class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, BatchMixin):
+class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, BatchMixin, RelativeMixin):
     def __init__(self, cfg, con, repo, executor, clock: Callable[[], float] = time.time,
                  resources_ok: Optional[Callable[[], bool]] = None,
                  foreign_busy=_foreign_busy, async_fetch: bool = False, source=None):
@@ -885,6 +886,11 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
             if res is None:
                 continue
             self.con.execute("UPDATE runs SET exit_code=? WHERE id=?", (res.exit_code, rid))
+            if res.status == "fail" or j.kind == "baseline":
+                try:
+                    res = self._apply_relative(rid, j.kind, res)        # 計時類項目改比相對值（policy.relative_ratio>0 才動）
+                except Exception as e:
+                    log.warning("相對判定失敗（照舊判定）：%r", e)
             self._release_job(rid, res.status)
             if res.status not in ("infra", "cancelled"):
                 self._infra_streak = 0

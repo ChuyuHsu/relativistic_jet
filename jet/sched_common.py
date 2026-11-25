@@ -11,6 +11,15 @@ MAX_OVERLOAD_RETRY = 2        # 超載造成的逾時最多重排幾次，再逾
 UNKNOWN_GRACE_S = 120         # 掃過遠端後，放行版本（不是現在的頭）還解不出來超過這麼久，才當「內容不同」
 
 
+def is_doc_path(path: str) -> bool:
+    """純文件的路徑：*.md 或 docs/ 底下（JET-11：只改這種檔的提交不會讓測試變紅，不當嫌疑、不觸發純文件暫停）。"""
+    return path.endswith(".md") or path.startswith("docs/")
+
+
+def docs_only_files(files) -> bool:
+    return bool(files) and all(is_doc_path(f) for f in files)
+
+
 @dataclass
 class Running:
     handle: object

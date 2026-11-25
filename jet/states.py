@@ -31,6 +31,7 @@ class Event(str, Enum):
     RESUME = "resume"                  # 人工恢復
     RETRY = "retry"                    # 基礎設施錯誤，自測重跑
     DOCS_MERGED = "docs_merged"        # 純文件分支放行後直接合入
+    IN_MAIN = "in_main"                # 放行的提交本來就已經是 main 的祖先（別條路進了 main）：直接標已合入
 
 
 class IllegalTransition(Exception):
@@ -65,6 +66,10 @@ for _s in (S.SELFTESTING, S.SELFTEST_GREEN, S.QUEUED):
 # 放行／撤回只改記號，不改狀態（排隊中撤回→回自測綠）
 _T[(S.QUEUED, E.REVOKE)] = S.SELFTEST_GREEN
 _NOOP = {E.APPROVE, E.REVOKE}
+
+# 放行的提交已在 main：任何非終態直接標已合入（JET-11）
+for _s in (S.PENDING, S.SELFTESTING, S.SELFTEST_GREEN, S.QUEUED, S.REJECTED, S.HALTED):
+    _T[(_s, E.IN_MAIN)] = S.MERGED
 
 TERMINAL = {S.MERGED}
 

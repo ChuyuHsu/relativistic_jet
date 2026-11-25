@@ -131,8 +131,19 @@ class LoopMixin:
             rows = [r for r in allrows if r["state"] != S.MERGED.value]
             rows += [r for r in allrows if r["state"] == S.MERGED.value and (r["updated_at"] or 0) >= store.now() - self.SNAPSHOT_MERGED_S]
             branches = [{"branch": r["name"], "state": r["state"], "commit": r["head_sha"],
-                         "approved_sha": r["approved_sha"], "retest": r["retest"] or 0}
+                         "approved_sha": r["approved_sha"], "retest": r["retest"] or 0,
+                         "reject_reason": r["reject_reason"]}
                         for r in rows[:self.SNAPSHOT_MAX]]
+            # 清單上放行了、但排隊器沒在管的分支（例如純文件直接推進 main、分支已不存在）：放行的提交若已是 main 的祖先，
+            # 在快照裡直接列成 merged，看板才不會一直報「放行版本不在快照」
+            tracked = {r["name"] for r in allrows}
+            for name, e in sorted((getattr(self, "_entries", None) or {}).items()):
+                ap = e.get("approved_sha")
+                if name in tracked or not ap or len(branches) >= self.SNAPSHOT_MAX:
+                    continue
+                if hasattr(self, "_sha_in_main") and self._sha_in_main(ap):
+                    branches.append({"branch": name, "state": S.MERGED.value, "commit": ap, "approved_sha": ap,
+                                     "retest": e.get("retest") or 0, "reject_reason": None})
             # 舊的快照一律刪掉只留最新一筆：看板連不上時不會一直堆，恢復後也只送一筆（已送出的不會再被讀）
             self.con.execute("DELETE FROM events WHERE kind='state_snapshot'")
             store.emit(self.con, "state_snapshot", None, {"at": now, "branches": branches}, force=True)
@@ -149,6 +160,21 @@ class LoopMixin:
         if store.get_meta(self.con, "wf_status") != key:
             store.set_meta(self.con, "wf_status", key)
             store.emit(self.con, "workflow_status", None, d, force=True)
+
+    def _drop_docs_commits(self, cands):
+        """二分／嫌疑名單去掉只改 *.md／docs/ 的提交（它們不可能讓測試變紅，也不用測）；讀不到檔案清單的提交留著。"""
+        if not cands or not hasattr(self.repo, "commit_files"):
+            return cands
+        from .sched_common import docs_only_files
+        keep = []
+        for c in cands:
+            try:
+                files = self.repo.commit_files(c)
+            except Exception:
+                files = []
+            if not docs_only_files(files):
+                keep.append(c)
+        return keep
 
     def _wf_prev(self):
         """上一筆 workflow_status 的 loop 部分（沒有或壞掉回空 dict）。"""
@@ -223,6 +249,7 @@ class LoopMixin:
             return
         green = store.get_meta(c, "loop_green")
         cands = self.repo.commits_between(green, sha) if green and hasattr(self.repo, "commits_between") else []
+        cands = self._drop_docs_commits(cands)
         store.emit(c, "loop_red", None, {"main_sha": sha, "failed_items": sorted(new_red), "detail": f"{len(cands)} 個提交待二分"}, force=True)
         self._wf_status("bisecting" if len(cands) > 1 else "red", main_sha=sha, last_run_at=self.clock(),
                         last_result="red", failed_items=sorted(new_red))

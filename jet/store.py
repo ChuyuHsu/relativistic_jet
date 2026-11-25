@@ -78,7 +78,7 @@ def flaky_items(con, layer="gate", n=5) -> set:
 # ---- 狀態 ----
 # 哪些狀態轉移要對外報：事件種類 → webhook 事件名
 _EVENT_KIND = {Event.PUSHED: "pushed", Event.SELFTEST_PASS: "tested_green", Event.SELFTEST_FAIL: "tested_red",
-               Event.READY: "queued", Event.BATCH_MERGED: "merged", Event.DOCS_MERGED: "merged"}
+               Event.READY: "queued", Event.BATCH_MERGED: "merged", Event.DOCS_MERGED: "merged", Event.IN_MAIN: "merged"}
 
 
 def apply_event(con, name, event: Event, **fields) -> State:

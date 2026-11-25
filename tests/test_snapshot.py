@@ -43,7 +43,7 @@ class SnapshotTest(Base):
             self.assertEqual(by["a"]["state"], "merged")
         self.assertIn("b", by)
         b = by["b"]
-        self.assertEqual(set(b), {"branch", "state", "commit", "approved_sha", "retest"})
+        self.assertEqual(set(b), {"branch", "state", "commit", "approved_sha", "retest", "reject_reason"})
         self.assertEqual(b["commit"], "b-1")
         self.assertEqual(d["at"], self.now[0])
 

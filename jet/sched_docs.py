@@ -13,7 +13,7 @@ from .batch import GREEN, RED, PENDING, ladder, judge
 from .executor import Job
 from .gitops import MainMoved
 from .states import Event
-from .sched_common import (S, log, MAX_OVERLOAD_RETRY, UNKNOWN_GRACE_S, Running, ActiveBatch)
+from .sched_common import (S, log, MAX_OVERLOAD_RETRY, UNKNOWN_GRACE_S, Running, ActiveBatch, docs_only_files)
 
 
 class DocsMixin:
@@ -28,6 +28,13 @@ class DocsMixin:
         return r["docs_only"] == 1 and not self._docs_paused()
 
     def _note_docs_merge(self, name, sha, main_before):
+        # 真的只改 *.md／docs/ 的合入不會讓測試變紅：不記進「疑似誤判」名單（JET-11）；分類說是純文件、實際卻改了別的檔才記
+        try:
+            files = self.repo.files_between(main_before, sha) if hasattr(self.repo, "files_between") else []
+        except Exception:
+            files = []
+        if docs_only_files(files):
+            return
         raw = store.get_meta(self.con, "docs_merges")
         try:
             lst = json.loads(raw) if raw else []

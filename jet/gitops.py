@@ -113,6 +113,21 @@ class GitRepo:
         except GitError:
             return []
 
+    def commit_files(self, sha: str) -> List[str]:
+        """這個提交（相對第一親代）改了哪些檔；讀不到回空（呼叫端要把空當「不知道」）。"""
+        try:
+            return self._git("diff", "--name-only", f"{sha}^", sha).stdout.split("\n")[:-1] or \
+                self._git("show", "--name-only", "--format=", sha).stdout.split()
+        except GitError:
+            return []
+
+    def files_between(self, a: str, b: str) -> List[str]:
+        """a 到 b 之間改了哪些檔；讀不到回空。"""
+        try:
+            return [x for x in self._git("diff", "--name-only", a, b).stdout.split("\n") if x]
+        except GitError:
+            return []
+
     def commit_subject(self, sha: str) -> str:
         try:
             return self._git("log", "-1", "--format=%s", sha).stdout.strip()[:200]

@@ -155,6 +155,21 @@ class SourceMixin:
                 return "no" if now - since >= UNKNOWN_GRACE_S else "unknown"
         return "yes" if cid == row["content_id"] else "no"
 
+    def _sha_in_main(self, sha) -> bool:
+        """sha 是不是目前 main 的祖先（40 碼才算；同一個 main 只問一次 git）。"""
+        if not sha or len(sha) != 40:
+            return False
+        cache = getattr(self, "_inmain_cache", None)
+        if cache is None or cache[0] != self.main:
+            cache = self._inmain_cache = (self.main, {})
+        d = cache[1]
+        if sha not in d:
+            try:
+                d[sha] = bool(self.repo.is_ancestor(sha, self.main))
+            except Exception:
+                d[sha] = False
+        return d[sha]
+
     def _apply_source_approvals(self):
         """清單 → 每條分支的放行記號、重測計數、父卡擋住。清單是唯一依據；每輪都對一次。"""
         if self._entries is None:
@@ -167,6 +182,10 @@ class SourceMixin:
             if e is None or row["state"] == S.MERGED.value:
                 continue
             ap, rt = e["approved_sha"], e["retest"]
+            if ap and row["state"] != S.BATCHING.value and self._sha_in_main(ap):
+                # 放行的提交本來就是 main 的祖先（別條路進了 main，例如純文件直接推）：標已合入，不再等測試、不報「不在快照」
+                store.apply_event(c, name, Event.IN_MAIN, merged_sha=ap)
+                continue
             if row["approved_sha"] != ap or row["retest"] is None:
                 c.execute("UPDATE branches SET approved_sha=?, retest=COALESCE(retest, ?) WHERE name=?", (ap, rt, name))
             if row["retest"] is not None and rt > row["retest"]:
