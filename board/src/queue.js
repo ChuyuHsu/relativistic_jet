@@ -474,11 +474,23 @@ export async function outboxAck(req, env) {
 }
 
 // 只讀：現在領得到幾筆（沒 ack 且沒被領走，或領走超過 5 分鐘沒 ack）與其中最大的信箱編號。給「有信才叫醒」的哨兵用，不改任何狀態。
+// 單一聚合查詢；只走 outbox_unsent 部分索引（只掃未送的列）
+const pendingCount = db => db.prepare('SELECT count(*) AS n, COALESCE(max(n),0) AS m FROM outbox WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(now() - CLAIM_TTL).first();
 export async function outboxPending(req, env) {
   if (req.method !== 'GET') return json({ error: 'GET only' }, 405);
   if (!bearerIs(req, env.HOOK_TOKEN, env.READ_TOKEN, env.TOKEN)) return json({ error: 'unauthorized' }, 401);
-  const r = await env.DB.prepare('SELECT count(*) AS n, COALESCE(max(n),0) AS m FROM outbox WHERE sent_at IS NULL AND (claimed_at IS NULL OR claimed_at<?)').bind(now() - CLAIM_TTL).first();
+  const r = await pendingCount(env.DB);
   return json({ pending: r.n, latest_id: r.m });
+}
+
+// 公開訊號（不用權杖，給傳令串用 watch_url 訂閱）：只回數字，不含信件內容、收件人、卡號。
+// 短快取（5 秒）：同一時間不論多少人來看，資料庫最多讀一次。
+export async function outboxSignal(req, env) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'GET only' }, 405);
+  const r = await pendingCount(env.DB);
+  const res = json({ pending: r.n, latest_id: r.m });
+  res.headers.set('cache-control', 'public, max-age=5');
+  return res;
 }
 
 // 卡被放棄後：領了這張卡當父卡的子卡被擋住，通知管理者

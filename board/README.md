@@ -69,6 +69,7 @@ npx wrangler d1 insights task-board --remote --sort-type sum --sort-by reads --l
 
 - `POST /api/outbox/claim {actor}`（TOKEN）：回 `{messages:[{to_thread, ids, kinds, card_ids, created_at, text}]}`，每個收件串一則、已合併；`text` 含哪張卡、發生什麼、原因與紅項、下一步。領過的標記時間，5 分鐘內不重給；沒有收件串的（沒填負責串）改給 `ADMIN_THREADS` 第一個。
 - `POST /api/outbox/ack {actor, ids}`（TOKEN）：ids 用 claim 回傳的 `ids`（全部攤平）；ack 過的不再給，沒 ack 的 5 分鐘後會再給一次。
+- `GET /api/outbox/signal`（**不用權杖**，公開唯讀）：只回 `{pending, latest_id}`（未送信數與最新信 id），不含信件內容、收件人、卡號；回應帶 5 秒快取，單一聚合查詢只走未送信的部分索引，讀取量很小。給收信端（傳令串）用 watch_url 訂閱：數字有變就醒來 claim 收信，不必定時輪詢。
 
 ## /hooks/queue 的批次處理
 

@@ -502,6 +502,22 @@ test('信箱 pending：HOOK／READ／TOKEN 都能查，不改狀態；領走後�
   assert.deepEqual(await (await g('h')).json(), { pending: 0, latest_id: 0 });
 });
 
+test('信箱 signal：不用權杖、只回 pending 與 latest_id（不含內容）、領走後歸 0、只准 GET', async () => {
+  const e = mkenv({ READ_TOKEN: 'rd' }); await approved(e, 'c1', 'th1'); await ev(e, 'c1', { kind: 'tested_red', detail: '祕密內容', approved_sha: SHA });
+  const g = () => call(e, 'GET', '/api/outbox/signal');
+  const res = await g();
+  assert.equal(res.status, 200);
+  const txt = await res.text();
+  const r = JSON.parse(txt);
+  assert.deepEqual(Object.keys(r).sort(), ['latest_id', 'pending']);
+  assert.deepEqual([r.pending, r.latest_id > 0], [1, true]);
+  assert.ok(!txt.includes('祕密') && !txt.includes('th1') && !txt.includes('c1'));
+  assert.match(res.headers.get('cache-control') || '', /max-age=\d+/);
+  assert.equal((await call(e, 'POST', '/api/outbox/signal', {})).status, 405);
+  await call(e, 'POST', '/api/outbox/claim', { actor: '傳令' });
+  assert.deepEqual(await (await g()).json(), { pending: 0, latest_id: 0 });
+});
+
 test('放棄防呆：沒送審直接放棄；送審過要帶 superseded_by 或 discard_reason，否則 400；放棄待查不算已放棄', async () => {
   const e = mkenv({ ADMIN_THREADS: 'adm' });
   await claim(e, 'n1');                                                                    // 領了沒送審：也要先查（舊分支補的卡、領了的卡都一樣）
