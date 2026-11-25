@@ -222,6 +222,10 @@ class LoopMixin:
                     store.set_meta(self.con, "loop_bisect", json.dumps(st))
                 return
             if st["hi"] - st["lo"] <= 1:
+                if not st.get("hi_ok"):       # 點名之前先對「兇手候選」自己重測一次：真的再紅才點名，沒再紅＝抖動（JET-12）
+                    h = st["cands"][st["hi"]]
+                    self._launch("loopprobe", "gate", h, cores, to, base_sha=h, head_sha=h)
+                    return
                 self._loop_conclude(st)
                 return
             mid = (st["lo"] + st["hi"]) // 2
@@ -294,11 +298,27 @@ class LoopMixin:
             return
         idx = st["cands"].index(j.head_sha)
         red = bool(set(res.failed_items) & set(st["items"])) if res.status != "pass" else False
+        if idx == st["hi"]:
+            if not red:
+                # 兇手候選（hi）自己重測沒再紅＝抖動（機器忙、偶發），不是哪個提交的錯：結案成「不穩」，不點名（JET-12）
+                self._loop_unstable(st)
+                return
+            st["hi_ok"] = True
         if red:
             st["hi"] = min(st["hi"], idx)
         else:
             st["lo"] = max(st["lo"], idx)
         store.set_meta(self.con, "loop_bisect", json.dumps(st))
+
+    def _loop_unstable(self, st):
+        """二分結案：最後那個提交重測不紅。發 loop_green（detail 寫明抖動、unstable_items 列項目；不點名任何人，也不新增事件種類，看板不用改），狀態回綠，下一輪照常測最新 main。"""
+        c = self.con
+        sha = st["cands"][st["hi"]]
+        store.emit(c, "loop_green", None, {"main_sha": sha, "unstable_items": st["items"],
+                                           "detail": f"背景測試：{','.join(st['items'])[:300]} 在 {sha[:9]} 重測沒再紅，判為抖動（不點名）"}, force=True)
+        store.set_meta(c, "loop_bisect", "")
+        store.set_meta(c, "loop_green", sha)
+        self._wf_status("green", main_sha=sha, last_run_at=self.clock(), last_result="green")
 
     def _loop_conclude(self, st):
         c = self.con

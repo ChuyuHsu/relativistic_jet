@@ -153,7 +153,29 @@ class SourceMixin:
                     return "unknown"
                 since = self._unres_since.setdefault((name, ap), now)
                 return "no" if now - since >= UNKNOWN_GRACE_S else "unknown"
-        return "yes" if cid == row["content_id"] else "no"
+        if cid == row["content_id"]:
+            return "yes"
+        # 內容指紋不同，但可能只是 rebase／解衝突（上下文變了、加減的行沒變）或父卡 rebase 帶動：比「每個提交只看加減的行」的指紋，
+        # 現在的頭相對 main 的每個提交都出現在放行版本裡（沒有新增、沒有改過）就沿用放行（JET-12）
+        if self._same_patches(row, ap):
+            return "yes"
+        return "no"
+
+    def _same_patches(self, row, ap) -> bool:
+        if not hasattr(self.repo, "commit_ids"):
+            return False
+        key = (row["name"], row["head_sha"], ap, self.main)
+        cache = getattr(self, "_same_cache", None)
+        if cache is None or len(cache) > 500:
+            cache = self._same_cache = {}
+        if key not in cache:
+            try:
+                head_ids = self.repo.commit_ids(row["head_sha"], self.main)
+                ap_ids = self.repo.commit_ids(ap, self.main)
+                cache[key] = bool(head_ids) and head_ids <= ap_ids
+            except Exception:
+                cache[key] = False
+        return cache[key]
 
     def _sha_in_main(self, sha) -> bool:
         """sha 是不是目前 main 的祖先（40 碼才算；同一個 main 只問一次 git）。"""

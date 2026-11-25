@@ -113,6 +113,18 @@ class GitRepo:
         except GitError:
             return []
 
+    def commit_ids(self, sha: str, base: str) -> frozenset:
+        """base 之外、sha 以內（不含合併提交）每個提交「只看加減的行」的指紋集合（git patch-id --stable，零行上下文）。
+        重疊／解衝突時上下文會變、加減的行不變，所以指紋不變；內容真的改了、合併或拆提交就會不同。讀不到回空集合。"""
+        try:
+            log = self._git("log", "-p", "-U0", "--no-color", "--no-ext-diff", "--no-merges", f"{base}..{sha}").stdout
+            if not log.strip():
+                return frozenset()
+            out = self._git("patch-id", "--stable", input=log, cwd=self.work_dir).stdout
+            return frozenset(line.split()[0] for line in out.splitlines() if line.split())
+        except GitError:
+            return frozenset()
+
     def commit_files(self, sha: str) -> List[str]:
         """這個提交（相對第一親代）改了哪些檔；讀不到回空（呼叫端要把空當「不知道」）。"""
         try:
