@@ -1,5 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
+import { loadRoster, cleanRoster, reviewerThreads, watchdog } from './watchdog.js';
 import { loadRedirects, resolveThread, handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, outboxSignal, resultOf, stuckCheck, housekeeping } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、merged 已合併、dropped 放棄；放行是卡片上的欄位（approved_*）。
@@ -219,6 +220,18 @@ async function handleInner(req, env, ctx, gated = false) {
     else if (!all && !status) out = out.filter(c => c.stage !== 'merged' && c.stage !== 'dropped');
     return json(out);
   }
+  if (path === '/api/roster' && req.method === 'GET') {   // 串名冊（審查串、開發串、傳令；總指揮維護、雲端串推上來）；沒有時回 null
+    const r = await loadRoster(db);
+    return json(r ? { ...r, stored_at: r._stored_at, _stored_at: undefined } : null);
+  }
+  if (path === '/api/roster' && req.method === 'POST') {   // 整份取代：{actor, roster:{commander,reviewers:[{name,thread,letters}],devs,others,messengers}}（或直接帶名冊本體）
+    const body = await req.clone().json().catch(() => ({}));
+    if (!String(body.actor ?? '').trim() || String(body.actor).toLowerCase() === 'unknown') return json({ error: 'actor 必填' }, 400);
+    const [roster, err] = cleanRoster(body);
+    if (err) return json({ error: err }, 400);
+    await db.prepare("INSERT INTO meta(key,value,updated_at) VALUES('roster',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(JSON.stringify(roster), now()).run();
+    return json({ ok: true, reviewers: roster.reviewers.length, devs: roster.devs.length, messengers: roster.messengers.length });
+  }
   if (path === '/api/redirect' && req.method === 'GET') {   // 目前的串號轉址表
     return json((await db.prepare('SELECT from_thread AS "from",to_thread AS "to",at FROM thread_redirect ORDER BY at DESC').all()).results);
   }
@@ -293,7 +306,7 @@ async function handleInner(req, env, ctx, gated = false) {
       // 把上次被退回的原因帶進審查通知：審查要先確認它真的改掉再放行（送審會清掉 rejected_reason，所以從紀錄找最近一筆審查退回）
       const lastRej = c.rejected_reason ? { note: `審查退回：${c.rejected_reason}` } : await db.prepare("SELECT note FROM events WHERE card_id=? AND note LIKE '審查退回：%' ORDER BY n DESC LIMIT 1").bind(c.id).first();
       const prev = lastRej ? `｜上次退回原因（請確認已改掉才放行）：${String(lastRej.note).replace(/^審查退回：/, '').slice(0, 300)}` : '';
-      await notify(db, list(env.REVIEW_THREADS), c, 'review_requested', String(body.commit).slice(0, 12) + prev);
+      await notify(db, reviewerThreads(env, await loadRoster(db)), c, 'review_requested', String(body.commit).slice(0, 12) + prev);
       return done(`送審 ${String(body.commit).slice(0, 12)}`);
     }
     if (act === 'reject') {
@@ -485,5 +498,10 @@ async function handleInner(req, env, ctx, gated = false) {
 
 export default {
   fetch: (req, env, ctx) => handle(req, env, ctx),
-  scheduled: (ev, env, ctx) => ctx.waitUntil((new Date((ev && ev.scheduledTime) || Date.now()).getUTCMinutes() % 10 === 0 ? housekeeping(env) : Promise.resolve()).then(() => autoFlush(env))),
+  scheduled: (ev, env, ctx) => {
+    const m = new Date((ev && ev.scheduledTime) || Date.now()).getUTCMinutes();
+    ctx.waitUntil((m % 10 === 0 ? housekeeping(env) : Promise.resolve())
+      .then(() => (m % 5 === 0 ? watchdog(env).catch(() => null) : null))   // 閒置看門狗每 5 分鐘（JET-17）
+      .then(() => autoFlush(env)));
+  },
 };

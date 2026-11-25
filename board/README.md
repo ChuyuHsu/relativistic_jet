@@ -82,3 +82,8 @@ npx wrangler d1 insights task-board --remote --sort-type sum --sort-by reads --l
 - 同一收件串、同一張卡的通知只送最新一則（舊的在 claim 時直接標成已送）；同一輪同一收件串本來就合成一則。
 - `POST /api/outbox/release {actor, ids, hold_s?}`：發信失敗（例如被限額）時把領走的信放回去，不 ack；`hold_s` 秒內不再給（預設 0，最多 300）。
 - 只給看板看的事件（開始自測、開始批測、tested_green 等）本來就不進信箱，只更新卡片階段。
+
+## 串名冊與閒置看門狗（JET-17）
+- **串名冊**：全專案唯一一份，總指揮維護，雲端串整份 `POST /api/roster {actor, roster:{commander, reviewers:[{name,thread,letters,role?}], devs:[{name,thread}], others, messengers}}`（寫入權杖）推上來，`GET /api/roster` 讀回（沒有時是 `null`）。審查串清單（送審通知、閒置通知）以名冊為準；沒有名冊時退回環境變數 `REVIEW_THREADS`（目前正式環境沒有設）。`letters`：`A-E`、`F-N`、`O-Z` 或 `*`（補位）；卡號首字母決定歸誰審。
+- **閒置看門狗**（cron 每 5 分鐘，需要名冊）：①送審 15 分鐘沒人審 → 叫該卡首字母對應的審查串（`watchdog_review`）、30 分鐘 → 再叫補位審查（letters＝`*`），同一送審版本各只叫一次；②開發串手上沒有在做的卡（developing／rejected）且 15 分鐘沒動 → 叫它開工並附下一張可領的卡號（`watchdog_dev`，同一串最多 30 分鐘一次，兩個閒置的開發串不會拿到同一張）；看板沒有可領的卡 → 叫總指揮補卡（`watchdog_nocard`）。
+
