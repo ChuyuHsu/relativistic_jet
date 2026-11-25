@@ -271,5 +271,33 @@ class ParallelProbeTest(SchedBase):
         self.assertEqual(config.parse(base).loop_probe_parallel, 1)
 
 
+
+class AdoptKindsTest(SchedBase):
+    """JET-16：換版接管要接背景探測（loopprobe）與每日完整層（nightly），不能只接基準；沒接的會被殺掉重排，白白丟掉十幾分鐘。"""
+
+    def _run(self, kind):
+        import os
+        s = self.mk(workflow={"mode": "direct_merge"})
+        wd = os.path.join(self.t.name, "wd"); os.makedirs(wd, exist_ok=True)
+        log_dir = os.path.join(self.t.name, "runs", "9"); os.makedirs(log_dir, exist_ok=True)
+        open(os.path.join(log_dir, "exit.json"), "w").write("{}")          # exit.json 在：視為還活著可接管
+        self.con.execute("INSERT INTO runs(id,kind,status,layer,started_at,pgid,cores,workdir,commit_sha,base_sha,log_path,report_path,timeout_s,units) "
+                         "VALUES(9,?,?,?,?,?,?,?,?,?,?,?,?,?)", (kind, "running", "gate", 1000.0, 4242, "3,4", wd, "c" * 40, "c" * 40,
+                                                                 os.path.join(log_dir, "output.log"), os.path.join(log_dir, "report.json"), 3600, 2))
+        self.ex.adopt = lambda job, pgid, remaining, elapsed: NS(pgid=pgid)
+        return s
+
+    def test_loopprobe_and_nightly_are_adopted(self):
+        for kind in ("loopprobe", "nightly", "baseline"):
+            s = self._run(kind)
+            out = s._adopt_runs()
+            self.assertEqual([j.kind for j in out.values()], [kind], kind)
+            self.assertIn(9, s.jobs)
+
+    def test_unknown_kind_still_not_adopted(self):
+        s = self._run("recheck")                          # 複驗的記錄在記憶體裡，換版後接不起來：照舊不接（殺掉重排）
+        self.assertEqual(s._adopt_runs(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

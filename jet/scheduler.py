@@ -192,8 +192,8 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
                         restored[r["batch_id"]] = self._restore_batch(r["batch_id"])
                     if restored[r["batch_id"]] is None:
                         continue
-                elif kind != "baseline":
-                    continue
+                elif kind not in ("baseline", "loopprobe", "nightly"):
+                    continue                          # 背景探測（二分）與每日完整層跟基準一樣：結果靠資料庫裡的 loop_bisect／meta 接得起來（JET-16）
                 if not self.pool.reserve(cores):
                     continue
                 started = r["started_at"] or self.clock()
