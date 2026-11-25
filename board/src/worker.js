@@ -1,6 +1,6 @@
 // 任務卡服務：Cloudflare Worker + D1。env.DB 是 D1，env.TOKEN 是寫入權杖。
 import { bearerIs } from './auth.js';
-import { loadRoster, cleanRoster, reviewerThreads, watchdog } from './watchdog.js';
+import { loadRoster, cleanRoster, reviewerThreads, reviewerFor, watchdog } from './watchdog.js';
 import { loadRedirects, resolveThread, handleHook, notifyKids, autoFlush, outboxClaim, outboxAck, outboxRelease, outboxPending, outboxSignal, resultOf, stuckCheck, housekeeping } from './queue.js';
 import { stageOf, sameCommit, STAGES } from './stage.js';
 // 卡片自己只管前段與結局：open 空、claimed 已認領、merged 已合併、dropped 放棄；放行是卡片上的欄位（approved_*）。
@@ -306,7 +306,9 @@ async function handleInner(req, env, ctx, gated = false) {
       // 把上次被退回的原因帶進審查通知：審查要先確認它真的改掉再放行（送審會清掉 rejected_reason，所以從紀錄找最近一筆審查退回）
       const lastRej = c.rejected_reason ? { note: `審查退回：${c.rejected_reason}` } : await db.prepare("SELECT note FROM events WHERE card_id=? AND note LIKE '審查退回：%' ORDER BY n DESC LIMIT 1").bind(c.id).first();
       const prev = lastRej ? `｜上次退回原因（請確認已改掉才放行）：${String(lastRej.note).replace(/^審查退回：/, '').slice(0, 300)}` : '';
-      await notify(db, reviewerThreads(env, await loadRoster(db)), c, 'review_requested', String(body.commit).slice(0, 12) + prev);
+      const ros = await loadRoster(db);       // 有名冊：只寄給卡號首字母對應的那條審查串（補位審查只由看門狗 30 分鐘時叫）；沒名冊用環境變數全寄
+      const to = ros && ros.reviewers && ros.reviewers.length ? [reviewerFor(ros, c.id).thread] : reviewerThreads(env, ros);
+      await notify(db, to, c, 'review_requested', String(body.commit).slice(0, 12) + prev);
       return done(`送審 ${String(body.commit).slice(0, 12)}`);
     }
     if (act === 'reject') {
