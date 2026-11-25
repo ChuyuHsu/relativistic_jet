@@ -47,6 +47,8 @@ curl -X POST $B/api/import -H "authorization: Bearer $TOKEN" -d '{"cards":[{"id"
 
 **升級與部署一律用 `board/deploy.sh`**（`bash deploy.sh`）：讀 `meta.schema_version`，依序補跑還沒跑過的 `migrate_NNN.sql`（每支跑完記版本）→ `wrangler deploy` → 印出 Version ID → 打一次 `/api/workflow` 驗證（要設 `BOARD_URL`、`READ_TOKEN`，沒設會明講跳過）。**查詢失敗或輸出解析不了一律非零退出，不寫入、不部署**（絕不把正式庫誤判成空的）；全新空資料庫要明確加 `--init` 才會跑 `schema.sql` 建表，沒加就拒絕；第一次用在「手動跑過 migration、還沒有 schema_version」的舊資料庫時，要用 `--baseline <N>` 指定它現在跑到第幾支（例如 `--baseline 14`），不帶會拒絕，採用 baseline 時會立刻寫進 `meta`；`--dry-run` 只列出會跑哪些、不寫。**目前正式庫的實況要由部署串確認後才決定 baseline**：前幾批是手動跑的（015、016，接著 018），017 還沒跑，所以版本不是單純一個數字——第一次用 `deploy.sh` 前，部署串先手動補跑 017 與 019，再用 `--baseline 19`。新增 migration 時 `schema.sql` 末尾的 `schema_version` 要同步改成最大編號（有測試守著）。測試：`cd board && npm test`（Node 22，不需安裝套件）。
 
+**寫程式的注意：條件式寫入不要用 `meta.changes` 判斷有沒有改到，要用 `RETURNING` 的列數**（`UPDATE … RETURNING id` 再數 `.all().results.length`）。`rev` 觸發器會讓 D1 回報的 `changes` 把觸發器改的列也算進去（一次更新變成 2），拿它判斷會把贏家當成輸家。測試用的假 D1（`test/faked1.mjs`）已照這個行為算，漏掉會立刻紅。
+
 ## 讀取量（D1 `rows_read`）
 
 看板被輪詢，所以成本要看「每次輪詢讀幾列」，不是看卡有幾張。每次看板改版前後都要量一次、把前十名貼在這裡：
@@ -59,9 +61,9 @@ npx wrangler d1 insights task-board --remote --sort-type sum --sort-by reads --l
 
 | 日期 | 版本 | 前十名查詢與讀取列數 | 一天合計 | 備註 |
 | --- | --- | --- | --- | --- |
-| （BD-01 上線前） | | | | 待部署串填 |
-| （BD-01 上線後） | | | | 待部署串填 |
-| （BD-03 上線後） | | | | 待部署串填 |
+| 2026-11-24（BD-01／03 與 11-24 修補上線前） | 上線前 | 全天 1,134,523 列 | 1,134,523 | 部署串量 |
+| 2026-11-24 22:45 UTC（上線後立刻量） | 4f179d76 | 最大三項仍是退回 LIKE、claimed 掃描、outbox 計數 | 1,126,603 | **不能當成效果**：`d1 insights` 最小是近 1 天滾動視窗，仍混著部署前的讀取 |
+| 2026-11-25 22:00 UTC 前後（視窗全是新版，舊資料已滑出） | 4f179d76 | 前 40 名合計讀 859,076 列、執行 56,852 次。前七名（讀取列數／次數，括號是平均每次列數）：① `SELECT * FROM cards WHERE dropping_at IS NOT NULL AND status!='dropped'` 167,860／1,917（87）；② `status='claimed' ORDER BY priority,created_at` 128,719／1,739（74）；③ `SELECT status,count(*) … WHERE status IN ('merged','dropped') GROUP BY status` 107,253／263（407，單次最貴）；④ cards 的 open／claimed／waiting 或 dropping 條件查詢 77,044／361（213），同形另一條 37,872／253（149）；⑤ `DELETE FROM outbox WHERE sent_at …` 56,793／125（454）；⑥ `INSERT INTO meta('workflow')` 40,310／20,155（每次 2，但次數多）；⑦ `SELECT * FROM cards ORDER BY priority,created_at`（全表）37,720／35（1,077） | 859,076（前 40 名） | 部署串量。上線前 1,134,523 是全天總數、這次只加總前 40 名，所以降幅 ≥24% 是保守估計。還是大的：①②是被輪詢的整張卡掃描（卡數成長就跟著長）、③是統計掃已結案的卡（每次 407 列）、⑤outbox 清理每次掃 454 列，後續可考慮加索引或快取。`do_board_deploy.sh` 的 insights 選項可印前 40 名 |
 
 ## 信箱（收信端自己來領）
 
