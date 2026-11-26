@@ -65,6 +65,7 @@ class Config:
     nightly_at: str = ""              # 每日完整層時刻 "HH:MM"（本機時間）；空＝不跑。到點對 main 最新版跑 full 層一次，紅了只記錄、不擋 main、不二分
     nightly_cores: int = 0            # 完整層用的核數；0＝同 cores.batch_cores
     nightly_timeout_s: int = 0        # 完整層逾時；0＝同 limits 的批測逾時
+    job_env: tuple = ()               # 排隊器啟動時加進自己環境變數的 (名, 值) 清單（來自設定檔 env；例：TMPDIR 指到大碟，測試的暫存／log 就不寫在系統碟）
     main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
     relative_ratio: float = 0.0       # >0＝計時類項目（timing_items）改比相對值：超過「最近幾輪 main 基準的中位數」這麼多倍才算紅；0＝不啟用
@@ -96,6 +97,14 @@ def _need(d, k, typ):
     if not isinstance(d[k], typ):
         raise ConfigError(f"欄位型別錯：{k}")
     return d[k]
+
+
+def _job_env(v) -> tuple:
+    if v is None:
+        return ()
+    if not isinstance(v, dict) or not all(isinstance(k, str) and k and isinstance(x, str) for k, x in v.items()):
+        raise ConfigError("env 必須是 {名: 字串值} 的物件")
+    return tuple(sorted(v.items()))
 
 
 def parse(d: dict) -> Config:
@@ -158,6 +167,7 @@ def parse(d: dict) -> Config:
         recheck_red=pol.get("recheck_red", True),
         flaky_retry=pol.get("flaky_retry", True),
         main_red_ignore=tuple(pol.get("main_red_ignore", ())),
+        job_env=_job_env(d.get("env")),
         workflow_mode=str((d.get("workflow") or {}).get("mode", "gate_batch")),
         loop_enabled=bool(((d.get("workflow") or {}).get("loop") or {}).get("enabled", True)),
         loop_cores=int(((d.get("workflow") or {}).get("loop") or {}).get("cores", 0)),

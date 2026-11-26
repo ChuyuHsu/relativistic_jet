@@ -238,6 +238,13 @@ def cmd_run_test(args):
 # ---------------------------------------------------------------- 維運
 def cmd_serve(args):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    try:                                   # 設定檔 env：加進自己的環境變數，之後起的每個測試行程都會繼承（例：TMPDIR 指到大碟）
+        for k, v in config.load(_cfg_path(args)).job_env:
+            os.environ[k] = v
+            if k == "TMPDIR":
+                os.makedirs(v, exist_ok=True)
+    except (config.ConfigError, OSError) as e:
+        logging.warning("設定檔 env 套用失敗：%s", e)
     import signal
     from .executor import Executor
     from .gitops import GitRepo
