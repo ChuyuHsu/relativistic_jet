@@ -247,6 +247,18 @@ class LoopMixin:
         """背景 loop：一次只跑一個；先處理二分，沒有二分就測最新 main（測過的 main 不重測）。"""
         if not self.cfg.loop_enabled:
             return
+        raw0 = store.get_meta(self.con, "loop_bisect")
+        if raw0:
+            try:
+                st_a = json.loads(raw0)
+            except ValueError:
+                st_a = None
+            if st_a and st_a.get("answered") and st_a.get("red_sha") != self.main:
+                # 看板已回嫌疑、main 又往前走了（嫌疑卡的修正多半已合入）：不再二分，清掉二分狀態，下一輪對最新 main 跑一次閘門確認；
+                # 還紅就用新的紅項重新處理，綠了就結案。已在跑的探測讓它跑完，結果丟掉。
+                store.set_meta(self.con, "loop_bisect", "")
+                store.set_meta(self.con, "loop_tested", "")
+                store.add_info_event(self.con, "loop_regate", None, "嫌疑已回報、main 已前進：停止二分，改對最新 main 跑一次閘門確認")
         probes = [j for j in self.jobs.values() if j.kind == "loopprobe"]
         base_running = any(j.kind == "baseline" for j in self.jobs.values())
         par = max(1, self.cfg.loop_probe_parallel)
@@ -265,6 +277,8 @@ class LoopMixin:
                             last_run_at=prev.get("last_run_at"), last_result=prev.get("last_result"),
                             failed_items=prev.get("failed_items", []), main_sha=self.main)
             return
+        if self._nightly_starving():
+            return                            # 每日完整層等核太久：不啟動新的背景探測／基準，讓已在跑的跑完、核空出來
         cores, to = self._loop_cfg()
         raw = store.get_meta(self.con, "loop_bisect")
         if raw:
@@ -274,6 +288,7 @@ class LoopMixin:
                 if idx is not None:           # 看板回了嫌疑：只驗證一次（嫌疑提交與它前一個各跑一次紅項）
                     st["queue"] = [st["cands"][idx]] + ([st["cands"][idx - 1]] if idx > 0 else [])
                     st["phase"] = "verify"
+                    st["answered"] = True
                     store.set_meta(self.con, "loop_bisect", json.dumps(st))
                 elif self.clock() >= st.get("deadline", 0):
                     st["phase"] = "bisect"    # 逾時：改二分
