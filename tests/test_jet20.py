@@ -50,3 +50,29 @@ class DoubleCoresTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlowItemsNotDoubledTest(DoubleCoresTest):
+    def test_low_parallel_timeouts_do_not_double(self):
+        s = self._cfg()
+        self.repo.add("a")
+        s._note_selftest_result("a", "a-1", True, 1.5)
+        n, low = s._note_selftest_result("a", "a-1", True, 2.0)
+        self.assertEqual((n, low), (2, True))
+        self.assertTrue(s._low_parallel("a", "a-1"))
+        self.go(10, until=lambda: self._units("a"))
+        self.assertEqual(self._units("a"), 2)                      # 平均用核低：不加倍
+
+    def test_high_parallel_timeouts_still_double(self):
+        s = self._cfg()
+        self.repo.add("a")
+        s._note_selftest_result("a", "a-1", True, 1.5)
+        n, low = s._note_selftest_result("a", "a-1", True, 6.0)
+        self.assertEqual((n, low), (2, False))
+        self.go(10, until=lambda: self._units("a"))
+        self.assertEqual(self._units("a"), 4)
+
+    def test_avg_cores(self):
+        class R: cpu_s = 1200.0; duration_s = 600.0
+        class J: timeout_s = 600
+        self.assertEqual(self._cfg()._avg_cores(R, J), 2.0)

@@ -53,10 +53,29 @@ class SelftestMixin:
             d = {}
         return int(d.get("n", 0)) if d.get("sha") == sha else 0
 
-    def _note_selftest_result(self, name, sha, timed_out):
-        """記連續逾時次數（同一個提交）；出現逾時以外的結果、或提交換了，就歸零。"""
+    LOW_PARALLEL_CORES = 3.0     # 逾時時平均用核低於這個數：測項並行度低，加核沒用，不加倍
+
+    def _low_parallel(self, name, sha) -> bool:
+        raw = store.get_meta(self.con, "st_to:" + name)
+        try:
+            d = json.loads(raw) if raw else {}
+        except ValueError:
+            d = {}
+        return bool(d.get("low")) and d.get("sha") == sha
+
+    def _note_selftest_result(self, name, sha, timed_out, avg_cores=None):
+        """記連續逾時次數（同一個提交）；出現逾時以外的結果、或提交換了，就歸零。
+        avg_cores＝這次逾時平均用了幾個核（工作群組 CPU 秒數 ÷ 牆鐘）；低於 LOW_PARALLEL_CORES 就標記「加核無效」。"""
         n = self._timeouts_of(name, sha) + 1 if timed_out else 0
-        store.set_meta(self.con, "st_to:" + name, json.dumps({"sha": sha, "n": n}) if n else "")
+        low = bool(timed_out and avg_cores is not None and avg_cores < self.LOW_PARALLEL_CORES)
+        store.set_meta(self.con, "st_to:" + name, json.dumps({"sha": sha, "n": n, "low": low}) if n else "")
+        return n, low
+
+    @staticmethod
+    def _avg_cores(res, j):
+        cpu = getattr(res, "cpu_s", None)
+        wall = getattr(res, "duration_s", 0) or getattr(j, "timeout_s", 0) or 0
+        return (cpu / wall) if cpu is not None and wall > 0 else None
 
     def _is_double(self, j) -> bool:
         return j.kind == "selftest" and j.units > self.cfg.selftest_cores
@@ -88,7 +107,8 @@ class SelftestMixin:
                 continue                                      # 先審後測：沒放行的版本不花測試資源
             if r["name"] in self._blocked or self._parent_waiting(r):
                 continue
-            k = 2 if self._timeouts_of(r["name"], r["head_sha"]) >= self.DOUBLE_AFTER_TIMEOUTS else 1   # 連續逾時：這次用兩倍核、佔兩個槽
+            k = 2 if (self._timeouts_of(r["name"], r["head_sha"]) >= self.DOUBLE_AFTER_TIMEOUTS
+                      and not self._low_parallel(r["name"], r["head_sha"])) else 1   # 連續逾時：這次用兩倍核、佔兩個槽（並行度低的不加倍）
             lim = self.cfg.max_selftest_slots
             if lim and slots >= lim:
                 break                                         # 同時自測槽數上限（硬上限，不論有沒有批測）
@@ -154,7 +174,9 @@ class SelftestMixin:
                 and self._overload.get(j.branch, 0) < MAX_OVERLOAD_RETRY:
             # 機器超載造成的逾時不是分支的錯：重排，不退回（連續幾次還逾時才算它的）
             self._overload[j.branch] = self._overload.get(j.branch, 0) + 1
-            store.add_info_event(c, "overload", j.branch, f"自測逾時但系統超載（工作只拿到 {res.cpu_s or 0:.0f} 秒 CPU），重排")
+            avg = self._avg_cores(res, j)
+            self._note_selftest_result(j.branch, row["head_sha"], True, avg)        # 超載逾時也算連續逾時（雙倍核判斷用）
+            store.add_info_event(c, "overload", j.branch, f"自測逾時但系統超載（工作只拿到 {res.cpu_s or 0:.0f} 秒 CPU，平均用 {avg or 0:.1f} 核），重排")
             store.apply_event(c, j.branch, Event.RETRY)
             return
         if self.source is not None and (j.approved_sha, j.retest) != (row["approved_sha"], row["retest"]):
@@ -162,7 +184,11 @@ class SelftestMixin:
             store.apply_event(c, j.branch, Event.RETRY)
             return
         self._overload.pop(j.branch, None)
-        self._note_selftest_result(j.branch, row["head_sha"], res.status == "timeout")
+        avg = self._avg_cores(res, j) if res.status == "timeout" else None
+        n_to, low = self._note_selftest_result(j.branch, row["head_sha"], res.status == "timeout", avg)
+        if low:
+            store.add_info_event(c, "selftest_slow", j.branch,
+                                 f"自測逾時，平均只用 {avg:.1f} 核（配給 {j.units} 個物理核）：加核沒用，是測項本身太慢，不加倍")
         base = self._known_red("selftest", self.main)
         self._store_items(j.run_id, res, base)
         if self._red(res, base) and self._ancestor_unproven(j.branch):
