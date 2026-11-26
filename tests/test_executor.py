@@ -15,7 +15,18 @@ from jet.executor import (CoreBusy, Executor, ExecutorError, Job, ResourceLow, f
                           read_report)
 
 PY = sys.executable
-ALLOWED = sorted(os.sched_getaffinity(0))
+def _free_cores():
+    """本行程可用的核裡，沒被別人綁住的（開發機上前幾顆核常被人釘住工作，拿來測會誤報核被佔用）；不夠就退回全部。"""
+    allowed = sorted(os.sched_getaffinity(0))
+    try:
+        busy = cores.foreign_busy(allowed, set())
+    except Exception:
+        busy = set()
+    free = [c for c in allowed if c not in busy]
+    return free if len(free) >= 4 else allowed
+
+
+ALLOWED = _free_cores()
 
 
 def alive(pid: int) -> bool:

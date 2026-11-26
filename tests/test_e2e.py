@@ -2,14 +2,24 @@
 驗收 1、2、3、5（DESIGN 第 11 節）。"""
 import os, subprocess, tempfile, time, unittest
 
-from jet import config, db, store
+from jet import config, cores, db, store
 from jet.executor import Executor
 from jet.gitops import GitRepo
 from jet.scheduler import Scheduler
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TOY = os.path.join(ROOT, "examples", "toy_project")
-CORES = sorted(os.sched_getaffinity(0))[:4]
+def _free4():
+    allowed = sorted(os.sched_getaffinity(0))
+    try:
+        busy = cores.foreign_busy(allowed, set())          # 前幾顆核常被別人釘住工作：挑沒被綁的
+    except Exception:
+        busy = set()
+    free = [c for c in allowed if c not in busy]
+    return (free if len(free) >= 4 else allowed)[:4]
+
+
+CORES = _free4()
 
 
 def git(cwd, *a):

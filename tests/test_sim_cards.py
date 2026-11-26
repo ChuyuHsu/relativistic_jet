@@ -184,7 +184,11 @@ class CardSim:
             n = r.choice(names)
             par = self.board.get(n, {}).get("parent")
             if par in repo.branches and n in repo.branches:
-                repo.broken.add((repo.branches[par]["sha"], repo.branches[n]["sha"]))
+                psha = repo.branches[par]["sha"]
+                repo.broken.add((psha, repo.branches[n]["sha"]))
+                stem, num = psha.rsplit("-", 1)                      # JET-22 之後疊在父卡任一舊尖端上的子卡不算沒接上：舊尖端也要一起斷
+                for k in range(1, int(num)):
+                    repo.broken.add((f"{stem}-{k}", repo.branches[n]["sha"]))
         if r.random() < 0.04 * p:
             self.down = not self.down                                  # 來源壞掉／恢復
         if r.random() < 0.02 * p:
