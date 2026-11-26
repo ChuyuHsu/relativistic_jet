@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handle } from '../src/worker.js';
-import { watchdog, reviewerFor, cleanRoster } from '../src/watchdog.js';
+import { watchdog, reviewerFor, cleanRoster, eligibleFor } from '../src/watchdog.js';
 import { fakeD1 } from './faked1.mjs';
 
 const mkenv = (extra = {}) => ({ DB: fakeD1(), TOKEN: 't', HOOK_TOKEN: 'h', ...extra });
@@ -12,7 +12,7 @@ const T = 2000000000;
 const ROSTER = {
   commander: 'cmd',
   reviewers: [{ name: '審查一', thread: 'r1', letters: 'A-E' }, { name: '審查二', thread: 'r2', letters: 'F-N' }, { name: '審查三', thread: 'r3', letters: 'O-Z' }, { name: '審查四', thread: 'r4', letters: '*', role: '補位' }],
-  devs: [{ name: '甲', thread: 'd1' }, { name: '乙', thread: 'd2' }],
+  devs: [{ name: '甲', thread: 'd1', areas: ['art'] }, { name: '乙', thread: 'd2', areas: ['art'] }],
 };
 const outbox = async (e, kind) => (await e.DB.prepare('SELECT owner_thread, card_id, detail FROM outbox WHERE kind=? ORDER BY n').bind(kind).all()).results;
 
@@ -88,8 +88,8 @@ test('看門狗：送審 15 分鐘叫該審的審查串、30 分鐘再叫審查�
 test('看門狗：開發串沒卡在做 45 分鐘 → 叫它領下一張；沒卡可領 → 叫總指揮補卡；30 分鐘內不重叫', async () => {
   const e = mkenv();
   await call(e, 'POST', '/api/roster', { roster: ROSTER });
-  await call(e, 'POST', '/api/cards', { id: 'N1', title: '下一張', priority: 5 });
-  await call(e, 'POST', '/api/cards', { id: 'N2', title: '第二張', priority: 50 });
+  await call(e, 'POST', '/api/cards', { id: 'N1', title: '下一張', priority: 5, area: 'art' });
+  await call(e, 'POST', '/api/cards', { id: 'N2', title: '第二張', priority: 50, area: 'art' });
   assert.deepEqual(await watchdog(e, T), { review: 0, dev: 0, nocard: 0 });                            // 第一次看到：從現在開始算
   assert.deepEqual(await watchdog(e, T + 30 * 60), { review: 0, dev: 0, nocard: 0 });                 // 45 分鐘前不叫
   const r = await watchdog(e, T + 46 * 60);
@@ -119,7 +119,7 @@ test('看門狗：開發串手上有在做的卡就不叫；沒有名冊就跳�
 test('看門狗：閒置超過 2 小時不叫醒，改通知總指揮換串（每段閒置一次）', async () => {
   const e = mkenv();
   await call(e, 'POST', '/api/roster', { roster: { ...ROSTER, devs: [ROSTER.devs[0]] } });
-  await call(e, 'POST', '/api/cards', { id: 'N1', title: 'n1' });
+  await call(e, 'POST', '/api/cards', { id: 'N1', title: 'n1', area: 'art' });
   await watchdog(e, T);
   assert.equal((await watchdog(e, T + 50 * 60)).dev, 1);                                               // 45 分鐘～2 小時：叫醒
   const r = await watchdog(e, T + 125 * 60);
@@ -129,4 +129,21 @@ test('看門狗：閒置超過 2 小時不叫醒，改通知總指揮換串（�
   const r2 = await watchdog(e, T + 200 * 60);
   assert.equal(r2.replace, undefined);                                                                 // 同一段閒置只通知一次
   assert.equal((await outbox(e, 'watchdog_replace')).length, 1);
+});
+
+test('看門狗推薦的卡：JET-* 不推、別人名下的不推、區域不符的空白卡不推；自己名下或區域相符的空白卡才推', async () => {
+  const e = mkenv();
+  await call(e, 'POST', '/api/roster', { roster: { ...ROSTER, devs: [{ name: '甲', thread: 'd1', areas: ['Art'] }] } });
+  await call(e, 'POST', '/api/cards', { id: 'JET-30', title: '排隊器卡', priority: 1, area: 'art' });        // 優先序最小但是 JET-*
+  await call(e, 'POST', '/api/cards', { id: 'X1', title: '別人名下', priority: 2, area: 'art', owner_thread: 'someone' });
+  await call(e, 'POST', '/api/cards', { id: 'X2', title: '區域不符', priority: 3, area: 'net' });
+  await call(e, 'POST', '/api/cards', { id: 'X3', title: '區域相符的空白卡', priority: 4, area: 'art' });
+  await call(e, 'POST', '/api/cards', { id: 'X4', title: '自己名下', priority: 5, area: 'net', owner_thread: 'd1' });
+  await watchdog(e, T);
+  await watchdog(e, T + 46 * 60);
+  const w = await outbox(e, 'watchdog_dev');
+  assert.deepEqual(w.map(x => x.card_id), ['X3']);                                                       // 只有 X3（X4 是名下但狀態 open 排在 X3 後面）
+  assert.equal(eligibleFor({ id: 'jet-1', area: 'art' }, { thread: 'd1', areas: ['art'] }), false);
+  assert.equal(eligibleFor({ id: 'X4', area: 'net', owner_thread: 'd1' }, { thread: 'd1' }), true);
+  assert.equal(eligibleFor({ id: 'X9', area: 'art' }, { thread: 'd1' }), false);                          // 名冊沒填 areas：不推空白名下的卡
 });

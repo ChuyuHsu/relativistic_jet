@@ -17,6 +17,16 @@ export async function loadRoster(db) {
   try { const j = JSON.parse(r.value); return j && typeof j === 'object' ? { ...j, _stored_at: r.updated_at } : null; } catch { return null; }
 }
 
+// 這張開放中的卡能不能推薦給這條開發串：排隊器卡（JET-*）一律不推給遊戲開發串；
+// 卡的 owner_thread 就是這條串，或 owner_thread 空白而且卡的區域在這條串的 areas 裡（名冊沒填 areas 就不推空白名下的卡）。
+export function eligibleFor(card, dev) {
+  if (/^jet-/i.test(String(card.id || ''))) return false;
+  const owner = card.owner_thread || '';
+  if (owner) return owner === dev.thread;
+  const area = String(card.area || '').toLowerCase();
+  return !!area && Array.isArray(dev.areas) && dev.areas.includes(area);
+}
+
 // 驗證並整理名冊；回 [roster, error]
 export function cleanRoster(body) {
   const src = body && typeof body.roster === 'object' && body.roster ? body.roster : body;
@@ -27,6 +37,7 @@ export function cleanRoster(body) {
     const p = { name: str(x.name, 60), thread: str(x.thread) };
     if (needLetters) p.letters = str(x.letters || '*', 40);
     if (x.role) p.role = str(x.role, 200);
+    if (!needLetters && x.areas) p.areas = (Array.isArray(x.areas) ? x.areas : String(x.areas).split(',')).map(a => str(a, 40).toLowerCase()).filter(Boolean).slice(0, 20);   // 開發串負責的區域（沒填就只推它自己名下的卡）
     return p;
   };
   const arr = (a, needLetters) => (Array.isArray(a) ? a : []).slice(0, 60).map(x => person(x, needLetters)).filter(Boolean);
@@ -105,7 +116,7 @@ export async function watchdog(env, tNow) {
       continue;
     }
     if (t - (wd.notified_at || 0) < DEV_REPEAT_S) continue;
-    const next = open.find(c => !taken.has(c.id));
+    const next = open.find(c => !taken.has(c.id) && eligibleFor(c, d));
     if (next) {
       taken.add(next.id);
       stmts.push(push(db, d.thread, next, 'watchdog_dev', null, `${d.name}：你手上沒有在做的卡已超過 ${Math.floor((t - since) / 60)} 分鐘，請領下一張：${next.id}（${String(next.title).slice(0, 60)}）`, t));
