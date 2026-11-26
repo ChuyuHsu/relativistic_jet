@@ -41,6 +41,26 @@ class SelftestMixin:
         p = e.get("priority") if e else None
         return float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) else float("inf")
 
+    DOUBLE_AFTER_TIMEOUTS = 2    # 同一張卡同一個提交連續自測逾時幾次，下一次就用兩倍核（不分片，仍受 600 秒限制）
+    DOUBLE_MAX = 2               # 同時最多幾張雙倍卡
+    DOUBLE_KEEP_SLOTS = 2        # 雙倍卡不准把一般卡的槽搶到剩不到這麼多
+
+    def _timeouts_of(self, name, sha) -> int:
+        raw = store.get_meta(self.con, "st_to:" + name)
+        try:
+            d = json.loads(raw) if raw else {}
+        except ValueError:
+            d = {}
+        return int(d.get("n", 0)) if d.get("sha") == sha else 0
+
+    def _note_selftest_result(self, name, sha, timed_out):
+        """記連續逾時次數（同一個提交）；出現逾時以外的結果、或提交換了，就歸零。"""
+        n = self._timeouts_of(name, sha) + 1 if timed_out else 0
+        store.set_meta(self.con, "st_to:" + name, json.dumps({"sha": sha, "n": n}) if n else "")
+
+    def _is_double(self, j) -> bool:
+        return j.kind == "selftest" and j.units > self.cfg.selftest_cores
+
     AGING_STEP_S = 3600     # 每等這麼久，有效優先序升一級（數字減 1），免得老卡被新來的小數字卡一直插隊
 
     def _selftest_order_key(self, r, now):
@@ -60,18 +80,27 @@ class SelftestMixin:
         now = self.clock()
         rows.sort(key=lambda r: self._selftest_order_key(r, now))
         in_use = sum(j.units for j in self.jobs.values() if j.kind == "selftest")
-        slots = sum(1 for j in self.jobs.values() if j.kind == "selftest")
+        slots = sum(2 if self._is_double(j) else 1 for j in self.jobs.values() if j.kind == "selftest")
+        doubles = sum(1 for j in self.jobs.values() if self._is_double(j))
         wanted = self.batch is not None or bool(store.list_branches(c, S.QUEUED.value))
         for r in rows:
             if self.cfg.order == "review_first" and not self._approved(r):
                 continue                                      # 先審後測：沒放行的版本不花測試資源
             if r["name"] in self._blocked or self._parent_waiting(r):
                 continue
-            if self.cfg.max_selftest_slots and slots >= self.cfg.max_selftest_slots:
+            k = 2 if self._timeouts_of(r["name"], r["head_sha"]) >= self.DOUBLE_AFTER_TIMEOUTS else 1   # 連續逾時：這次用兩倍核、佔兩個槽
+            lim = self.cfg.max_selftest_slots
+            if lim and slots >= lim:
                 break                                         # 同時自測槽數上限（硬上限，不論有沒有批測）
-            if wanted and in_use + self.cfg.selftest_cores > self.cfg.reserve_for_selftest:
+            if k == 2 and (doubles >= self.DOUBLE_MAX or (lim and lim - (slots + 2) < self.DOUBLE_KEEP_SLOTS)
+                           or (lim and slots + 2 > lim)):
+                continue                                      # 雙倍卡太多、或會把一般卡的槽搶到剩不到 2 槽：這張先排隊，讓別的先
+            if wanted and in_use + self.cfg.selftest_cores * k > self.cfg.reserve_for_selftest:
+                if k == 2: continue
                 break
-            if wanted and self.cfg.max_selftest_slots_with_batch and slots >= self.cfg.max_selftest_slots_with_batch:
+            lim2 = self.cfg.max_selftest_slots_with_batch
+            if wanted and lim2 and slots + k > lim2:
+                if k == 2: continue
                 break                                         # 有批測在等：自測槽數的硬上限
             if r["parent"]:
                 if any(x["state"] in (S.REJECTED.value, S.HALTED.value) for x in self._chain(r["name"])[:-1]):
@@ -92,7 +121,7 @@ class SelftestMixin:
                 store.apply_event(c, r["name"], Event.CONFLICT_MAIN, reject_reason=why)
                 store.add_event(c, "conflict", r["name"], "自測前" + why)
                 continue
-            if not self._launch("selftest", "selftest", res.prefixes[-1], self.cfg.selftest_cores,
+            if not self._launch("selftest", "selftest", res.prefixes[-1], self.cfg.selftest_cores * k,
                                 self.cfg.selftest_timeout_s, branch=r["name"],
                                 base_sha=self.main, head_sha=r["head_sha"]):
                 break
@@ -101,8 +130,12 @@ class SelftestMixin:
             if jr is not None:
                 store.emit(c, "selftest_started", r["name"], {"run_id": jr.run_id, "cores": ",".join(map(str, jr.cores))},
                            commit_sha=r["head_sha"])
-            in_use += self.cfg.selftest_cores
-            slots += 1
+            if k == 2:
+                store.add_info_event(c, "selftest_double", r["name"],
+                                     f"連續逾時 {self._timeouts_of(r['name'], r['head_sha'])} 次，這次用兩倍核（{self.cfg.selftest_cores * 2} 物理核）、佔兩個槽")
+                doubles += 1
+            in_use += self.cfg.selftest_cores * k
+            slots += k
 
     def _on_selftest(self, j, res):
         with store.event_ctx(j.branch, j.approved_sha, j.retest):
@@ -129,6 +162,7 @@ class SelftestMixin:
             store.apply_event(c, j.branch, Event.RETRY)
             return
         self._overload.pop(j.branch, None)
+        self._note_selftest_result(j.branch, row["head_sha"], res.status == "timeout")
         base = self._known_red("selftest", self.main)
         self._store_items(j.run_id, res, base)
         if self._red(res, base) and self._ancestor_unproven(j.branch):
