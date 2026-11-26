@@ -95,6 +95,8 @@ class SelftestMixin:
 
     def _dispatch_selftests(self):
         c = self.con
+        if self._nightly_starving():
+            return                                            # 每日完整層等核太久：先不派新自測，讓核空出來給它
         rows = [r for r in store.list_branches(c, S.PENDING.value) if not self._direct_docs(r)]
         now = self.clock()
         rows.sort(key=lambda r: self._selftest_order_key(r, now))

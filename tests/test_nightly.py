@@ -156,6 +156,16 @@ class NightlyTest(Base):
         import os
         self.assertTrue(os.path.isdir(os.path.join(self.cfg.state_dir, "nightly")))
 
+    def test_starving_nightly_pauses_new_selftests(self):
+        s = self.mk2({"at": "03:30", "cores": 2})
+        self.now[0] = at(25, 3, 31)
+        s._nightly_wait_since = self.now[0] - 3600
+        self.assertTrue(s._nightly_starving())
+        s._nightly_wait_since = self.now[0] - 60
+        self.assertFalse(s._nightly_starving())
+        s._nightly_wait_since = None
+        self.assertFalse(s._nightly_starving())
+
     def test_config_validation(self):
         with self.assertRaises(config.ConfigError):
             self.mk(workflow={"nightly": {"at": "25:00"}})

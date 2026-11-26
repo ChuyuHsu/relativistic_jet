@@ -83,6 +83,16 @@ class LoopMixin:
             return
         if self._launch("nightly", "full", main, cores, to, base_sha=main, head_sha=main):
             store.set_meta(self.con, "nightly_day", today)
+            self._nightly_wait_since = None
+        elif getattr(self, "_nightly_wait_since", None) is None:
+            self._nightly_wait_since = now                # 到點但湊不齊核：記下開始等的時間（等太久就暫停派新自測，讓核空出來）
+
+    NIGHTLY_WAIT_S = 1800
+
+    def _nightly_starving(self) -> bool:
+        """每日完整層到點後等了超過 NIGHTLY_WAIT_S 還湊不齊核：回 True，暫停派新自測，讓正在跑的自測跑完把核讓出來。"""
+        t = getattr(self, "_nightly_wait_since", None)
+        return t is not None and self.clock() - t > self.NIGHTLY_WAIT_S
 
     def _on_nightly(self, j, res):
         c = self.con
