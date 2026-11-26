@@ -57,20 +57,34 @@ class LoopMixin:
     NIGHTLY_RETRY_S = 600
 
     def _nightly_step(self):
+        """外層：只有「到點、湊不齊核、還在等」這一種情況才保留等待戳，其他任何提早離開（已跑過、不到點、已有工作在跑、缺引擎）都歸零。"""
+        if not self._nightly_step_inner():
+            self._nightly_wait_since = None
+            return
+        t = getattr(self, "_nightly_wait_since", None)
+        if t is not None and self.clock() - t > self.NIGHTLY_WAIT_S + self.NIGHTLY_GIVEUP_S:     # 暫停自測也湊不齊核（核池比要的小之類）：放棄今天
+            now = self.clock()
+            store.set_meta(self.con, "nightly_day", time.strftime("%Y-%m-%d", time.localtime(now)))
+            store.emit(self.con, "full_result", None, {"main_sha": self.main, "started_at": now, "finished_at": now, "total": 0, "red": [],
+                                                       "timeouts": [], "skipped": "未測：核不足（等了太久湊不齊完整層要的核）",
+                                                       "since_green": None}, force=True)
+            self._nightly_wait_since = None
+
+    def _nightly_step_inner(self) -> bool:
         """每日完整層（NIGHT-01）：到設定的時刻，對 main 最新版跑 full 層一次，結果送 full_result。
         一天只開一次（開跑時就記日期，換版接管時由 _adopt_runs 接手收結果）；基礎設施錯誤最多重試 NIGHTLY_INFRA_TRIES 次。
         紅了只記錄：不擋 main、不二分、不動任何分支。"""
         at = self.cfg.nightly_at
         if not at or any(j.kind == "nightly" for j in self.jobs.values()):
-            return
+            return False
         now = self.clock()
         lt = time.localtime(now)
         today = time.strftime("%Y-%m-%d", lt)
         hh, mm = int(at[:2]), int(at[3:])
         if (lt.tm_hour, lt.tm_min) < (hh, mm) or store.get_meta(self.con, "nightly_day") == today:
-            return
+            return False
         if now < float(store.get_meta(self.con, "nightly_retry_at", "0") or 0):
-            return
+            return False
         cores = self.cfg.nightly_cores or self.cfg.batch_cores
         to = self.cfg.nightly_timeout_s or self.cfg.batch_timeout_s
         main = self.main
@@ -80,14 +94,16 @@ class LoopMixin:
             store.emit(self.con, "full_result", None, {"main_sha": main, "started_at": now, "finished_at": now, "total": 0, "red": [],
                                                        "timeouts": [], "skipped": "未測：缺少 " + "、".join(os.path.basename(m) for m in missing),
                                                        "since_green": None}, force=True)
-            return
+            return False
         if self._launch("nightly", "full", main, cores, to, base_sha=main, head_sha=main):
             store.set_meta(self.con, "nightly_day", today)
-            self._nightly_wait_since = None
-        elif getattr(self, "_nightly_wait_since", None) is None:
+            return False
+        if getattr(self, "_nightly_wait_since", None) is None:
             self._nightly_wait_since = now                # 到點但湊不齊核：記下開始等的時間（等太久就暫停派新自測，讓核空出來）
+        return True
 
     NIGHTLY_WAIT_S = 1800
+    NIGHTLY_GIVEUP_S = 3600
 
     def _nightly_starving(self) -> bool:
         """每日完整層到點後等了超過 NIGHTLY_WAIT_S 還湊不齊核：回 True，暫停派新自測，讓正在跑的自測跑完把核讓出來。"""

@@ -166,6 +166,30 @@ class NightlyTest(Base):
         s._nightly_wait_since = None
         self.assertFalse(s._nightly_starving())
 
+    def test_wait_stamp_cleared_on_early_return(self):
+        s = self.mk2({"at": "03:30", "cores": 2})
+        self.now[0] = at(25, 3, 31)
+        s._nightly_wait_since = self.now[0] - 3600
+        store.set_meta(self.con, "nightly_day", time.strftime("%Y-%m-%d", time.localtime(self.now[0])))    # 今天已經跑過
+        s._nightly_step()
+        self.assertIsNone(s._nightly_wait_since)
+        self.assertFalse(s._nightly_starving())
+
+    def test_gives_up_when_cores_never_enough(self):
+        s = self.mk2({"at": "03:30", "cores": 99})                  # 核池只有 32 顆，永遠湊不齊
+        self.now[0] = at(25, 3, 31)
+        s._nightly_step()
+        self.assertIsNotNone(s._nightly_wait_since)
+        self.now[0] += s.NIGHTLY_WAIT_S + 10
+        s._nightly_step()
+        self.assertTrue(s._nightly_starving())                      # 暫停派新自測
+        self.now[0] += s.NIGHTLY_GIVEUP_S + 10
+        s._nightly_step()
+        self.assertIsNone(s._nightly_wait_since)
+        self.assertFalse(s._nightly_starving())
+        self.assertIn("核不足", self.results()[-1]["skipped"])
+        self.assertEqual(store.get_meta(self.con, "nightly_day"), time.strftime("%Y-%m-%d", time.localtime(self.now[0])))
+
     def test_config_validation(self):
         with self.assertRaises(config.ConfigError):
             self.mk(workflow={"nightly": {"at": "25:00"}})
