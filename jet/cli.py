@@ -317,7 +317,7 @@ def cmd_reap(args):
             con.close()
         except Exception:
             pass
-    left = own_leftovers(config.leftover_roots(cfg), keep)
+    left = own_leftovers(config.leftover_roots(cfg), keep, extra_roots=config.leftover_extra(cfg), pool=cfg.pool)
     for p, cwd in left:
         print(f"pid {p.pid}（群組 {p.pgrp}）cwd {cwd}")
     if args.dry_run:

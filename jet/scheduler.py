@@ -261,7 +261,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
             except (OSError, ProcessLookupError):
                 pass
         # 領頭已死、子行程（例如遊戲引擎）還活著的群組，上面靠 /proc/<領頭> 認不到：直接用「工作目錄在我們底下」認
-        left = own_leftovers(roots, keep_pgids)
+        left = own_leftovers(roots, keep_pgids, extra_roots=config.leftover_extra(self.cfg), pool=self.cfg.pool)
         if left:
             log.warning("殺掉上一代遺留的測試行程 %d 個", kill_leftovers(left))
 
@@ -276,7 +276,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
         self._orphan_at = now
         try:
             keep = self._own_pgids() | {r[0] for r in self.con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL")}
-            left = own_leftovers(config.leftover_roots(self.cfg), keep)
+            left = own_leftovers(config.leftover_roots(self.cfg), keep, extra_roots=config.leftover_extra(self.cfg), pool=self.cfg.pool)
         except Exception:
             return
         pids = sorted(p.pid for p, _ in left)

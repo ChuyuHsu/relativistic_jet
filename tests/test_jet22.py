@@ -40,17 +40,32 @@ class OrphanTest(Base):
             finally:
                 p.kill()
 
+    def test_extra_root_needs_pinned_to_pool(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as big:
+            p = _Spawn(big)                                          # cwd 在暫存碟底下、沒綁核、父行程 init：使用者自己起的，不能算孤兒
+            try:
+                allowed = sorted(os.sched_getaffinity(0))
+                self.assertNotIn(p.pid, {x.pid for x, _ in own_leftovers(a, extra_roots=[big], pool=allowed)})
+                os.sched_setaffinity(p.pid, {allowed[-1]})            # 釘在池內一顆核：才算
+                self.assertIn(p.pid, {x.pid for x, _ in own_leftovers(a, extra_roots=[big], pool=allowed)})
+                self.assertNotIn(p.pid, {x.pid for x, _ in own_leftovers(a, extra_roots=[big], pool=[])})   # 沒給池就不認額外目錄
+            finally:
+                p.kill()
+
     def test_leftover_roots_include_tmpdir(self):
         s = self.mk()
         self.cfg = config.parse({"git": {"remote": "x"}, "paths": {"state_dir": self.t.name + "/st", "work_dir": "/w"},
                                  "cores": {"pool": "0-3", "selftest_cores": 1, "batch_cores": 1, "reserve_for_selftest": 1},
                                  "commands": {"test": ["t"]}, "env": {"TMPDIR": "/big/tmp"}})
-        self.assertEqual(config.leftover_roots(self.cfg), ("/w", "/big/tmp"))
+        self.assertEqual(config.leftover_roots(self.cfg), ("/w",))
+        self.assertEqual(config.leftover_extra(self.cfg), ("/big/tmp",))
 
     def test_reports_once_and_kills_only_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             s = self.mk(env={"TMPDIR": tmp})                         # 先建排隊器（它啟動時會清上一代遺留），再生出孤兒
             p = _Spawn(tmp)
+            os.sched_setaffinity(p.pid, {sorted(os.sched_getaffinity(0))[-1]})
+            s.cfg.pool = sorted(os.sched_getaffinity(0))
             try:
                 s._orphan_step()
                 s._orphan_step()                                   # 同一組 pid 不重複送（也還沒到間隔）

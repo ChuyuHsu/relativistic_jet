@@ -235,11 +235,18 @@ def _is_init(ppid: int, proc_root: str) -> bool:
         return True            # 親已經不在：也算孤兒
 
 
-def own_leftovers(root, keep_pgids: Iterable[int] = (), proc_root: str = "/proc") -> List[Tuple[ProcInfo, str]]:
+def own_leftovers(root, keep_pgids: Iterable[int] = (), proc_root: str = "/proc", extra_roots: Iterable[str] = (),
+                  pool: Iterable[int] = ()) -> List[Tuple[ProcInfo, str]]:
     """上一代留下的自己人：工作目錄在我們的 worktree 底下、而且「原主人已經不在」的活行程。
     現役的測試（祖先鏈上還有排隊器）一律不碰：只收「這一串行程最上面那個的親是 init」的整串。
     領頭已死、子行程還在的群組也認得出來。不是這個目錄的行程一律不碰。keep_pgids＝再額外保護的群組。"""
     roots = tuple(os.path.abspath(r).rstrip(os.sep) + os.sep for r in ([root] if isinstance(root, str) else root))   # 一個或多個目錄
+    extra = tuple(os.path.abspath(r).rstrip(os.sep) + os.sep for r in extra_roots)   # 範圍大的目錄（例如整個測試暫存碟）：行程還要「釘在池內的核上」才算，別人自己起的行程不碰
+    poolset = set(pool)
+    try:
+        base = default_baseline()
+    except Exception:
+        base = set()
     keep = set(keep_pgids)
     me = os.getpid()
     cand: Dict[int, Tuple[ProcInfo, str]] = {}
@@ -263,8 +270,16 @@ def own_leftovers(root, keep_pgids: Iterable[int] = (), proc_root: str = "/proc"
             cwd = os.readlink(f"{proc_root}/{p.pid}/cwd")
         except OSError:
             continue
-        if (cwd.rstrip(os.sep) + os.sep).startswith(roots):
+        cw = cwd.rstrip(os.sep) + os.sep
+        if cw.startswith(roots):
             cand[p.pid] = (p, cwd)
+        elif extra and poolset and cw.startswith(extra):
+            try:
+                aff = set(os.sched_getaffinity(p.pid))
+            except (OSError, AttributeError):
+                continue
+            if aff and aff < base and aff & poolset:      # 刻意釘過核、而且釘在池裡
+                cand[p.pid] = (p, cwd)
     out: List[Tuple[ProcInfo, str]] = []
     for pid, (p, cwd) in cand.items():
         top, hops = p, 0

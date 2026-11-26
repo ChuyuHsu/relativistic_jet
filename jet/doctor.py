@@ -185,7 +185,7 @@ def run_checks(cfg: config.Config, remote_timeout: float = 60,
             con.close()
         except Exception:
             pass
-        left = own_leftovers(config.leftover_roots(cfg), keep)
+        left = own_leftovers(config.leftover_roots(cfg), keep, extra_roots=config.leftover_extra(cfg), pool=cfg.pool)
         if left:
             pids = "、".join(str(p.pid) for p, _ in left[:8])
             add("warn", "遺留測試行程", f"有 {len(left)} 個上一代留下的自己人行程還活著（pid {pids}…），占著核；`jet reap` 一鍵清掉")

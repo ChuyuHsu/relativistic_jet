@@ -111,12 +111,13 @@ def _job_env(v) -> tuple:
 
 
 def leftover_roots(cfg) -> tuple:
-    """上一代遺留的測試行程可能待的目錄：work_dir，加上設定檔 env 裡的 TMPDIR（測試的暫存工作目錄在那）。"""
-    roots = [cfg.work_dir]
-    for k, v in cfg.job_env:
-        if k == "TMPDIR" and v:
-            roots.append(v)
-    return tuple(roots)
+    """上一代遺留的測試行程一定待的目錄：work_dir。"""
+    return (cfg.work_dir,)
+
+
+def leftover_extra(cfg) -> tuple:
+    """範圍大的額外目錄：設定檔 env 的 TMPDIR（測試的暫存工作目錄在那）。這裡面的行程要「釘在池內核上」才算遺留。"""
+    return tuple(v for k, v in cfg.job_env if k == "TMPDIR" and v)
 
 
 def parse(d: dict) -> Config:
