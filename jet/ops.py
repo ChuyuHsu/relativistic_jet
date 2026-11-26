@@ -349,6 +349,16 @@ def op_main_red_ack(con, now, actor, args):
     return {"main_red_acked": True}
 
 
+def op_loop_reset(con, now, actor, args):
+    """結束進行中的背景二分（探測不用再跑）：清掉 loop_bisect，下一輪對最新 main 重跑一次 gate（baseline）；
+    loop_green／loop_tested 不動（新的 baseline 綠了就會更新）。誰、何時留在 audit。"""
+    raw = store.get_meta(con, "loop_bisect")
+    if not raw:
+        raise OpError("目前沒有進行中的二分")
+    store.set_meta(con, "loop_bisect", "")
+    return {"loop_bisect_cleared": True}
+
+
 def op_stop(con, now, actor, args):
     """停機或換版：主行程自己收尾後退出（不需要任何 kill）。
     mode=graceful（預設）：不再派新工作，等正在跑的批測與自測到安全點再退出；now：立刻停掉測試行程群組再退出。
@@ -377,7 +387,7 @@ ACTIONS: Dict[str, Callable] = {
     "approve": op_approve, "revoke": op_revoke, "priority": op_priority,
     "set-parent": op_set_parent, "adhoc-run": op_adhoc_run,
     "pause": op_pause, "resume": op_resume, "resolve": op_resolve, "stop": op_stop,
-    "resume-docs": op_resume_docs, "main-red-ack": op_main_red_ack,
+    "resume-docs": op_resume_docs, "main-red-ack": op_main_red_ack, "loop-reset": op_loop_reset,
 }
 
 

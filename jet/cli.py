@@ -225,6 +225,9 @@ def cmd_resume(args):
 
 
 def cmd_resume_docs(args): _post(args, "/resume-docs", {}, "已恢復純文件直接合入")
+def cmd_loop_reset(args): _post(args, "/loop-reset", {}, "已結束進行中的背景二分，下一輪對最新 main 重跑 gate")
+
+
 def cmd_main_red_ack(args): _post(args, "/main-red-ack", {}, "已確認 main 自己紅的狀況，解除不推批次的擋")
 
 
@@ -475,6 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("branch"); sp.add_argument("--layer", default="selftest", choices=ops.LAYERS); sp.add_argument("--only")
     add("pause", cmd_pause, "暫停派工")
     add("resume-docs", cmd_resume_docs, "恢復純文件直接合入（保險觸發暫停後）")
+    add("loop-reset", cmd_loop_reset, "結束進行中的背景二分，下一輪對最新 main 重跑 gate")
     add("main-red-ack", cmd_main_red_ack, "確認 main 自己紅的狀況已處理，解除不推批次的擋")
     sp = add("resume", cmd_resume, "恢復派工；給 --branch 就是恢復那條暫停的分支"); sp.add_argument("--branch")
     sp = add("resolve", cmd_resolve, "把待辦事件標成已處理"); sp.add_argument("id", type=int)
