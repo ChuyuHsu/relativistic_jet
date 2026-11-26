@@ -39,10 +39,24 @@ class SelftestMixin:
         p = e.get("priority") if e else None
         return float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) else float("inf")
 
+    AGING_STEP_S = 3600     # 每等這麼久，有效優先序升一級（數字減 1），免得老卡被新來的小數字卡一直插隊
+
+    def _selftest_order_key(self, r, now):
+        """自測派工順序：手動 prio_override（大的先）→ HOTFIX 最先 → 看板優先序（每等 60 分鐘升一級）→ 先到先排。
+        父卡規則不在這裡（子卡要等父卡綠，由 _parent_waiting／_ancestor_unproven 擋，順序不影響）。"""
+        base = self._board_prio(r["name"])
+        if base == float("inf"):
+            base = 1000.0                                  # 清單沒帶優先序：排最後，但一樣會隨等待時間往前
+        waited = max(0, int((now - (r["seen_at"] or now)) // self.AGING_STEP_S))
+        eff = base - waited
+        hot = 0 if "hotfix" in r["name"].lower() else 1
+        return (-r["prio_override"], hot, eff, r["seen_at"], r["name"])
+
     def _dispatch_selftests(self):
         c = self.con
         rows = [r for r in store.list_branches(c, S.PENDING.value) if not self._direct_docs(r)]
-        rows.sort(key=lambda r: (-r["prio_override"], self._board_prio(r["name"]), r["seen_at"], r["name"]))
+        now = self.clock()
+        rows.sort(key=lambda r: self._selftest_order_key(r, now))
         in_use = sum(j.units for j in self.jobs.values() if j.kind == "selftest")
         slots = sum(1 for j in self.jobs.values() if j.kind == "selftest")
         wanted = self.batch is not None or bool(store.list_branches(c, S.QUEUED.value))
