@@ -130,7 +130,6 @@ class LoopMixin:
     def _keep_nightly_logs(self, r):
         """把完整層的 log 與報告複製到 state_dir/nightly/<日期>/，超過保留天數的日期資料夾刪掉。失敗不影響結果。"""
         try:
-            import shutil
             root = os.path.join(self.cfg.state_dir, "nightly")
             day = os.path.join(root, time.strftime("%Y-%m-%d", time.localtime(self.clock())))
             os.makedirs(day, exist_ok=True)
