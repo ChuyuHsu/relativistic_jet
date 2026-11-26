@@ -594,6 +594,7 @@ class AuditFixes(CF):
         self.repo.push_new("a")                                    # 父卡改版（內容一樣只是換提交）
         self.appr("a")
         self.repo.broken.add((self.sha("a"), self.sha("b")))       # 子卡沒接在新版父卡上
+        self.repo.broken.add((old_a, self.sha("b")))               # 也不在父卡任何一個舊尖端上（JET-22 之後疊在父卡舊尖端的子卡不算過期，要兩個都斷才算沒接上）
         self.go(until=lambda: self.state("b") == "rejected")
         self.assertIn("重新接到父卡", self.row("b")["reject_reason"])
         self.assertNotIn("b", self.merged())
