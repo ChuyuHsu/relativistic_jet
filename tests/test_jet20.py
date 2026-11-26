@@ -48,9 +48,6 @@ class DoubleCoresTest(Base):
         self.assertEqual(self._units("c"), 2)                      # 一般卡照跑，沒被擋住
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class SlowItemsNotDoubledTest(DoubleCoresTest):
     def test_low_parallel_timeouts_do_not_double(self):
@@ -76,3 +73,7 @@ class SlowItemsNotDoubledTest(DoubleCoresTest):
         class R: cpu_s = 1200.0; duration_s = 600.0
         class J: timeout_s = 600
         self.assertEqual(self._cfg()._avg_cores(R, J), 2.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
