@@ -424,7 +424,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
         self._snapshot_step()
         if store.is_paused(self.con) or not self.resources_ok():
             return
-        if not self.draining:
+        if not self.draining and self.cfg.workflow_mode != "direct_merge":
             self._nightly_step()
         if self.cfg.workflow_mode != "direct_merge":
             self._wf_status("idle", main_sha=self.main)        # 批測閘門模式：沒有背景 loop，只回報目前模式
@@ -433,6 +433,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
                 self._loop_step()
                 self._direct_merge_step()
                 self._dispatch_selftests()
+                self._nightly_step()          # 完整層排在自測與閘門之後：只用空出來的核
                 self._idle_step()
             return
         if self.draining:

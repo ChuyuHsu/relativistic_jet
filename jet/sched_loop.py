@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -73,6 +74,13 @@ class LoopMixin:
         cores = self.cfg.nightly_cores or self.cfg.batch_cores
         to = self.cfg.nightly_timeout_s or self.cfg.batch_timeout_s
         main = self.main
+        missing = [p for p in self.cfg.nightly_require if not os.path.exists(os.path.expanduser(p))]
+        if missing:                                   # 測試引擎不在：記「未測」就結束，不產生假紅
+            store.set_meta(self.con, "nightly_day", today)
+            store.emit(self.con, "full_result", None, {"main_sha": main, "started_at": now, "finished_at": now, "total": 0, "red": [],
+                                                       "timeouts": [], "skipped": "未測：缺少 " + "、".join(os.path.basename(m) for m in missing),
+                                                       "since_green": None}, force=True)
+            return
         if self._launch("nightly", "full", main, cores, to, base_sha=main, head_sha=main):
             store.set_meta(self.con, "nightly_day", today)
 
@@ -111,8 +119,30 @@ class LoopMixin:
             red.append({"item": "完整層被取消", "summary": "完整層測試多次被取消（換版或停機），沒有完整結果"})
         if res.status == "fail" and not red and not timeouts:
             red.append({"item": "未知紅項", "summary": "測試失敗但報告沒列出紅項"})
+        since = store.get_meta(c, "nightly_green_sha", "") or None
+        if res.status == "pass" and not red and not timeouts:
+            store.set_meta(c, "nightly_green_sha", j.head_sha)
+        self._keep_nightly_logs(r)
         store.emit(c, "full_result", None, {"main_sha": j.head_sha, "started_at": r["started_at"], "finished_at": r["finished_at"] or self.clock(),
-                                            "total": total, "red": red, "timeouts": timeouts}, force=True)
+                                            "total": total, "red": red, "timeouts": timeouts, "since_green": since,
+                                            "ok": res.status == "pass"}, force=True)
+
+    def _keep_nightly_logs(self, r):
+        """把完整層的 log 與報告複製到 state_dir/nightly/<日期>/，超過保留天數的日期資料夾刪掉。失敗不影響結果。"""
+        try:
+            import shutil
+            root = os.path.join(self.cfg.state_dir, "nightly")
+            day = os.path.join(root, time.strftime("%Y-%m-%d", time.localtime(self.clock())))
+            os.makedirs(day, exist_ok=True)
+            for k in ("log_path", "report_path"):
+                if r[k] and os.path.exists(r[k]):
+                    shutil.copy2(r[k], os.path.join(day, os.path.basename(r[k])))
+            cut = time.strftime("%Y-%m-%d", time.localtime(self.clock() - self.cfg.nightly_keep_days * 86400))
+            for n in os.listdir(root):
+                if re.fullmatch(r"\d{4}-\d\d-\d\d", n) and n < cut:
+                    shutil.rmtree(os.path.join(root, n), ignore_errors=True)
+        except Exception:
+            pass
 
     def _snapshot_step(self):
         """定期送現況快照（BD-06 規格，CARD_FLOW §7 state_snapshot）：排隊器管理中的每條分支的狀態、提交、放行版本、重測次數。

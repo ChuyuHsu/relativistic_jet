@@ -200,7 +200,7 @@ def _enrich(con, r) -> Dict[str, Any]:
                         e[k] = d[k]
                 d = {"reason": d.get("detail")}
             if e["kind"] == "full_result":
-                for k in ("main_sha", "started_at", "finished_at", "total", "red", "timeouts"):
+                for k in ("main_sha", "started_at", "finished_at", "total", "red", "timeouts", "since_green", "ok", "skipped"):
                     e[k] = d.get(k)
                 d = {"reason": f"{d.get('total')} 項，紅 {len(d.get('red') or [])}、逾時 {len(d.get('timeouts') or [])}"}
             if e["kind"] == "idle_blocked":

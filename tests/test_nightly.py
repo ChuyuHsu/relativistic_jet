@@ -133,6 +133,29 @@ class NightlyTest(Base):
         self.assertIn("main_sha", p)
         self.assertIn("started_at", p)
 
+    def test_missing_required_file_is_skipped_not_red(self):
+        s = self.mk2({"at": "03:30", "cores": 2, "require": ["/nonexistent/engine"]})
+        self.now[0] = at(25, 3, 31)
+        for _ in range(4):
+            s.tick()
+        self.assertEqual(self.fulls(), [])
+        r = self.results()
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["red"], [])
+        self.assertIn("未測", r[0]["skipped"])
+
+    def test_green_sha_range_and_log_keep(self):
+        s = self.mk2({"at": "03:30", "cores": 2})
+        self.now[0] = at(25, 3, 31)
+        for _ in range(6):
+            s.tick()
+        r = self.results()
+        self.assertIsNone(r[0]["since_green"])
+        self.assertTrue(r[0]["ok"])
+        self.assertTrue(store.get_meta(self.con, "nightly_green_sha"))
+        import os
+        self.assertTrue(os.path.isdir(os.path.join(self.cfg.state_dir, "nightly")))
+
     def test_config_validation(self):
         with self.assertRaises(config.ConfigError):
             self.mk(workflow={"nightly": {"at": "25:00"}})

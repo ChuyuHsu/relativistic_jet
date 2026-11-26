@@ -65,6 +65,8 @@ class Config:
     nightly_at: str = ""              # 每日完整層時刻 "HH:MM"（本機時間）；空＝不跑。到點對 main 最新版跑 full 層一次，紅了只記錄、不擋 main、不二分
     nightly_cores: int = 0            # 完整層用的核數；0＝同 cores.batch_cores
     nightly_timeout_s: int = 0        # 完整層逾時；0＝同 limits 的批測逾時
+    nightly_require: tuple = ()       # 完整層開跑前必須存在的檔案路徑（例：測試引擎）；缺一個就不開跑、送一筆「未測」，不算紅
+    nightly_keep_days: int = 7        # 完整層的 log 與報告留在 state_dir/nightly/<日期>/ 的天數
     job_env: tuple = ()               # 排隊器啟動時加進自己環境變數的 (名, 值) 清單（來自設定檔 env；例：TMPDIR 指到大碟，測試的暫存／log 就不寫在系統碟）
     main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
@@ -178,6 +180,8 @@ def parse(d: dict) -> Config:
         nightly_at=_nightly_at((((d.get("workflow") or {}).get("nightly") or {}).get("at", ""))),
         nightly_cores=int(((d.get("workflow") or {}).get("nightly") or {}).get("cores", 0)),
         nightly_timeout_s=int(((d.get("workflow") or {}).get("nightly") or {}).get("timeout_s", 0)),
+        nightly_require=tuple(str(x) for x in (((d.get("workflow") or {}).get("nightly") or {}).get("require") or ())),
+        nightly_keep_days=int(((d.get("workflow") or {}).get("nightly") or {}).get("keep_days", 7)),
         gate_registry_dir=str(pol.get("gate_registry_dir", "")),
         timing_items=tuple(pol.get("timing_items", ("loadtime", "perf", "timeout", "card_touch", "godot_time_"))),
         relative_ratio=float(pol.get("relative_ratio", 0.0)),
