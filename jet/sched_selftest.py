@@ -32,6 +32,8 @@ class SelftestMixin:
             return False
         return all(any(re.search(p, i) for p in self.cfg.timing_items) for i in items)
 
+    RECHECK_INFRA_MAX = 2        # 同一張卡在 main 上重跑連續幾次 infra 就不再重排、直接認定自測紅
+
     def _board_prio(self, name) -> float:
         """看板清單上這張卡的優先序（數字小的先）。跟手動的 jet priority 共存：手動值（大的先）優先比，同值才看這個；
         沒有來源、清單沒帶就排最後（同為沒帶的照原順序）。"""
@@ -184,9 +186,23 @@ class SelftestMixin:
         ctx = rec["approved"]
         with store.event_ctx(j.branch, ctx[0], ctx[1]):
             if res.status in ("infra", "cancelled"):
+                cnt = getattr(self, "_rc_infra", None)
+                if cnt is None:
+                    cnt = self._rc_infra = {}
+                n = cnt.get(j.branch, 0) + (1 if res.status == "infra" else 0)
+                cnt[j.branch] = n
+                if n >= self.RECHECK_INFRA_MAX and rec.get("new_red"):
+                    # 在 main 上重跑連續出基礎設施錯誤（例如這張卡新增的店／測項 main 還不認得、整個跑不起來）：
+                    # 再重排只會一直重測一直 infra，不如認定紅是這張卡自己的（main 上確認不了＝不能拿 main 紅當理由放過）
+                    cnt.pop(j.branch, None)
+                    why = "自測紅：" + ",".join(sorted(rec["new_red"])) + "（在 main 上重跑確認連續失敗，測項在 main 跑不起來，視為這張卡自己的紅）"
+                    store.apply_event(c, j.branch, Event.SELFTEST_FAIL, reject_reason=why)
+                    store.add_event(c, "rejected", j.branch, why)
+                    return
                 self._infra_retry("recheck:" + j.branch)
                 store.apply_event(c, j.branch, Event.RETRY)
                 return
+            getattr(self, "_rc_infra", {}).pop(j.branch, None)
             if self.source is not None and tuple(ctx) != (row["approved_sha"], row["retest"]):
                 store.apply_event(c, j.branch, Event.RETRY)        # 照舊放行測的結果：丟掉，照現在的放行重測
                 return
