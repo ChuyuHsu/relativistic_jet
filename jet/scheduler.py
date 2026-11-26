@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from . import executor, store
+from . import config, executor, store
 from .batch import GREEN, RED, PENDING, ladder, judge
 from .cores import CorePool, PhysicalPool, foreign_busy as _foreign_busy, own_leftovers, kill_leftovers
 from .executor import Job
@@ -248,6 +248,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
     def _kill_leftovers(self, keep_pgids=()):
         import signal
         root = os.path.abspath(self.cfg.work_dir)
+        roots = config.leftover_roots(self.cfg)
         keep_pgids = set(keep_pgids)
         for r in self.con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL"):
             pg = r[0]
@@ -260,9 +261,37 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
             except (OSError, ProcessLookupError):
                 pass
         # 領頭已死、子行程（例如遊戲引擎）還活著的群組，上面靠 /proc/<領頭> 認不到：直接用「工作目錄在我們底下」認
-        left = own_leftovers(root, keep_pgids)
+        left = own_leftovers(roots, keep_pgids)
         if left:
             log.warning("殺掉上一代遺留的測試行程 %d 個", kill_leftovers(left))
+
+    ORPHAN_EVERY_S = 300
+
+    def _orphan_step(self):
+        """定期掃孤兒測試行程（原主人已不在、工作目錄在 work_dir 或測試暫存目錄底下、還占著核）：
+        預設只送 orphan_found 事件（內容有變才送）；cores.kill_orphans 打開才自動殺。現役工作與被接管的工作一律不碰。"""
+        now = self.clock()
+        if now - getattr(self, "_orphan_at", 0) < self.ORPHAN_EVERY_S:
+            return
+        self._orphan_at = now
+        try:
+            keep = self._own_pgids() | {r[0] for r in self.con.execute("SELECT pgid FROM runs WHERE status='running' AND pgid IS NOT NULL")}
+            left = own_leftovers(config.leftover_roots(self.cfg), keep)
+        except Exception:
+            return
+        pids = sorted(p.pid for p, _ in left)
+        if not pids:
+            self._orphan_seen = ()
+            return
+        if self.cfg.kill_orphans:
+            n = kill_leftovers(left)
+            store.add_info_event(self.con, "orphan_killed", None, f"殺掉 {n} 個孤兒測試行程（pid {pids[:20]}）")
+            self._orphan_seen = ()
+            return
+        if tuple(pids) != getattr(self, "_orphan_seen", ()):
+            self._orphan_seen = tuple(pids)
+            store.add_info_event(self.con, "orphan_found", None,
+                                 f"有 {len(pids)} 個孤兒測試行程占著核（pid {pids[:20]}）；`jet reap` 可清掉，或設 cores.kill_orphans 讓排隊器自己殺")
 
     def _recover_pushing(self, b):
         c = self.con
@@ -426,6 +455,7 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
             return
         if not self.draining and self.cfg.workflow_mode != "direct_merge":
             self._nightly_step()
+        self._orphan_step()
         if self.cfg.workflow_mode != "direct_merge":
             self._wf_status("idle", main_sha=self.main)        # 批測閘門模式：沒有背景 loop，只回報目前模式
         if self.cfg.workflow_mode == "direct_merge":

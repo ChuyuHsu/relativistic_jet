@@ -67,6 +67,7 @@ class Config:
     nightly_timeout_s: int = 0        # 完整層逾時；0＝同 limits 的批測逾時
     nightly_require: tuple = ()       # 完整層開跑前必須存在的檔案路徑（例：測試引擎）；缺一個就不開跑、送一筆「未測」，不算紅
     nightly_keep_days: int = 7        # 完整層的 log 與報告留在 state_dir/nightly/<日期>/ 的天數
+    kill_orphans: bool = False        # 定期掃到孤兒測試行程（原主人已不在、還占著核）時是否自動殺；預設只回報事件
     job_env: tuple = ()               # 排隊器啟動時加進自己環境變數的 (名, 值) 清單（來自設定檔 env；例：TMPDIR 指到大碟，測試的暫存／log 就不寫在系統碟）
     main_red_ignore: tuple = ()       # 項目名符合其中一個正規式的，乾淨 main 上也紅時只記錄、不算「main 自己紅」（不擋批次）；預設空＝全部都算
     timing_items: tuple = ("loadtime", "perf", "timeout", "card_touch", "godot_time_")   # 項目名符合其中一個正規式就算計時類
@@ -107,6 +108,15 @@ def _job_env(v) -> tuple:
     if not isinstance(v, dict) or not all(isinstance(k, str) and k and isinstance(x, str) for k, x in v.items()):
         raise ConfigError("env 必須是 {名: 字串值} 的物件")
     return tuple(sorted(v.items()))
+
+
+def leftover_roots(cfg) -> tuple:
+    """上一代遺留的測試行程可能待的目錄：work_dir，加上設定檔 env 裡的 TMPDIR（測試的暫存工作目錄在那）。"""
+    roots = [cfg.work_dir]
+    for k, v in cfg.job_env:
+        if k == "TMPDIR" and v:
+            roots.append(v)
+    return tuple(roots)
 
 
 def parse(d: dict) -> Config:
@@ -170,6 +180,7 @@ def parse(d: dict) -> Config:
         flaky_retry=pol.get("flaky_retry", True),
         main_red_ignore=tuple(pol.get("main_red_ignore", ())),
         job_env=_job_env(d.get("env")),
+        kill_orphans=bool(cores.get("kill_orphans", False)),
         workflow_mode=str((d.get("workflow") or {}).get("mode", "gate_batch")),
         loop_enabled=bool(((d.get("workflow") or {}).get("loop") or {}).get("enabled", True)),
         loop_cores=int(((d.get("workflow") or {}).get("loop") or {}).get("cores", 0)),
