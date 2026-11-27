@@ -27,6 +27,7 @@ class Config:
     batch_cores: int = 1
     reserve_for_selftest: int = 0
     core_unit: str = "logical"        # logical＝以邏輯核計；physical＝以實體核為單位配槽
+    one_thread_kinds: tuple = ()     # 這些種類的工作每顆實體核只用一條執行緒（另一條空著不給別人）：並行數減半、每個測試獨享一顆實體核，換不被兄弟執行緒拖慢；kind 例：baseline、loopprobe、nightly、point、probe、pretry
     threads: str = "all"             # physical 時：all＝實體核的兄弟執行緒都給同一個槽；one＝只給一條，另一條空著
     max_selftest_slots_with_batch: int = 0   # 有批測在跑或在等時，自測最多幾槽；0＝不另外限制
     max_selftest_slots: int = 0       # 同時自測槽數上限；0＝不限（只受核數限制）
@@ -151,6 +152,7 @@ def parse(d: dict) -> Config:
         reserve_for_selftest=cores.get("reserve_for_selftest", 0),
         core_unit=cores.get("unit", "logical"),
         threads=cores.get("threads", "all"),
+        one_thread_kinds=tuple(str(x) for x in (cores.get("one_thread_kinds") or ())),
         max_selftest_slots=cores.get("max_selftest_slots", 0),
         max_selftest_slots_with_batch=cores.get("max_selftest_slots_with_batch", 0),
         selftest_timeout_s=lim.get("selftest_timeout_s", 600),
@@ -288,6 +290,8 @@ def _validate(c: Config) -> None:
         raise ConfigError('有設 source 時 policy.order 必須是 "review_first"（清單搭先審後測）')
     if c.source is not None and c.scope != "tracked":
         raise ConfigError('有設 source 時 git.scope 必須是 "tracked"（清單裡有的才管）')
+    if any(k not in ("selftest", "recheck", "point", "probe", "pretry", "baseline", "loopprobe", "nightly") for k in c.one_thread_kinds):
+        raise ConfigError("cores.one_thread_kinds 只能列 selftest／recheck／point／probe／pretry／baseline／loopprobe／nightly")
     if c.core_unit not in ("logical", "physical") or c.threads not in ("all", "one"):
         raise ConfigError('cores.unit 要是 "logical" 或 "physical"，cores.threads 要是 "all" 或 "one"')
     if not isinstance(c.max_selftest_slots_with_batch, int) or c.max_selftest_slots_with_batch < 0:

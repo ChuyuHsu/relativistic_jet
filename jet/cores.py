@@ -100,14 +100,15 @@ class PhysicalPool(CorePool):
     def _free_units(self) -> List[Tuple[int, ...]]:
         return [u for u in self.units if not (set(u) & self.busy)]
 
-    def acquire(self, n: int) -> List[int]:
+    def acquire(self, n: int, threads: Optional[str] = None) -> List[int]:
         free = self._free_units()
         if n < 1 or len(free) < n:
             return []
+        th = threads or self.threads                  # 這次要的執行緒模式（沒指定就用池的預設）
         got: List[int] = []
         for u in free[:n]:
             self.busy.update(u)                       # 兄弟執行緒一起占住
-            got.extend(u if self.threads == "all" else u[:1])
+            got.extend(u if th == "all" else u[:1])
         return got
 
     def release(self, cores: Iterable[int]) -> None:

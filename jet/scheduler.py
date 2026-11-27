@@ -709,20 +709,20 @@ class Scheduler(SourceMixin, DropMixin, SelftestMixin, LoopMixin, DocsMixin, Bat
     def _own_pgids(self):
         return {getattr(r.handle, "pgid", None) for r in self.jobs.values()} - {None}
 
-    def _acquire(self, n: int) -> List[int]:
+    def _acquire(self, n: int, threads: Optional[str] = None) -> List[int]:
         if self._bad is None:
             self._bad = set(self.foreign_busy(self.pool.all, self._own_pgids()))
         added = self._bad - self.pool.busy
         self.pool.busy |= added
         try:
-            return self.pool.acquire(n)
+            return self.pool.acquire(n, threads) if (threads and hasattr(self.pool, "units")) else self.pool.acquire(n)
         finally:
             self.pool.busy -= added
 
     # ---------- 派工與收工 ----------
     def _launch(self, kind, layer, sha, ncores, timeout, branch=None, size=None, batch_id=None,
                 base_sha=None, head_sha=None, only=None) -> bool:
-        cores = self._acquire(ncores)
+        cores = self._acquire(ncores, "one" if kind in self.cfg.one_thread_kinds else None)
         if not cores:
             return False
         ctx = self.repo.worktree(sha)
