@@ -437,9 +437,16 @@ async function handleInner(req, env, ctx, gated = false) {
     }
     if ((c.status === 'dropped' && body.status !== 'dropped') || c.phase === 'merged' || c.status === 'merged') return json({ error: `現在是「${stageOf(c)}」，已結束的卡不能再改`, stage: stageOf(c) }, 409);
     const resend = body.status === 'dropped' && Object.keys(body).every(k => ['status', 'actor', 'superseded_by', 'discard_reason', 'note'].includes(k));
+    let deadSuccessor = false;
     if (stageOf(c) === 'waiting_parent') {   // 等待父卡：等接手卡進 main 自動結案；只允許重送放棄（回現況）
-      if (body.status === 'dropped' && resend) return json(view(c));
-      return json({ error: '等待父卡中（接手卡還沒進 main），接手卡進 main 後自動結案', stage: 'waiting_parent' }, 409);
+      if (body.status === 'dropped' && c.superseded_by) {   // 接手卡已經放棄（或不存在）：永遠等不到它進 main，允許改放棄（換接手卡或給原因），不回 409
+        const sc = await db.prepare('SELECT status FROM cards WHERE id=?').bind(c.superseded_by).first();
+        deadSuccessor = !sc || sc.status === 'dropped';
+      }
+      if (!deadSuccessor) {
+        if (body.status === 'dropped' && resend) return json(view(c));
+        return json({ error: '等待父卡中（接手卡還沒進 main），接手卡進 main 後自動結案', stage: 'waiting_parent' }, 409);
+      }
     }
     if (stageOf(c) === 'dropping' && !resend) return json({ error: '放棄待查中，等排隊器查完才能動這張卡', stage: 'dropping' }, 409);   // 待查中一律不能改（重送放棄請求除外，見下）
     const sets = [], vals = [];
@@ -474,7 +481,8 @@ async function handleInner(req, env, ctx, gated = false) {
           sets.push('status=?'); vals.push('dropped');
           dropKids = true;
         } else {
-          const sup = body.superseded_by ? String(body.superseded_by) : '', why = String(body.discard_reason ?? '').trim();
+          let sup = body.superseded_by ? String(body.superseded_by) : '', why = String(body.discard_reason ?? '').trim();
+          if (deadSuccessor && !sup && !why) why = String(c.discard_reason || '接手卡已放棄，這張卡一併放棄').trim();   // 接手卡已放棄、呼叫端沒給新接手卡也沒給原因：沿用原因
           if (!sup && !why) return json({ error: '放棄要帶 superseded_by（由哪張未放棄的卡接手）或 discard_reason（真的不要了的原因）', stage }, 400);
           if (!sup) { const bad = reasonProblem(why); if (bad) return json({ error: bad, stage }, 400); }
           if (sup) {
@@ -482,6 +490,7 @@ async function handleInner(req, env, ctx, gated = false) {
             if (!sc || sc.status === 'dropped') return json({ error: 'superseded_by 必須是另一張存在且未放棄的卡' }, 409);
           }
           sets.push('dropping_at=?', 'superseded_by=?', 'discard_reason=?', 'drop_unmerged=NULL', 'drop_checked_at=NULL'); vals.push(Math.max(now(), (c.dropping_at || 0) + 1), sup || null, why || null);   // 新的一輪：dropping_at 一定比上一輪大，上一輪晚到的結果對不上
+          if (deadSuccessor) sets.push("status='claimed'");   // 離開「等待父卡」，回到放棄待查（查驗通過後依新接手卡或原因結案）
           dropping = true;
         }
       } else return json({ error: 'status 只能改成 open（還卡）或 dropped（放棄）；認領請用 /api/claim' }, 400);

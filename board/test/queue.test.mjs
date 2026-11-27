@@ -584,6 +584,13 @@ test('放棄防呆：drop_checked——covered 才放棄，否則回原階段並
   // 過期／重複的查驗結果不動卡
   assert.equal((await (await ev(e, 'c1', { kind: 'drop_checked', unmerged: true, covered: false })).json()).stale, 1);
   assert.equal((await getCard(e, 'c1')).stage, 'waiting_parent');
+  // 接手卡已放棄：等待父卡的卡可以改放棄（不回 409），換接手卡或沿用原因
+  await call(e, 'PATCH', '/api/cards/c2', { status: 'dropped', discard_reason: '方向作廢：定案已撤掉這項功能' });
+  await ev(e, 'c2', { kind: 'drop_checked', unmerged: false, covered: true });
+  assert.equal(await stageOf(e, 'c2'), 'dropped');
+  const dead = await call(e, 'PATCH', '/api/cards/c1', { status: 'dropped' });
+  assert.notEqual(dead.status, 409);
+  assert.equal((await getCard(e, 'c1')).stage, 'dropping');
   // 只帶 discard_reason：一律放棄；有漏的通知總指揮
   await claim(e, 'd1', 'thd'); await act(e, 'd1', 'submit', { commit: SHA });
   await call(e, 'PATCH', '/api/cards/d1', { status: 'dropped', discard_reason: '方向作廢：定案已撤掉這項功能' });
